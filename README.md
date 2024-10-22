@@ -63,8 +63,8 @@ Both options can alternatively be provided in the contents of the files specifie
 By default the output log file is written in the current working folder. Examples of output logs can be found under [examples/output](examples/output/).
 
 ## Supported arguments
-| Argument          |    | Description                                           | Default value    |
-|:------------------|:---|:------------------------------------------------------|-----------------:|
+| Argument          |      | Description                                           | Default value    |
+|:------------------|:-----|:------------------------------------------------------|-----------------:|
 |<tr><td colspan="4">**INPUT**</td></tr>
 |--lfile            |-L  | Ligand pdbqt file                                     | no default       |
 |--ffile            |-M  | Grid map files descriptor fld file                    | no default       |
