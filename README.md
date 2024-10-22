@@ -6,6 +6,7 @@ OmegaDocker: an OligoMEr-supported and Gpu-Accelerated Docking program
 
 * OmegaDocker is a GPU-accelerated docking program developed for larger ligands, such as oligopeptides, oligonucleotides, and other oligomers.
 * The first version of OmegaDocker is based on AutoDock-GPU v1.5.4.
+* The first version of OmegaDocker is the work as I am working at NCHC.
 * AutoDock-GPU is developed by the [Forli lab](https://forlilab.org/) at Scripps Research.
 
 # CAUTION
