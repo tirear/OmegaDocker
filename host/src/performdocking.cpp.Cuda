@@ -1,0 +1,2305 @@
+/*
+
+OmegaDocker, a GPU-accelerated docking program developed for larger ligands, such as oligopeptides, oligonucleotides, and other oligomers.
+Copyright (C) 2024 Gao Quan-Ze. All rights reserved.
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
+
+*/
+
+
+// If defined, will set the maximum Cuda printf FIFO buffer to 8 GB (default: commented out)
+// This is not needed unless debugging Cuda kernels via printf statements
+// #define SET_CUDA_PRINTF_BUFFER
+
+#include <chrono>
+#include <vector>
+
+#include "autostop.hpp"
+#include "performdocking.h"
+#include "correct_grad_axisangle.h"
+#include "GpuData.h"
+
+#include <gmp.h> 
+#include <stdio.h>
+
+
+// CUDA kernels
+void SetKernelsGpuData(GpuData* pData);
+
+void GetKernelsGpuData(GpuData* pData);
+
+void gpu_calc_initpop(
+                      uint32_t blocks,
+                      uint32_t threadsPerBlock,
+                      bool     ligandOnly,
+                      float  **pConformations_current,
+                      float  **pEnergies_current,
+                      int    **pMem_energyToConforIndex,
+                      int    **pMem_evals_of_new_entities,
+                      float   *gFloatBuff,
+                      size_t   elemNum_gFloatBuffBase,
+                      int      run_id_init,
+                      int      run_id_end
+                     );
+
+void gpu_sum_evals(
+                   uint32_t blocks,
+                   uint32_t threadsPerBlock,
+                   int    **pMem_evals_of_new_entities,
+                   int      run_id
+                  );
+
+void gpu_gen_and_eval_newpops(
+                              uint32_t blocks,
+                              uint32_t threadsPerBlock,
+                              bool     ligandOnly,
+                              float  **pMem_conformations_current,
+                              float  **pMem_energies_current,
+                              float  **pMem_conformations_next,
+                              float  **pMem_energies_next,
+                              int    **pMem_energyToConforIndex,
+                              int    **pMem_evals_of_new_entities,
+                              float   *gFloatBuff,
+                              size_t   elemNum_gFloatBuffBase,
+                              int      run_id_init,
+                              int      run_id_end
+                             );
+
+void gpu_gradient_minAD(
+                        uint32_t blocks,
+                        uint32_t threads,
+                        bool     ligandOnly,
+                        float  **pMem_conformations_next,
+                        float  **pMem_energies_next,
+                        int    **pMem_energyToConforIndex,
+                        int    **pMem_evals_of_new_entities,
+                        float   *gFloatBuff,
+                        size_t   elemNum_gFloatBuffBase,
+                        int      run_id_init,
+                        int      run_id_end
+                       );
+
+void gpu_gradient_minAdam(
+                          uint32_t blocks,
+                          uint32_t threads,
+                          float  **pMem_conformations_next,
+                          float  **pMem_energies_next,
+                          int    **pMem_evals_of_new_entities,
+                          float   *gFloatBuff,
+                          size_t   elemNum_gFloatBuffBase,
+                          int      run_id_init,
+                          int      run_id_end
+                         );
+
+void gpu_perform_LS(
+                    uint32_t blocks,
+                    uint32_t threads,
+                    bool     lignadOnly,
+                    float  **pMem_conformations_next,
+                    float  **pMem_energies_next,
+                    int    **pMem_energyToConforIndex,
+                    int    **pMem_evals_of_new_entities,
+                    float   *gFloatBuff,
+                    size_t   elemNum_gFloatBuffBase,
+                    int      run_id_init,
+                    int      run_id_end
+                   );
+
+void cudaSortArray(unsigned long int runNum, float **pMem_energies_current, unsigned long pop_size, int **pMem_energyToConforIndex);
+
+template <typename Clock, typename Duration1, typename Duration2>
+double elapsed_seconds(
+                       std::chrono::time_point<Clock, Duration1> start,
+                       std::chrono::time_point<Clock, Duration2> end
+                      )
+{
+  using FloatingPointSeconds = std::chrono::duration<double, std::ratio<1>>;
+  return std::chrono::duration_cast<FloatingPointSeconds>(end - start).count();
+}
+
+std::vector<int> get_gpu_pool()
+{
+  int gpuCount=0;
+  cudaError_t status;
+  status = cudaGetDeviceCount(&gpuCount);
+
+  if(status != 0)
+  {
+    printf("ERROR: cudaGetDeviceCount failed. Cannot find any CUDA-Enabled device. (2)\n");
+    exit(1);
+  }
+  std::vector<int> result;
+  cudaDeviceProp props;
+  for(int i = 0; i < gpuCount; i++)
+  {
+    status = cudaGetDeviceProperties(&props,i);
+    if(status != 0)
+    {
+      printf("ERROR: cudaGetDeviceProperties failed.\n");
+      exit(1);
+    }
+    if(props.major>=3) result.push_back(i);
+  }
+  if (result.size() == 0)
+  {
+    printf("No CUDA devices with compute capability >= 3.0 found, exiting.\n");
+    cudaDeviceReset();
+    exit(-1);
+  }
+  return result;
+}
+
+void setup_gpu_for_docking(
+                           GpuData& cData,
+                           GpuTempData& tData,
+                           Liganddata *myligand_init,
+                           Dockpars   *mypars
+                          )
+{
+  int genotype_length_in_globmem = myligand_init->num_of_rotbonds + 7;
+
+  if(cData.devnum<-1) return; // device already setup
+  auto const t0 = std::chrono::steady_clock::now();
+
+  // Initialize CUDA
+  int gpuCount=0;
+  cudaError_t status = cudaGetDeviceCount(&gpuCount);
+  if(status != 0)
+  {
+    printf("ERROR: cudaGetDeviceCount failed. Cannot find any CUDA-Enabled device. (1)\n");
+    exit(1);
+  }
+  if (gpuCount == 0)
+  {
+    printf("No CUDA-capable devices found, exiting.\n");
+    cudaDeviceReset();
+    exit(-1);
+  }
+  if (cData.devnum>=gpuCount){
+    printf("Error: Requested device %i does not exist (only %i devices available).\n",cData.devnum+1,gpuCount);
+    exit(-1);
+  }
+  if (cData.devnum<0)
+    status = cudaFree(NULL); // Trick driver into creating context on current device
+  else
+    status = cudaSetDevice(cData.devnum);
+  // Now that we have a device, gather some information
+  size_t freemem, totalmem;
+  cudaDeviceProp props;
+  status = cudaGetDevice(&(cData.devnum));
+  if(status != 0)
+  {
+    printf("ERROR: cudaGetDevice failed.\n");
+    exit(1);
+  }
+  status = cudaGetDeviceProperties(&props,cData.devnum);
+  if(status != 0)
+  {
+    printf("ERROR: cudaGetDeviceProperties failed.\n");
+    exit(1);
+  }
+  tData.device_name = (char*) malloc(strlen(props.name)+32); // make sure array is large enough to hold device number text too
+  strcpy(tData.device_name, props.name);
+  if(gpuCount>1) sprintf(&tData.device_name[strlen(props.name)], " (#%d / %d)",cData.devnum+1,gpuCount);
+  printf("Cuda device:                              %s\n",tData.device_name);
+  status = cudaMemGetInfo(&freemem,&totalmem);
+  if(status != 0)
+  {
+    printf("ERROR: cudaGetMemInfo failed.\n");
+    exit(1);
+  }
+  printf("Available memory on device:               %lu MB (total: %lu MB)\n",(freemem>>20),(totalmem>>20));
+  cData.devid=cData.devnum;
+  cData.devnum=-2;
+#ifdef SET_CUDA_PRINTF_BUFFER
+  status = cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 200000000ull);
+  if(status != 0)
+  {
+    printf("ERROR: cudaDeviceSetLimit failed.\n");
+    exit(1);
+  }
+  RTERROR(status, "cudaDeviceSetLimit failed");
+#endif
+  auto const t1 = std::chrono::steady_clock::now();
+  printf("\nCUDA Setup time %fs\n", elapsed_seconds(t0 ,t1));
+
+  // Allocate kernel constant GPU memory
+  status = cudaMalloc((void**)&cData.pKerconst_interintra_atom_charges_const, myligand_init->num_of_atoms * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_atom_charges_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_interintra_atom_types_const, myligand_init->num_of_atoms * sizeof(uint32_t));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_atom_types_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_interintra_atom_types_map_const, myligand_init->num_of_atoms * sizeof(uint32_t));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_atom_types_map_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_interintra_ignore_inter_const, myligand_init->num_of_atoms * sizeof(char));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_ignore_inter_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  int max_num_of_intraE_contributors = myligand_init->num_of_atoms * myligand_init->num_of_atoms;
+  status = cudaMalloc((void**)&cData.pKerconst_intracontrib_intraE_contributors_const, 2 * max_num_of_intraE_contributors * sizeof(uint32_t));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intracontrib_intraE_contributors_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  size_t num_used_atom_types = myligand_init->num_of_atypes;
+  size_t num_used_atom_type_pairs = myligand_init->num_of_atypes * myligand_init->num_of_atypes;
+  status = cudaMalloc((void**)&cData.pKerconst_intra_atom_types_reqm_const, num_used_atom_types * sizeof(unsigned int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_atom_types_reqm_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_intra_VWpars_exp_const, num_used_atom_type_pairs * sizeof(unsigned short int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_VWpars_exp_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_intra_reqm_AB_const, num_used_atom_type_pairs * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_reqm_AB_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_intra_VWpars_AC_const, num_used_atom_type_pairs * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_VWpars_AC_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_intra_VWpars_BD_const, num_used_atom_type_pairs * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_VWpars_BD_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_intra_dspars_S_const, num_used_atom_types * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_dspars_S_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_intra_dspars_V_const, num_used_atom_types * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_dspars_V_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  int max_num_rotations;
+  if(myligand_init->num_of_atoms < NUM_OF_THREADS_PER_BLOCK)
+  {
+    max_num_rotations = NUM_OF_THREADS_PER_BLOCK * (myligand_init->num_of_rotbonds + 1);
+  }
+  else
+  {
+    max_num_rotations = myligand_init->num_of_atoms * (myligand_init->num_of_rotbonds + 1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_rotlist_rotlist_const, max_num_rotations * sizeof(int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_rotlist_rotlist_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_rotlist_rotlist_atomId_const, max_num_rotations * sizeof(int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_rotlist_rotlist_atomId_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_rotlist_rotlist_rotatableBondId_const, max_num_rotations * sizeof(int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_rotlist_rotlist_rotatableBondId_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_conform_ref_coords_const, 3 * myligand_init->num_of_atoms * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_conform_ref_coords_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_conform_rotbonds_moving_vectors_const, 3 * myligand_init->num_of_rotbonds * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_conform_rotbonds_moving_vectors_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_conform_rotbonds_unit_vectors_const, 3 * myligand_init->num_of_rotbonds * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_conform_rotbonds_unit_vectors_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+
+  // Allocate mem data
+  status = cudaMalloc((void**)&cData.pMem_angle_const, 1000 * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pMem_angle_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pMem_dependence_on_theta_const, 1000 * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pMem_dependence_on_theta_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pMem_dependence_on_rotangle_const, 1000 * sizeof(float));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pMem_dependence_on_rotangle_const: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_grads_rotbonds, 2 * myligand_init->num_of_rotbonds * sizeof(int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_grads_rotbonds: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_grads_rotbonds_atoms, max_num_rotations * sizeof(int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_grads_rotbonds_atoms: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMalloc((void**)&cData.pKerconst_grads_num_rotating_atoms_per_rotbond, myligand_init->num_of_rotbonds * sizeof(int));
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_grads_num_rotating_atoms_per_rotbond: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+
+  // Upload mem data
+  status = cudaMemcpy(cData.pMem_angle_const, angle, 1000 * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pMem_angle_const: failed to upload GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pMem_dependence_on_theta_const, dependence_on_theta, 1000 * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pMem_dependence_on_theta_const: failed to upload GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pMem_dependence_on_rotangle_const, dependence_on_rotangle, 1000 * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pMem_dependence_on_rotangle_const: failed to upload GPU memory.\n");
+    exit(1);
+  }
+
+  // Allocate temporary data - JL TODO - Are these sizes correct?
+  if(cData.preallocated_gridsize>0){
+    status = cudaMalloc((void**)&(tData.pMem_fgrids), cData.preallocated_gridsize*sizeof(float));
+    if(status != 0)
+    {
+      printf("ERROR: pMem_fgrids: failed to allocate GPU memory.\n");
+      size_t freemem, totalmem;
+      status = cudaMemGetInfo(&freemem,&totalmem);
+      if(status != 0)
+      {
+        printf("ERROR: cudaGetMemInfo failed.\n");
+        exit(1);
+      }
+      printf("          Available GPU memory: %12zu bytes\n", freemem);
+      printf("       Requested size for grid: %12zu bytes\n", cData.preallocated_gridsize*sizeof(float));
+      exit(1);
+    }
+  }
+
+  size_t size_all_runs            = mypars->num_of_runs * sizeof(float *);
+  size_t size_all_runs_intp       = mypars->num_of_runs * sizeof(int *);
+  size_t size_populations_per_run = mypars->pop_size    * genotype_length_in_globmem * sizeof(float);
+  size_t size_energies_per_run    = mypars->pop_size    * sizeof(float);
+  size_t size_evals_per_run       = mypars->pop_size    * sizeof(int);
+
+  tData.pMem_conformations1 = (float **) malloc(size_all_runs);
+  if(tData.pMem_conformations1 == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for pMem_conformations1 on main memory.\n");
+    exit(1);
+  }
+  tData.pMem_conformations2 = (float **) malloc(size_all_runs);
+  if(tData.pMem_conformations2 == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for pMem_conformations2 on main memory.\n");
+    exit(1);
+  }
+  tData.pMem_energies1 = (float **) malloc(size_all_runs);
+  if(tData.pMem_energies1 == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for pMem_energies1 on main memory.\n");
+    exit(1);
+  }
+  tData.pMem_energies2 = (float **) malloc(size_all_runs);
+  if(tData.pMem_energies2 == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for pMem_energies2 on main memory.\n");
+    exit(1);
+  }
+  tData.pMem_evals_of_new_entities = (int **) malloc(size_all_runs_intp);
+  if(tData.pMem_evals_of_new_entities == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for pMem_evals_of_new_entities on main memory.\n");
+    exit(1);
+  }
+  tData.pMem_energyToConforIndex = (int **) malloc(size_all_runs_intp);
+  if(tData.pMem_energyToConforIndex == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for pMem_energyToConforIndex on main memory.\n");
+    exit(1);
+  }
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    status = cudaMalloc((void**) &(tData.pMem_conformations1[i]), size_populations_per_run);
+    if(status != 0)
+    {
+      printf("ERROR: Cannot allocate memory for pMem_conformations1 on GPU memory.\n");
+      exit(1);
+    }
+    status = cudaMalloc((void**) &(tData.pMem_conformations2[i]), size_populations_per_run);
+    if(status != 0)
+    {
+      printf("ERROR: Cannot allocate memory for pMem_conformations2 on GPU memory.\n");
+      exit(1);
+    }
+    status = cudaMalloc((void**) &(tData.pMem_energies1[i]), size_energies_per_run);
+    if(status != 0)
+    {
+      printf("ERROR: Cannot allocate memory for pMem_energies1 on GPU memory.\n");
+      exit(1);
+    }
+    status = cudaMalloc((void**) &(tData.pMem_energies2[i]), size_energies_per_run);
+    if(status != 0)
+    {
+      printf("ERROR: Cannot allocate memory for pMem_energies2 on GPU memory.\n");
+      exit(1);
+    }
+    status = cudaMalloc((void**) &(tData.pMem_evals_of_new_entities[i]), size_evals_per_run);
+    if(status != 0)
+    {
+      printf("ERROR: Cannot allocate memory for pMem_evals_of_new_entities on GPU memory.\n");
+      exit(1);
+    }
+    status = cudaMalloc((void**) &(tData.pMem_energyToConforIndex[i]), size_evals_per_run);
+    if(status != 0)
+    {
+      printf("ERROR: Cannot allocate memory for pMem_energyToConforIndex on GPU memory.\n");
+      exit(1);
+    }
+  }
+  size_t size_evals_of_runs = mypars->num_of_runs * sizeof(int);
+#if defined (MAPPED_COPY)
+  status = cudaMallocManaged((void**)&(tData.pMem_gpu_evals_of_runs), size_evals_of_runs, cudaMemAttachGlobal);
+#else
+  status = cudaMalloc((void**)&(tData.pMem_gpu_evals_of_runs), size_evals_of_runs);
+#endif
+  if(status != 0)
+  {
+    printf("ERROR: pMem_gpu_evals_of_runs: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+#if defined (MAPPED_COPY)
+  status = cudaMallocManaged((void**)&(tData.pMem_reservedIdvNum), size_evals_of_runs, cudaMemAttachGlobal);
+#else
+  status = cudaMalloc((void**)&(tData.pMem_reservedIdvNum), size_evals_of_runs);
+#endif
+  if(status != 0)
+  {
+    printf("ERROR: pMem_reservedIdvNum: failed to allocate GPU memory.\n");
+    exit(1);
+  }
+  size_t blocksPerGridForEachEntity = mypars->pop_size * mypars->num_of_runs;
+  size_t size_prng_seeds = blocksPerGridForEachEntity * NUM_OF_THREADS_PER_BLOCK * sizeof(unsigned int);
+  status = cudaMalloc((void**)&(tData.pMem_prng_states), size_prng_seeds);
+  if(status != 0)
+  {
+    printf("ERROR: pMem_prng_states: failed to allocate GPU memory.\n");
+    size_t mf, ma;
+    cudaMemGetInfo(&mf, &ma);
+    para_printf("       GPU memory info (free/all): %16zu/%zu bytes\n", mf, ma);
+
+    printf("       Required GPU memory       : %16zu bytes\n", size_prng_seeds);
+    exit(1);
+  }
+}
+void finish_gpu_from_docking(
+                             GpuData& cData,
+                             GpuTempData& tData,
+                             Dockpars   *mypars
+                            )
+{
+  if(cData.devnum>-2) return; // device not set up
+
+  cudaError_t status;
+  // Release all CUDA objects
+  // Constant objects
+  status = cudaFree(cData.pKerconst_interintra_atom_charges_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_interintra_atom_charges_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_interintra_atom_types_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_interintra_atom_types_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_interintra_atom_types_map_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_interintra_atom_types_map_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_interintra_ignore_inter_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_interintra_ignore_inter_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intracontrib_intraE_contributors_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intracontrib_intraE_contributors_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_atom_types_reqm_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_atom_types_reqm_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_VWpars_exp_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_VWpars_exp_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_reqm_AB_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_reqm_AB_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_VWpars_AC_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_VWpars_AC_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_VWpars_BD_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_VWpars_BD_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_dspars_S_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_dspars_S_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_intra_dspars_V_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_intra_dspars_V_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_rotlist_rotlist_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_rotlist_rotlist_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_rotlist_rotlist_atomId_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_rotlist_rotlist_atomId_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_rotlist_rotlist_rotatableBondId_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_rotlist_rotlist_rotatableBondId_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_conform_ref_coords_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_conform_ref_coords_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_conform_rotbonds_moving_vectors_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_conform_rotbonds_moving_vectors_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_conform_rotbonds_unit_vectors_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_conform_rotbonds_unit_vectors_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_grads_rotbonds);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_grads_rotbonds.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_grads_rotbonds_atoms);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_grads_rotbonds_atoms.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pKerconst_grads_num_rotating_atoms_per_rotbond);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pKerconst_grads_num_rotating_atoms_per_rotbond.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pMem_angle_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pMem_angle_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pMem_dependence_on_theta_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pMem_dependence_on_theta_const.\n");
+    exit(1);
+  }
+  status = cudaFree(cData.pMem_dependence_on_rotangle_const);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing cData.pMem_dependence_on_rotangle_const.\n");
+    exit(1);
+  }
+
+  // Non-constant
+  if(tData.pMem_fgrids){
+    status = cudaFree(tData.pMem_fgrids);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing pMem_fgrids.\n");
+      exit(1);
+    }
+  }
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    status = cudaFree(tData.pMem_conformations1[i]);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing tData.pMem_conformations1.\n");
+      exit(1);
+    }
+    status = cudaFree(tData.pMem_conformations2[i]);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing tData.pMem_conformations2.\n");
+      exit(1);
+    }
+    status = cudaFree(tData.pMem_energies1[i]);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing tData.pMem_energies1.\n");
+      exit(1);
+    }
+    status = cudaFree(tData.pMem_energies2[i]);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing tData.pMem_energies2.\n");
+      exit(1);
+    }
+    status = cudaFree(tData.pMem_evals_of_new_entities[i]);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing tData.pMem_evals_of_new_entities.\n");
+      exit(1);
+    }
+    status = cudaFree(tData.pMem_energyToConforIndex[i]);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing tData.pMem_energyToConforIndex.\n");
+      exit(1);
+    }
+  }
+  free(tData.pMem_conformations1);
+  free(tData.pMem_conformations2);
+  free(tData.pMem_energies1);
+  free(tData.pMem_energies2);
+  free(tData.pMem_evals_of_new_entities);
+  free(tData.pMem_energyToConforIndex);
+  status = cudaFree(tData.pMem_gpu_evals_of_runs);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing pMem_gpu_evals_of_runs.\n");
+    exit(1);
+  }
+  status = cudaFree(tData.pMem_reservedIdvNum);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing pMem_reservedIdvNum.\n");
+    exit(1);
+  }
+  status = cudaFree(tData.pMem_prng_states);
+  if(status != 0)
+  {
+    printf("ERROR: cudaFree: error freeing pMem_prng_states.\n");
+    exit(1);
+  }
+  free(tData.device_name);
+}
+
+int docking_with_gpu(
+                     const Gridinfo*        mygrid,
+                           Dockpars*        mypars,
+                     const Liganddata*      myligand_init,
+                     const Liganddata*      myxrayligand,
+                           Profile&         profile,
+                     const int*             argc,
+                           char**           argv,
+                           SimulationState& sim_state,
+                           GpuData&         cData,
+                           GpuTempData&     tData,
+                           std::string*     output
+                    )
+/* The function performs the docking algorithm and generates the corresponding result files.
+parameter mygrid:
+    describes the grid
+    filled with get_gridinfo()
+parameter mypars:
+    describes the docking parameters
+    filled with get_commandpars()
+parameter myligand_init:
+    describes the ligands
+    filled with parse_liganddata()
+parameter myxrayligand:
+    describes the xray ligand
+    filled with get_xrayliganddata()
+parameters argc and argv:
+    are the corresponding command line arguments parameter
+*/
+{
+  int genotype_length_in_globmem = myligand_init->num_of_rotbonds + 7;
+
+  auto const t1 = std::chrono::steady_clock::now();
+  cudaError_t status = cudaSetDevice(cData.devid); // make sure we're on the correct device
+
+  Liganddata *myligand_reference;
+
+  float **cpu_init_populations;
+  float **cpu_final_populations;
+  float **cpu_state_populations;
+  int    *energyToConforIndex;
+  unsigned int* cpu_prng_seeds;
+  bool readState = mypars->readState;
+
+  size_t size_energies;
+  size_t size_energyToConforIndex;
+  size_t size_prng_seeds;
+  size_t size_evals_of_runs;
+
+  int threadsPerBlock;
+  int blocksPerGridForEachEntity;
+  int blocksPerGridForEachLSEntity = 0;
+  int blocksPerGridForEachGradMinimizerEntity = 0;
+
+  mpz_t generation_cnt;
+  mpz_init(generation_cnt);
+  int i;
+  double progress;
+
+  int curr_progress_cnt;
+  int new_progress_cnt;
+
+  clock_t clock_start_docking;
+  clock_t  clock_stop_docking;
+
+  // setting number of blocks and threads
+  threadsPerBlock = NUM_OF_THREADS_PER_BLOCK;
+  blocksPerGridForEachEntity = mypars->pop_size * mypars->num_of_runs;
+
+  // allocating CPU memory for initial populations
+  size_t size_all_runs_vec = mypars->num_of_runs * sizeof(float *);
+  size_t num_geno_populations_per_run = mypars->pop_size * genotype_length_in_globmem;
+  size_t size_populations_per_run = num_geno_populations_per_run * sizeof(float);
+  sim_state.cpu_populations = (float **) malloc(size_all_runs_vec);
+  if(sim_state.cpu_populations ==  NULL)
+  {
+    printf("ERROR: Cannnot allocate enough main memory for sim_state.cpu_populations.\n");
+    exit(1);
+  }
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    sim_state.cpu_populations[i] = (float *) calloc(num_geno_populations_per_run, sizeof(float));
+  }
+
+  size_energies            = mypars->pop_size * sizeof(float);
+  size_energyToConforIndex = mypars->pop_size * sizeof(int);
+  sim_state.cpu_energies = (float **) malloc(mypars->num_of_runs * sizeof(float *));
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    sim_state.cpu_energies[i] = (float *) malloc(size_energies);
+  }
+
+  energyToConforIndex = (int *) malloc(size_energyToConforIndex);
+  size_t size_all_runs = mypars->num_of_runs * sizeof(float *);
+  cpu_init_populations  = (float **) malloc(size_all_runs);
+  if(cpu_init_populations == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for cpu_init_populations\n");
+    exit(1);
+  }
+  cpu_final_populations = (float **) malloc(size_all_runs);
+  if(cpu_final_populations == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for cpu_final_populations\n");
+    exit(1);
+  }
+  cpu_state_populations = (float **) malloc(size_all_runs);
+  if(cpu_state_populations == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for cpu_state_populations\n");
+    exit(1);
+  }
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    cpu_init_populations[i]  = sim_state.cpu_populations[i];
+    cpu_final_populations[i] = sim_state.cpu_populations[i];
+    cpu_state_populations[i] = sim_state.cpu_populations[i];
+  }
+
+  // generating initial populations and random orientation angles of reference ligand
+  // (ligand will be moved to origo and scaled as well)
+  myligand_reference = (Liganddata *) malloc(sizeof(Liganddata));
+  if(myligand_reference == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for myligand_reference.\n");
+    exit(1);
+  }
+  LiganddataCopy(myligand_reference, myligand_init);
+  gen_initpop_and_reflig(mypars, cpu_init_populations, /*&*/myligand_reference, mygrid);
+
+  // allocating memory in CPU for pseudorandom number generator seeds and
+  // generating them (seed for each thread during GA)
+  size_prng_seeds = blocksPerGridForEachEntity * threadsPerBlock * sizeof(unsigned int);
+  cpu_prng_seeds = (unsigned int*) malloc(size_prng_seeds);
+
+  LocalRNG r(mypars->seed);
+  for (i=0; i<blocksPerGridForEachEntity*threadsPerBlock; i++)
+  {
+    cpu_prng_seeds[i] = r.random_uint();
+  }
+
+  // allocating memory in CPU for evaluation counters
+  size_evals_of_runs = mypars->num_of_runs*sizeof(int);
+  int *forZeroEvals;
+  int *forOneReservedIdvNum;
+  forZeroEvals = (int *) calloc(mypars->num_of_runs, sizeof(int));
+  forOneReservedIdvNum = (int *) calloc(mypars->num_of_runs, sizeof(int));
+  for(int i  = 0; i < mypars->num_of_runs; i++)
+  {
+    forOneReservedIdvNum[i]++;
+  }
+  if(sim_state.cpu_evals_of_runs != NULL)
+  {
+    printf("ERROR: Bug? sim_state.cpu_evals_of_runs should be NULL.");
+    exit(1);
+  }
+  sim_state.cpu_evals_of_runs = (int *) calloc(mypars->num_of_runs, sizeof(int));
+
+  // preparing the constant data fields for the GPU
+  kernelconstant_interintra*  KerConst_interintra = new kernelconstant_interintra;
+  KerConst_interintra->atom_charges_const = (float *) malloc(myligand_init->num_of_atoms * sizeof(float));
+  if(KerConst_interintra->atom_charges_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_interintra->atom_charges_const.\n");
+    exit(1);
+  }
+  KerConst_interintra->atom_types_const = (uint32_t *) malloc(myligand_init->num_of_atoms * sizeof(uint32_t));
+  if(KerConst_interintra->atom_types_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_interintra->atom_types_const.\n");
+    exit(1);
+  }
+  KerConst_interintra->atom_types_map_const = (uint32_t *) malloc(myligand_init->num_of_atoms * sizeof(uint32_t));
+  if(KerConst_interintra->atom_types_map_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_interintra->atom_types_map_const.\n");
+    exit(1);
+  }
+  KerConst_interintra->ignore_inter_const = (char *) malloc(myligand_init->num_of_atoms * sizeof(char));
+  if(KerConst_interintra->ignore_inter_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_interintra->ignore_inter_const.\n");
+    exit(1);
+  }
+  kernelconstant_intracontrib*  KerConst_intracontrib = new kernelconstant_intracontrib;
+  int max_num_of_intraE_contributors = myligand_init->num_of_atoms * myligand_init->num_of_atoms;
+  KerConst_intracontrib->intraE_contributors_const = (uint32_t *) malloc(2 * max_num_of_intraE_contributors * sizeof(uint32_t));
+  if(KerConst_intracontrib->intraE_contributors_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intracontrib->intraE_contributors_const.\n");
+    exit(1);
+  }
+  kernelconstant_intra*    KerConst_intra = new kernelconstant_intra;
+  size_t num_used_atom_types = myligand_init->num_of_atypes;
+  size_t num_used_atom_type_pairs = myligand_init->num_of_atypes * myligand_init->num_of_atypes;
+  KerConst_intra->atom_types_reqm_const = (unsigned int *) malloc(num_used_atom_types * sizeof(unsigned int));
+  if(KerConst_intra->atom_types_reqm_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->atom_types_reqm_const.\n");
+    exit(1);
+  }
+  KerConst_intra->VWpars_exp_const = (unsigned short int *) malloc(num_used_atom_type_pairs * sizeof(unsigned short int));
+  if(KerConst_intra->VWpars_exp_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->VWpars_exp_const.\n");
+    exit(1);
+  }
+  KerConst_intra->reqm_AB_const = (float *) malloc(num_used_atom_type_pairs * sizeof(float));
+  if(KerConst_intra->reqm_AB_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->reqm_AB_const.\n");
+    exit(1);
+  }
+  KerConst_intra->VWpars_AC_const   = (float *) malloc(num_used_atom_type_pairs * sizeof(float));
+  if(KerConst_intra->VWpars_AC_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->VWpars_AC_const.\n");
+    exit(1);
+  }
+  KerConst_intra->VWpars_BD_const = (float *) malloc(num_used_atom_type_pairs * sizeof(float));
+  if(KerConst_intra->VWpars_BD_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->VWpars_BD_const.\n");
+    exit(1);
+  }
+  KerConst_intra->dspars_S_const = (float *) malloc(num_used_atom_types * sizeof(float));
+  if(KerConst_intra->dspars_S_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->dspars_S_const.\n");
+    exit(1);
+  }
+  KerConst_intra->dspars_V_const = (float *) malloc(num_used_atom_types * sizeof(float));
+  if(KerConst_intra->dspars_V_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_intra->dspars_V_const.\n");
+    exit(1);
+  }
+  kernelconstant_rotlist*    KerConst_rotlist = new kernelconstant_rotlist;
+  int max_num_rotations;
+  if(myligand_init->num_of_atoms < NUM_OF_THREADS_PER_BLOCK)
+  {
+    max_num_rotations = NUM_OF_THREADS_PER_BLOCK * (myligand_init->num_of_rotbonds + 1);
+  }
+  else
+  {
+    max_num_rotations = myligand_init->num_of_atoms * (myligand_init->num_of_rotbonds + 1);
+  }
+  KerConst_rotlist->rotlist_const = (int *) malloc(max_num_rotations * sizeof(int));
+  if(KerConst_rotlist->rotlist_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_rotlist->rotlist_const.\n");
+    exit(1);
+  }
+  KerConst_rotlist->rotlist_atomId = (int *) malloc(max_num_rotations * sizeof(int));
+  if(KerConst_rotlist->rotlist_atomId == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_rotlist->rotlist_atomId.\n");
+    exit(1);
+  }
+  KerConst_rotlist->rotlist_rotatableBondId = (int *) malloc(max_num_rotations * sizeof(int));
+  if(KerConst_rotlist->rotlist_rotatableBondId == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_rotlist->rotlist_rotatableBondId.\n");
+    exit(1);
+  }
+  kernelconstant_conform*    KerConst_conform = new kernelconstant_conform;
+  KerConst_conform->ref_coords_const = (float *) malloc(3 * myligand_init->num_of_atoms * sizeof(float));
+  if(KerConst_conform->ref_coords_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_conform->ref_coords_const.\n");
+    exit(1);
+  }
+  KerConst_conform->rotbonds_moving_vectors_const = (float *) malloc(3 * myligand_init->num_of_rotbonds * sizeof(float));
+  if(KerConst_conform->rotbonds_moving_vectors_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_conform->rotbonds_moving_vectors_const.\n");
+    exit(1);
+  }
+  KerConst_conform->rotbonds_unit_vectors_const = (float *) malloc(3 * myligand_init->num_of_rotbonds * sizeof(float));
+  if(KerConst_conform->rotbonds_unit_vectors_const == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_conform->rotbonds_unit_vectors_const.\n");
+    exit(1);
+  }
+  kernelconstant_grads*    KerConst_grads = new kernelconstant_grads;
+  KerConst_grads->rotbonds = (int *) malloc(2 * myligand_init->num_of_rotbonds * sizeof(int));
+  if(KerConst_grads->rotbonds == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_grads->rotbonds.\n");
+    exit(1);
+  }
+  KerConst_grads->rotbonds_atoms = (int *) malloc(max_num_rotations * sizeof(int));
+  if(KerConst_grads->rotbonds_atoms == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_grads->rotbonds_atoms.\n");
+    exit(1);
+  }
+  KerConst_grads->num_rotating_atoms_per_rotbond = (int *) malloc(myligand_init->num_of_rotbonds * sizeof(int));
+  if(KerConst_grads->num_rotating_atoms_per_rotbond == NULL)
+  {
+    printf("ERROR: Cannot allocate memory for KerConst_grads->num_rotating_atoms_per_rotbond.\n");
+    exit(1);
+  }
+
+  if (prepare_const_fields_for_gpu(/*&*/myligand_reference, mypars,
+                                   KerConst_interintra,
+                                   KerConst_intracontrib,
+                                   KerConst_intra,
+                                   KerConst_rotlist,
+                                   KerConst_conform,
+                                   KerConst_grads) == 1) {
+    LiganddataFree(myligand_reference);
+    return 1;
+  }
+  // Upload kernel constant data - JL FIXME - Can these be moved once?
+  status = cudaMemcpy(cData.pKerconst_interintra_atom_charges_const, KerConst_interintra->atom_charges_const, myligand_init->num_of_atoms * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_atom_charges_const: failed to upload to GPU memory.\n");
+    printf("%d/%d\n",status, myligand_init->num_of_atoms);
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_interintra_atom_types_const, KerConst_interintra->atom_types_const, myligand_init->num_of_atoms * sizeof(uint32_t), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_atom_types_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_interintra_atom_types_map_const, KerConst_interintra->atom_types_map_const, myligand_init->num_of_atoms * sizeof(uint32_t), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_atom_types_map_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_interintra_ignore_inter_const, KerConst_interintra->ignore_inter_const, myligand_init->num_of_atoms * sizeof(char), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_interintra_ignore_inter_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intracontrib_intraE_contributors_const, KerConst_intracontrib->intraE_contributors_const, 2 * max_num_of_intraE_contributors * sizeof(uint32_t), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intracontrib_intraE_contributors_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_atom_types_reqm_const, KerConst_intra->atom_types_reqm_const, num_used_atom_types * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_atom_types_reqm_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_VWpars_exp_const, KerConst_intra->VWpars_exp_const, num_used_atom_type_pairs * sizeof(unsigned short int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_VWpars_exp_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_reqm_AB_const, KerConst_intra->reqm_AB_const, num_used_atom_type_pairs * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_reqm_AB_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_VWpars_AC_const, KerConst_intra->VWpars_AC_const, num_used_atom_type_pairs * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_VWpars_AC_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_VWpars_BD_const, KerConst_intra->VWpars_BD_const, num_used_atom_type_pairs * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_VWpars_BD_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_dspars_S_const, KerConst_intra->dspars_S_const, num_used_atom_types * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_dspars_S_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_intra_dspars_V_const, KerConst_intra->dspars_V_const, num_used_atom_types * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_intra_dspars_V_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_rotlist_rotlist_const, KerConst_rotlist->rotlist_const, max_num_rotations * sizeof(int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_rotlist_rotlist_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_rotlist_rotlist_atomId_const, KerConst_rotlist->rotlist_atomId, max_num_rotations * sizeof(int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_rotlist_rotlist_atomId_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_rotlist_rotlist_rotatableBondId_const, KerConst_rotlist->rotlist_rotatableBondId, max_num_rotations * sizeof(int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_rotlist_rotlist_rotatableBondId_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_conform_ref_coords_const, KerConst_conform->ref_coords_const, 3 * myligand_init->num_of_atoms * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_conform_ref_coords_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_conform_rotbonds_moving_vectors_const, KerConst_conform->rotbonds_moving_vectors_const, 3 * myligand_init->num_of_rotbonds * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_conform_rotbonds_moving_vectors_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_conform_rotbonds_unit_vectors_const, KerConst_conform->rotbonds_unit_vectors_const, 3 * myligand_init->num_of_rotbonds * sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_conform_rotbonds_unit_vectors_const: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_grads_rotbonds, KerConst_grads->rotbonds, 2 * myligand_init->num_of_rotbonds * sizeof(int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_grads_rotbonds: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_grads_rotbonds_atoms, KerConst_grads->rotbonds_atoms, max_num_rotations * sizeof(int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_grads_rotbonds_atoms: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(cData.pKerconst_grads_num_rotating_atoms_per_rotbond, KerConst_grads->num_rotating_atoms_per_rotbond, myligand_init->num_of_rotbonds * sizeof(int), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: cData.pKerconst_grads_num_rotating_atoms_per_rotbond: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+
+  // allocating GPU memory for grids, populations, energies,
+  // evaluation counters and random number generator states
+  if(cData.preallocated_gridsize==0){
+    status = cudaMalloc((void**)&(tData.pMem_fgrids), mygrid->grids.size()*sizeof(float));
+    if(status != 0)
+    {
+      printf("ERROR: pMem_fgrids: failed to allocate GPU memory.\n");
+      size_t freemem, totalmem;
+      status = cudaMemGetInfo(&freemem,&totalmem);
+      if(status != 0)
+      {
+        printf("ERROR: cudaGetMemInfo failed.\n");
+        exit(1);
+      }
+      printf("          Available GPU memory: %12zu bytes\n", freemem);
+      printf("       Requested size for grid: %12zu bytes\n", mygrid->grids.size()*sizeof(float));
+      exit(1);
+    }
+  }
+  // Flippable pointers
+  float **pMem_conformations_current = tData.pMem_conformations1;
+  float **pMem_conformations_next = tData.pMem_conformations2;
+  float **pMem_energies_current = tData.pMem_energies1;
+  float **pMem_energies_next = tData.pMem_energies2;
+
+  // Set constant pointers
+  cData.pMem_fgrids = tData.pMem_fgrids;
+  cData.pMem_evals_of_new_entities = tData.pMem_evals_of_new_entities;
+  cData.pMem_gpu_evals_of_runs = tData.pMem_gpu_evals_of_runs;
+  cData.pMem_reservedIdvNum = tData.pMem_reservedIdvNum;
+  cData.pMem_prng_states = tData.pMem_prng_states;
+
+  // Set CUDA constants
+  cData.warpmask = 31;
+  cData.warpbits = 5;
+
+  // Upload data
+  status = cudaMemcpy(tData.pMem_fgrids, mygrid->grids.data(), mygrid->grids.size()*sizeof(float), cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: pMem_fgrids: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    status = cudaMemcpy(pMem_conformations_current[i], cpu_init_populations[i], size_populations_per_run, cudaMemcpyHostToDevice);
+    if(status != 0)
+    {
+      printf("ERROR: pMem_conformations_current: failed to upload to GPU memory.\n");
+      exit(1);
+    }
+  }
+  status = cudaMemcpy(tData.pMem_gpu_evals_of_runs, sim_state.cpu_evals_of_runs, size_evals_of_runs, cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: pMem_gpu_evals_of_runs: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  status = cudaMemcpy(tData.pMem_prng_states, cpu_prng_seeds, size_prng_seeds, cudaMemcpyHostToDevice);
+  if(status != 0)
+  {
+    printf("ERROR: pMem_prng_states: failed to upload to GPU memory.\n");
+    exit(1);
+  }
+  //preparing parameter struct
+  cData.dockpars.num_of_atoms                 = myligand_reference->num_of_atoms;
+  cData.dockpars.true_ligand_atoms            = ((int) myligand_reference->true_ligand_atoms);
+  cData.dockpars.num_of_atypes                = myligand_reference->num_of_atypes;
+  cData.dockpars.num_of_map_atypes            = mygrid->num_of_map_atypes;
+  cData.dockpars.num_of_intraE_contributors   = ((int) myligand_reference->num_of_intraE_contributors);
+  cData.dockpars.gridsize_x                   = mygrid->size_xyz[0];
+  cData.dockpars.gridsize_y                   = mygrid->size_xyz[1];
+  cData.dockpars.gridsize_z                   = mygrid->size_xyz[2];
+  cData.dockpars.gridsize_x_times_y           = cData.dockpars.gridsize_x * cData.dockpars.gridsize_y;
+  cData.dockpars.gridsize_x_times_y_times_z   = cData.dockpars.gridsize_x * cData.dockpars.gridsize_y * cData.dockpars.gridsize_z;
+  cData.dockpars.grid_spacing                 = ((float) mygrid->spacing);
+  cData.dockpars.rotbondlist_length           = ((int) NUM_OF_THREADS_PER_BLOCK*(myligand_reference->num_of_rotcyc));
+  cData.dockpars.coeff_elec                   = ((float) mypars->coeffs.scaled_AD4_coeff_elec);
+  cData.dockpars.elec_min_distance            = ((float) mypars->elec_min_distance);
+  cData.dockpars.coeff_desolv                 = ((float) mypars->coeffs.AD4_coeff_desolv);
+  cData.dockpars.pop_size                     = mypars->pop_size;
+  cData.dockpars.num_of_genes                 = myligand_reference->num_of_rotbonds + 6;
+  // Notice: dockpars.tournament_rate, dockpars.crossover_rate, dockpars.mutation_rate
+  // were scaled down to [0,1] in host to reduce number of operations in device
+  cData.dockpars.tournament_rate              = mypars->tournament_rate/100.0f;
+  cData.dockpars.crossover_rate               = mypars->crossover_rate/100.0f;
+  cData.dockpars.mutation_rate                = mypars->mutation_rate/100.f;
+  cData.dockpars.abs_max_dang                 = mypars->abs_max_dang;
+  cData.dockpars.abs_max_dmov                 = mypars->abs_max_dmov;
+  cData.dockpars.qasp                         = mypars->qasp;
+  cData.dockpars.smooth                       = mypars->smooth;
+  cData.dockpars.lsearch_rate                 = mypars->lsearch_rate;
+  cData.dockpars.adam_beta1                   = mypars->adam_beta1;
+  cData.dockpars.adam_beta2                   = mypars->adam_beta2;
+  cData.dockpars.adam_epsilon                 = mypars->adam_epsilon;
+  cData.dockpars.num_of_runs       = mypars->num_of_runs;
+  cData.dockpars.miniCoorOut       = mypars->miniCoorOut;
+  cData.dockpars.negaLigaStepSize  = -mypars->ligaStepSize;
+  cData.dockpars.negaCompStepSize  = -mypars->compStepSize;
+  cData.dockpars.ligaRhoLimit      = mypars->ligaRhoLimit;
+  cData.dockpars.compRhoLimit      = mypars->compRhoLimit;
+  cData.dockpars.collRhoLimit      = mypars->collRhoLimit;
+  cData.dockpars.collDistance      = mypars->collDistance;
+  cData.dockpars.alivePopNum       = (int) ((1.0f - mypars->rebornRatio) * mypars->pop_size);
+  cData.dockpars.miniOnly          = mypars->miniOnly;
+  cData.dockpars.addonEng          = mypars->addonEng;
+  cData.dockpars.maxReservedIdvNum = (int) (mypars->lowEngNumRatio * mypars->pop_size);
+  cData.dockpars.convergedThre     = mypars->convergedThre;
+  cData.dockpars.topN4rescore      = mypars->topN4rescore;
+  if(cData.dockpars.alivePopNum == 0)
+  {
+    cData.dockpars.alivePopNum++;
+  }
+
+  if (cData.dockpars.lsearch_rate != 0.0f)
+  {
+    cData.dockpars.num_of_lsentities        = (unsigned int) (mypars->lsearch_rate/100.0*mypars->pop_size + 0.5);
+    cData.dockpars.rho_lower_bound          = mypars->rho_lower_bound;
+    cData.dockpars.base_dmov_mul_sqrt3      = mypars->base_dmov_mul_sqrt3;
+    cData.dockpars.base_dang_mul_sqrt3      = mypars->base_dang_mul_sqrt3;
+    cData.dockpars.cons_limit               = (unsigned int) mypars->cons_limit;
+    cData.dockpars.max_num_of_iters         = (unsigned int) mypars->max_num_of_iters;
+
+    // The number of entities that undergo Solis-Wets minimization,
+    blocksPerGridForEachLSEntity = cData.dockpars.num_of_lsentities * mypars->num_of_runs;
+
+    // The number of entities that undergo any gradient-based minimization,
+    // by default, it is the same as the number of entities that undergo the Solis-Wets minimizer
+    blocksPerGridForEachGradMinimizerEntity = cData.dockpars.num_of_lsentities * mypars->num_of_runs;
+
+    // Enable only for debugging.
+    // Only one entity per reach run, undergoes gradient minimization
+    //blocksPerGridForEachGradMinimizerEntity = mypars->num_of_runs;
+  }
+
+  mpz_t min_as_evals;
+  mpz_init(min_as_evals);
+  if(mypars->use_heuristics){
+    mpz_t heur_evals;
+    mpz_t tmpMpz;
+    char *evals_str;
+
+    mpz_init(heur_evals);
+    mpz_init(tmpMpz);
+    if(strcmp(mypars->ls_method,"sw")==0){
+      mpz_ui_pow_ui(tmpMpz, 2, ((unsigned long) ceil(1.3 * myligand_init->num_of_rotbonds)) + 4);
+      mpz_mul_ui(heur_evals, tmpMpz, 1000);
+    } else{
+      if(strcmp(mypars->ls_method,"ad")==0){
+        mpz_ui_pow_ui(tmpMpz, 2, ceil(0.3 * myligand_init->num_of_rotbonds));
+        mpz_mul_ui(heur_evals, tmpMpz, 64000);
+      } else{
+        para_printf("\nError: LS method \"%s\" is not supported by heuristics.\n       Please choose Solis-Wets (sw), Adadelta (ad),\n       or switch off the heuristics.\n",mypars->ls_method);
+        exit(-1);
+      }
+    }
+    // e*hm/(hm+e) = 0.95*e => hm/(hm+e) = 0.95
+    // => 0.95*hm + 0.95*e = hm => 0.95*e = 0.05 * hm
+    // => e = 1/19*hm
+    // at hm = 50 M => e0 = 2.63 M where e becomes less than 95% (about 11 torsions)
+    if(mpz_cmp_ui(heur_evals, 500000) < 0)
+    {
+      mpz_set_ui(heur_evals, 500000);
+    }
+    mpz_set(tmpMpz, heur_evals);
+    mpz_mul_ui(heur_evals, tmpMpz, 50);
+    mpz_set(tmpMpz, heur_evals);
+    mpz_fdiv_q_ui(heur_evals, tmpMpz, (unsigned long) mypars->num_of_runs);
+
+    para_printf("    Using heuristics:\n");
+    evals_str = mpz_get_str(NULL, 10, heur_evals);
+    para_printf("      The uncapped heuristics estimate is:\n        %s evals.\n", evals_str);
+    free(evals_str);
+
+    if(mpz_cmp_si(mypars->heuristics_max, 0) > 0)
+    {
+      mpz_set(mypars->num_of_energy_evals, mypars->heuristics_max);
+    }
+    mpz_set(min_as_evals, mypars->num_of_energy_evals);
+    evals_str = mpz_get_str(NULL, 10, mypars->num_of_energy_evals);
+    para_printf("      The number of evaluations set to\n        %s evals.\n", evals_str);
+    free(evals_str);
+    mpf_t tempMpf;
+    mpf_t cap_fraction;
+
+    mpf_init(cap_fraction);
+
+
+  }
+  char method_chosen[64]; // 64 chars will be enough for this message as mypars->ls_method is 4 chars at the longest
+  if(strcmp(mypars->ls_method, "sw") == 0){
+    strcpy(method_chosen,"Solis-Wets (sw)");
+  }
+  else if(strcmp(mypars->ls_method, "ad") == 0){
+    strcpy(method_chosen,"ADADELTA (ad)");
+  }
+  else if(strcmp(mypars->ls_method, "adam") == 0){
+    strcpy(method_chosen,"ADAM (adam)");
+  }
+  else{
+    para_printf("\nError: LS method %s is not (yet) supported in the Cuda version.\n",mypars->ls_method);
+    exit(-1);
+  }
+  para_printf("    Local-search chosen method is: %s\n", (cData.dockpars.lsearch_rate == 0.0f)? "GA" : method_chosen);
+
+  if((mpz_cmp_si(mypars->initial_sw_generations, 0) > 0) && (strcmp(mypars->ls_method, "sw") != 0))
+    para_printf("    Using Solis-Wets (sw) for the first %d generations.\n",mypars->initial_sw_generations);
+
+  // Get profile for timing
+  profile.adadelta=(strcmp(mypars->ls_method, "ad")==0);
+  mpz_set(profile.n_evals, mypars->num_of_energy_evals);
+  profile.num_atoms = myligand_reference->num_of_atoms;
+  profile.num_rotbonds = myligand_init->num_of_rotbonds;
+
+  clock_start_docking = clock();
+  SetKernelsGpuData(&cData);
+#ifdef DOCK_DEBUG
+  para_printf("\n");
+  // Main while-loop iterarion counter
+  unsigned int ite_cnt = 0;
+#endif
+
+  // Kernel1
+  uint32_t kernel1_gxsize = blocksPerGridForEachEntity; // blocksPerGridForEachEntity = mypars->pop_size * mypars->num_of_runs;
+  uint32_t kernel1_lxsize = threadsPerBlock;
+#ifdef DOCK_DEBUG
+  para_printf("%-25s %10s %8u %10s %4u\n", "K_INIT", "gSize: ", kernel1_gxsize, "lSize: ", kernel1_lxsize); fflush(stdout);
+#endif
+  // End of Kernel1
+  
+  // Kernel2
+  uint32_t kernel2_gxsize = 1;
+  uint32_t kernel2_lxsize = threadsPerBlock;
+#ifdef DOCK_DEBUG
+  para_printf("%-25s %10s %8u %10s %4u\n", "K_EVAL", "gSize: ", kernel2_gxsize, "lSize: ",  kernel2_lxsize); fflush(stdout);
+#endif
+  // End of Kernel2
+  
+  // Kernel4
+  uint32_t kernel4_gxsize = blocksPerGridForEachEntity;
+  uint32_t kernel4_lxsize = threadsPerBlock;
+#ifdef DOCK_DEBUG
+  para_printf("%-25s %10s %8u %10s %4u\n", "K_GA_GENERATION", "gSize: ",  kernel4_gxsize, "lSize: ", kernel4_lxsize); fflush(stdout);
+#endif
+  // End of Kernel4
+  
+  uint32_t kernel3_gxsize = 0;
+  uint32_t kernel3_lxsize = threadsPerBlock;
+  uint32_t kernel7_gxsize = 0;
+  uint32_t kernel7_lxsize = threadsPerBlock;
+  uint32_t kernel8_gxsize = 0;
+  uint32_t kernel8_lxsize = threadsPerBlock;
+  if (cData.dockpars.lsearch_rate != 0.0f) {
+
+    if ((strcmp(mypars->ls_method, "sw") == 0) || (mpz_cmp_si(mypars->initial_sw_generations, 0) > 0)) {
+      // Kernel3
+      kernel3_gxsize = blocksPerGridForEachLSEntity;
+      #ifdef DOCK_DEBUG
+      para_printf("%-25s %10s %8u %10s %4u\n", "K_LS_SOLISWETS", "gSize: ", kernel3_gxsize, "lSize: ", kernel3_lxsize); fflush(stdout);
+      #endif
+      // End of Kernel3
+    }
+/* SD and Fire are not currently supported by the Cuda version
+    if (strcmp(mypars->ls_method, "sd") == 0) {
+      // Kernel5
+      kernel5_gxsize = blocksPerGridForEachGradMinimizerEntity;
+      #ifdef DOCK_DEBUG
+      para_printf("%-25s %10s %8u %10s %4u\n", "K_LS_GRAD_SDESCENT", "gSize: ", kernel5_gxsize, "lSize: ", kernel5_lxsize); fflush(stdout);
+      #endif
+      // End of Kernel5
+    }
+    if (strcmp(mypars->ls_method, "fire") == 0) {
+      // Kernel6
+      kernel6_gxsize = blocksPerGridForEachGradMinimizerEntity;
+      #ifdef DOCK_DEBUG
+      para_printf("%-25s %10s %8u %10s %4u\n", "K_LS_GRAD_FIRE", "gSize: ", kernel6_gxsize, "lSize: ", kernel6_lxsize); fflush(stdout);
+      #endif
+      // End of Kernel6
+    }
+*/
+    if (strcmp(mypars->ls_method, "ad") == 0) {
+      // Kernel7
+      kernel7_gxsize = blocksPerGridForEachGradMinimizerEntity;
+      #ifdef DOCK_DEBUG
+      para_printf("%-25s %10s %8u %10s %4u\n", "K_LS_GRAD_ADADELTA", "gSize: ", kernel7_gxsize, "lSize: ", kernel7_lxsize); fflush(stdout);
+      #endif
+      // End of Kernel7
+    }
+    if (strcmp(mypars->ls_method, "adam") == 0) {
+      // Kernel8
+      kernel8_gxsize = blocksPerGridForEachGradMinimizerEntity;
+      #ifdef DOCK_DEBUG
+      para_printf("%-25s %10s %8u %10s %4u\n", "K_LS_GRAD_ADADELTA", "gSize: ", kernel7_gxsize, "lSize: ", kernel7_lxsize); fflush(stdout);
+      #endif
+      // End of Kernel8
+    }
+  } // End if (dockpars.lsearch_rate != 0.0f)
+
+  size_t mf, ma;
+  cudaMemGetInfo(&mf, &ma);
+  para_printf("\n    GPU memory info (free/all):             %16zu/%zu bytes\n", mf, ma);
+  size_t elemNum_gFloatBuffBase = 0;
+  size_t size_gFloatBuffBase = 0;
+  int run_window = 0;
+  size_t size_gFloatBuff = 0;
+  int actual_genotype_length = myligand_init->num_of_rotbonds + 6;
+  if(myligand_init->num_of_atoms < NUM_OF_THREADS_PER_BLOCK)
+  {
+    elemNum_gFloatBuffBase = (6 * NUM_OF_THREADS_PER_BLOCK + 5 * actual_genotype_length) * cData.dockpars.num_of_lsentities;
+  }
+  else
+  {
+    elemNum_gFloatBuffBase = (6 * myligand_init->num_of_atoms + 5 * actual_genotype_length) * cData.dockpars.num_of_lsentities;
+  }
+  size_gFloatBuffBase = elemNum_gFloatBuffBase * sizeof(float);
+  para_printf("    GPU memory required for    1 run of GA: %16zu bytes\n", size_gFloatBuffBase);
+  run_window = (int) (mf / size_gFloatBuffBase);
+  if(run_window <= 0)
+  {
+    para_printf("ERROR: GPU memory: free: %zu, total: %zu, required: %zu\n", mf, ma, size_gFloatBuffBase);
+    exit(1);
+  }
+  run_window = 1; // force run_window = 1 from v.0.17
+  if(mypars->num_of_runs < run_window)
+  {
+    run_window = mypars->num_of_runs;
+  }
+  size_gFloatBuff = ((size_t) run_window) * size_gFloatBuffBase;
+  status = cudaMalloc((void**) &(tData.gFloatBuff), size_gFloatBuff);
+  if(status)
+  {
+    para_printf("\ncudaError code: %d\n size_gFloatBuff: %zu\ngFloatBuff: failed to allocate GPU memory.\n", status, size_gFloatBuff);fflush(stdout);
+    size_t mf, ma;
+    cudaMemGetInfo(&mf, &ma);
+    para_printf("free: %zu, total: %zu, required: %zu\n", mf, ma, size_gFloatBuffBase);
+    exit(1);
+  }
+
+  // Kernel1
+  #ifdef DOCK_DEBUG
+    para_printf("\nExecution starts:\n\n");
+    para_printf("%-25s", "\tK_INIT");fflush(stdout);
+    cudaDeviceSynchronize();
+  #endif
+  int beforeTheLast = mypars->num_of_runs - run_window;
+  int runIndex;
+  if(readState == true)
+  {
+    printf("\nRead Genomes and energies from file %s.\n", mypars->stateFileInName);
+    readState = false;
+    FILE *stateFileIn = fopen(mypars->stateFileInName, "rb");
+    if(stateFileIn == NULL)
+    {
+      printf("ERROR: Cannot open input state file.\n");
+      exit(1);
+    }
+    size_t bytesRead;
+    for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+    {
+      // prev and indexMap
+      bytesRead = fread(cpu_state_populations[i], sizeof(float), num_geno_populations_per_run, stateFileIn);
+      if(bytesRead != num_geno_populations_per_run)
+      {
+        printf("ERROR: Cannot read input state file currectly.\n");
+        exit(1);
+      }
+      status = cudaMemcpy(pMem_conformations_next[i], cpu_state_populations[i], size_populations_per_run, cudaMemcpyHostToDevice);
+      if(status != 0)
+      {
+        printf("ERROR: pMem_conformations_next: failed to upload to GPU memory.\n");
+        exit(1);
+      }
+      bytesRead = fread(sim_state.cpu_energies[i], sizeof(float), mypars->pop_size, stateFileIn);
+      if(bytesRead != mypars->pop_size)
+      {
+        printf("ERROR: Cannot read input state file for sim_state.cpu_energies currectly.\n");
+        exit(1);
+      }
+      bytesRead = fread(energyToConforIndex, sizeof(int), mypars->pop_size, stateFileIn);
+      if(bytesRead != mypars->pop_size)
+      {
+        printf("ERROR: Cannot read input state file for energyToConforIndex currectly.\n");
+        exit(1);
+      }
+      if(i < mypars->showTopRunNum)
+      {
+        printf("runIndex: %d rPREV", i);
+        for(unsigned long int j = 0; j < mypars->pop_size; j++)
+        {
+          if(j < mypars->showTopIdvNum)
+          {
+            printf(" %f", sim_state.cpu_energies[i][j]);
+          }
+          else
+          {
+            break;
+          }
+        }
+        printf("\n");
+
+        printf("runIndex: %d rSPRE", i);
+        for(unsigned long int j = 0; j < mypars->pop_size; j++)
+        {
+          if(j < mypars->showTopIdvNum)
+          {
+            printf(" %f", sim_state.cpu_energies[i][energyToConforIndex[j]]);
+          }
+          else
+          {
+            break;
+          }
+        }
+        printf("\n");
+      }
+      status = cudaMemcpy(pMem_energies_next[i], sim_state.cpu_energies[i], size_energies, cudaMemcpyHostToDevice);
+      if(status != 0)
+      {
+        printf("ERROR: pMem_energies_next: failed to upload to GPU memory.\n");
+        exit(1);
+      }
+      status = cudaMemcpy(tData.pMem_energyToConforIndex[i], energyToConforIndex, size_energyToConforIndex, cudaMemcpyHostToDevice);
+      if(status != 0)
+      {
+        printf("ERROR: tData.pMem_energyToConforIndex: failed to upload to GPU memory.\n");
+        exit(1);
+      }
+      // now
+      bytesRead = fread(cpu_state_populations[i], sizeof(float), num_geno_populations_per_run, stateFileIn);
+      if(bytesRead != num_geno_populations_per_run)
+      {
+        printf("ERROR: Cannot read input state file for cpu_state_populations currectly.\n");
+        exit(1);
+      }
+      status = cudaMemcpy(pMem_conformations_current[i], cpu_state_populations[i], size_populations_per_run, cudaMemcpyHostToDevice);
+      if(status != 0)
+      {
+        printf("ERROR: pMem_conformations_current: failed to upload to GPU memory.\n");
+        exit(1);
+      }
+      bytesRead = fread(sim_state.cpu_energies[i], sizeof(float), mypars->pop_size, stateFileIn);
+      if(bytesRead != mypars->pop_size)
+      {
+        printf("ERROR: Cannot read input state file currectly.\n");
+        exit(1);
+      }
+      if(i < mypars->showTopRunNum)
+      {
+        printf("runIndex: %d rCURR", i);
+        for(unsigned long int j = 0; j < mypars->pop_size; j++)
+        {
+          if(j < mypars->showTopIdvNum)
+          {
+            printf(" %f", sim_state.cpu_energies[i][j]);
+          }
+          else
+          {
+            break;
+          }
+        }
+        printf("\n");
+      }
+      status = cudaMemcpy(pMem_energies_current[i], sim_state.cpu_energies[i], size_energies, cudaMemcpyHostToDevice);
+      if(status != 0)
+      {
+        printf("ERROR: pMem_energies_current: failed to upload to GPU memory.\n");
+        exit(1);
+      }
+    }
+    fclose(stateFileIn);
+  }
+  else
+  {
+    for(runIndex = 0; runIndex < beforeTheLast; runIndex += run_window)
+    {
+      gpu_calc_initpop(mypars->pop_size, kernel1_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, runIndex + run_window);
+      cudaDeviceSynchronize();
+    }
+    gpu_calc_initpop(mypars->pop_size, kernel1_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
+    cudaDeviceSynchronize();
+
+    cudaSortArray(mypars->num_of_runs, pMem_energies_current, mypars->pop_size, tData.pMem_energyToConforIndex);
+  }
+  #ifdef DOCK_DEBUG
+    cudaDeviceSynchronize();
+    para_printf("%15s" ," ... Finished\n");fflush(stdout);
+  #endif
+  // End of Kernel1
+  // Kernel2
+  #ifdef DOCK_DEBUG
+    para_printf("%-25s", "\tK_EVAL");fflush(stdout);
+  #endif
+  for(int i = 0; i < (int) mypars->num_of_runs; i++)
+  {
+    gpu_sum_evals(kernel2_gxsize, kernel2_lxsize, cData.pMem_evals_of_new_entities, i);
+  }
+  #ifdef DOCK_DEBUG
+    cudaDeviceSynchronize();
+    para_printf("%15s" ," ... Finished\n");fflush(stdout);
+  #endif
+  // End of Kernel2
+  // ===============================================================================
+
+  #if 0
+  #endif
+  mpz_set_ui(generation_cnt, 0);
+  mpz_t total_evals;
+  mpz_t tmpMpz;
+
+  mpz_init(total_evals);
+  mpz_init(tmpMpz);
+
+  auto const t2 = std::chrono::steady_clock::now();
+  para_printf("\nRest of Setup time %fs\n", elapsed_seconds(t1 ,t2));
+
+  //print progress bar
+  AutoStop autostop(mypars->pop_size, mypars->num_of_runs, mypars->stopstd, mypars->as_frequency, output);
+#ifndef DOCK_DEBUG
+  if (mypars->autostop)
+  {
+    autostop.print_intro(mypars->num_of_generations, mypars->num_of_energy_evals);
+  }
+  else
+  {
+    para_printf("\nExecuting docking runs:\n");
+    para_printf("        20%%        40%%       60%%       80%%       100%%\n");
+    para_printf("---------+---------+---------+---------+---------+\n");
+  }
+#endif
+  curr_progress_cnt = 0;
+#if defined (MAPPED_COPY)
+  while ((progress = check_progress(tData.pMem_gpu_evals_of_runs, generation_cnt, mypars->num_of_energy_evals, mypars->num_of_generations, mypars->num_of_runs, total_evals)) < 100.0)
+#else
+  while ((progress = check_progress(sim_state.cpu_evals_of_runs, generation_cnt, mypars->num_of_energy_evals, mypars->num_of_generations, mypars->num_of_runs, total_evals)) < 100.0)
+#endif
+  {
+    status = cudaMemcpy(tData.pMem_gpu_evals_of_runs, forZeroEvals, size_evals_of_runs, cudaMemcpyHostToDevice);
+    if(status != 0)
+    {
+      printf("ERROR: pMem_gpu_evals_of_runs: failed to upload to GPU memory with zeros.\n");
+      exit(1);
+    }
+    status = cudaMemcpy(tData.pMem_reservedIdvNum, forOneReservedIdvNum, size_evals_of_runs, cudaMemcpyHostToDevice);
+    if(status != 0)
+    {
+      printf("ERROR: pMem_reservedIdvNum: failed to upload to GPU memory with zeros.\n");
+      exit(1);
+    }
+    if (mypars->autostop) {
+      mpz_t r;
+      mpz_init(r);
+      mpz_fdiv_r_ui(r, generation_cnt, (long) mypars->as_frequency);
+      if(mpz_cmp_ui(r, 0) == 0)
+      {
+        for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+        {
+          status = cudaMemcpy(sim_state.cpu_energies[i], pMem_energies_current[i], size_energies, cudaMemcpyDeviceToHost);
+          if(status != 0)
+          {
+            printf("ERROR: cudaMemcpy: couldn't download pMem_energies_current. %d\n", status);
+            exit(1);
+          }
+        }
+        if (autostop.check_if_satisfactory(generation_cnt, sim_state.cpu_energies, total_evals))
+          if(mpz_cmp(total_evals, min_as_evals) > 0)
+          {
+            break;} // Exit loop when all conditions are satisfied
+      }
+      mpz_clear(r);
+    }
+    else
+    {
+#ifdef DOCK_DEBUG
+      ite_cnt++;
+      para_printf("\nLGA iteration # %u\n", ite_cnt);
+      fflush(stdout);
+#endif
+      //update progress bar (bar length is 50)
+      new_progress_cnt = (int) (progress/2.0+0.5);
+      if (new_progress_cnt > 50)
+        new_progress_cnt = 50;
+      while (curr_progress_cnt < new_progress_cnt) {
+        curr_progress_cnt++;
+#ifndef DOCK_DEBUG
+        para_printf("*");
+#endif
+        fflush(stdout);
+      }
+    }
+
+    // Kernel4
+    #ifdef DOCK_DEBUG
+      para_printf("%-25s", "\tK_GA_GENERATION");fflush(stdout);
+    #endif
+
+    for(runIndex = 0; runIndex < beforeTheLast; runIndex += run_window)
+    {
+      gpu_gen_and_eval_newpops(mypars->pop_size, kernel4_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, runIndex + run_window);
+      cudaDeviceSynchronize();
+    }
+    gpu_gen_and_eval_newpops(mypars->pop_size, kernel4_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
+    cudaDeviceSynchronize();
+
+    #ifdef DOCK_DEBUG
+      para_printf("%15s", " ... Finished\n");fflush(stdout);
+    #endif
+    // End of Kernel4
+    if (cData.dockpars.lsearch_rate != 0.0f) {
+      if ((strcmp(mypars->ls_method, "sw") == 0) || ((strcmp(mypars->ls_method, "ad") == 0) && (mpz_cmp(generation_cnt, mypars->initial_sw_generations) < 0))) {
+        // Kernel3
+        #ifdef DOCK_DEBUG
+          para_printf("%-25s", "\tK_LS_SOLISWETS");fflush(stdout);
+        #endif
+        kernel3_gxsize = cData.dockpars.num_of_lsentities;
+        for(runIndex = 0; runIndex < beforeTheLast; runIndex += run_window)
+        {
+          gpu_perform_LS(kernel3_gxsize, kernel3_lxsize, mypars->ligandOnly, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, runIndex + run_window);
+          cudaDeviceSynchronize();
+        }
+        gpu_perform_LS(kernel3_gxsize, kernel3_lxsize, mypars->ligandOnly, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
+        cudaDeviceSynchronize();
+        #ifdef DOCK_DEBUG
+          para_printf("%15s" ," ... Finished\n");fflush(stdout);
+        #endif
+        // End of Kernel3
+      } else if (strcmp(mypars->ls_method, "sd") == 0) {
+        // Kernel5
+        #ifdef DOCK_DEBUG
+          para_printf("%-25s", "\tK_LS_GRAD_SDESCENT");fflush(stdout);
+        #endif
+        //runKernel1D(command_queue,kernel5,kernel5_gxsize,kernel5_lxsize,&time_start_kernel,&time_end_kernel);
+        #ifdef DOCK_DEBUG
+          para_printf("%15s" ," ... Finished\n");fflush(stdout);
+        #endif
+        // End of Kernel5
+      } else if (strcmp(mypars->ls_method, "fire") == 0) {
+        // Kernel6
+        #ifdef DOCK_DEBUG
+          para_printf("%-25s", "\tK_LS_GRAD_FIRE");fflush(stdout);
+        #endif
+        //runKernel1D(command_queue,kernel6,kernel6_gxsize,kernel6_lxsize,&time_start_kernel,&time_end_kernel);
+        #ifdef DOCK_DEBUG
+          para_printf("%15s" ," ... Finished\n");fflush(stdout);
+        #endif
+        // End of Kernel6
+      } else if (strcmp(mypars->ls_method, "ad") == 0) {
+        // Kernel7
+        #ifdef DOCK_DEBUG
+          para_printf("%-25s", "\tK_LS_GRAD_ADADELTA");fflush(stdout);
+        #endif
+
+        kernel7_gxsize = cData.dockpars.num_of_lsentities;
+        for(runIndex = 0; runIndex < beforeTheLast; runIndex += run_window)
+        {
+          gpu_gradient_minAD(kernel7_gxsize, kernel7_lxsize, mypars->ligandOnly, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, runIndex + run_window);
+        }
+        gpu_gradient_minAD(kernel7_gxsize, kernel7_lxsize, mypars->ligandOnly, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
+        #ifdef DOCK_DEBUG
+          para_printf("%15s" ," ... Finished\n");fflush(stdout);
+        #endif
+        // End of Kernel7
+      } else if (strcmp(mypars->ls_method, "adam") == 0) {
+        // Kernel8
+        #ifdef DOCK_DEBUG
+          para_printf("%-25s", "\tK_LS_GRAD_ADAM");fflush(stdout);
+        #endif
+        kernel8_gxsize = cData.dockpars.num_of_lsentities;
+        for(runIndex = 0; runIndex < beforeTheLast; runIndex += run_window)
+        {
+          gpu_gradient_minAdam(kernel8_gxsize, kernel8_lxsize, pMem_conformations_next, pMem_energies_next, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, runIndex + run_window);
+          cudaDeviceSynchronize();
+        }
+        gpu_gradient_minAdam(kernel8_gxsize, kernel8_lxsize, pMem_conformations_next, pMem_energies_next, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
+        cudaDeviceSynchronize();
+        #ifdef DOCK_DEBUG
+          para_printf("%15s" ," ... Finished\n");fflush(stdout);
+        #endif
+        // End of Kernel8
+      }
+    } // End if (dockpars.lsearch_rate != 0.0f)
+    // -------- Replacing with memory maps! ------------
+    // -------- Replacing with memory maps! ------------
+    // Kernel2
+    #ifdef DOCK_DEBUG
+      para_printf("%-25s", "\tK_EVAL");fflush(stdout);
+    #endif
+    for(int i = 0; i < (int) mypars->num_of_runs; i++)
+    {
+      gpu_sum_evals(kernel2_gxsize, kernel2_lxsize, cData.pMem_evals_of_new_entities, i);
+    }
+
+    #ifdef DOCK_DEBUG
+      para_printf("%15s" ," ... Finished\n");fflush(stdout);
+    #endif
+    // End of Kernel2
+    // ===============================================================================
+#if not defined (MAPPED_COPY)
+    status = cudaMemcpy(sim_state.cpu_evals_of_runs, tData.pMem_gpu_evals_of_runs, size_evals_of_runs, cudaMemcpyDeviceToHost);
+    if(status != 0)
+    {
+      printf("ERROR: pMem_gpu_evals_of_runs: failed to download to main memory.\n");
+      exit(1);
+    }
+#endif
+    mpz_add_ui(generation_cnt, generation_cnt, 1);
+    // ----------------------------------------------------------------------
+    // ORIGINAL APPROACH: switching conformation and energy pointers (Probably the best approach, restored)
+    // CURRENT APPROACH:  copy data from one buffer to another, pointers are kept the same
+    // IMPROVED CURRENT APPROACH
+    // Kernel arguments are changed on every iteration
+    // No copy from dev glob memory to dev glob memory occurs
+    // Use generation_cnt as it evolves with the main loop
+    // No need to use tempfloat
+    // No performance improvement wrt to "CURRENT APPROACH"
+
+    // Kernel args exchange regions they point to
+    // But never two args point to the same region of dev memory
+    // NO ALIASING -> use restrict in Kernel
+
+    // Flip conformation and energy pointers
+    float **pTemp;
+    pTemp = pMem_conformations_current;
+    pMem_conformations_current = pMem_conformations_next;
+    pMem_conformations_next = pTemp;
+    pTemp = pMem_energies_current;
+    pMem_energies_current = pMem_energies_next;
+    pMem_energies_next = pTemp;
+
+    // ----------------------------------------------------------------------
+    #ifdef DOCK_DEBUG
+      para_printf("\tProgress %.3f %%\n", progress);
+      fflush(stdout);
+    #endif
+    
+    cudaSortArray(mypars->num_of_runs, pMem_energies_current, mypars->pop_size, tData.pMem_energyToConforIndex);
+
+    if(mypars->writeState == true && mpz_cmp_ui(generation_cnt, 0))
+    {
+      char  stateFileOutName[768];
+      char *generation_cnt_str;
+      generation_cnt_str = mpz_get_str(NULL, 10, generation_cnt);
+      sprintf(stateFileOutName, "%s_%s.bin", mypars->stateFileOutPre, generation_cnt_str);
+      free(generation_cnt_str);
+      FILE *stateFileOut = fopen(stateFileOutName, "wb");
+      if(stateFileOut == NULL)
+      {
+        printf("ERROR: Cannot open optput state file.\n");
+        exit(1);
+      }
+      size_t bytesWritten = 0;
+      for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+      {
+        // prev and indexMap
+        status = cudaMemcpy(cpu_state_populations[i], pMem_conformations_next[i], size_populations_per_run, cudaMemcpyDeviceToHost);
+        if(status != 0)
+        {
+          printf("ERROR: cudaMemcpy: couldn't copy pMem_conformations_next to host.\n");
+          exit(1);
+        }
+        bytesWritten += fwrite(cpu_state_populations[i], sizeof(float), num_geno_populations_per_run, stateFileOut);
+        status = cudaMemcpy(sim_state.cpu_energies[i], pMem_energies_next[i], size_energies, cudaMemcpyDeviceToHost);
+        if(status != 0)
+        {
+          printf("ERROR: cudaMemcpy: couldn't copy pMem_energies_next to host.\n");
+          exit(1);
+        }
+        status = cudaMemcpy(energyToConforIndex, tData.pMem_energyToConforIndex[i], size_energyToConforIndex, cudaMemcpyDeviceToHost);
+        if(status != 0)
+        {
+          printf("ERROR: cudaMemcpy: couldn't copy tData.pMem_energyToConforIndex to host.\n");
+          exit(1);
+        }
+        if(i < mypars->showTopRunNum)
+        {
+          printf("runIndex: %d wPREV", i);
+          for(unsigned long int j = 0; j < mypars->pop_size; j++)
+          {
+            if(j < mypars->showTopIdvNum)
+            {
+              printf(" %f", sim_state.cpu_energies[i][j]);
+            }
+            else
+            {
+              break;
+            }
+          }
+          printf("\n");
+
+          printf("runIndex: %d wSPRE", i);
+          for(unsigned long int j = 0; j < mypars->pop_size; j++)
+          {
+            if(j < mypars->showTopIdvNum)
+            {
+              printf(" %f", sim_state.cpu_energies[i][energyToConforIndex[j]]);
+            }
+            else
+            {
+              break;
+            }
+          }
+          printf("\n");
+        }
+        bytesWritten += fwrite(sim_state.cpu_energies[i], sizeof(float), mypars->pop_size, stateFileOut);
+        bytesWritten += fwrite(energyToConforIndex,       sizeof(int),   mypars->pop_size, stateFileOut);
+
+        // now
+        status = cudaMemcpy(cpu_state_populations[i], pMem_conformations_current[i], size_populations_per_run, cudaMemcpyDeviceToHost);
+        if(status != 0)
+        {
+          printf("ERROR: cudaMemcpy: couldn't copy pMem_conformations_current to host.\n");
+          exit(1);
+        }
+        bytesWritten += fwrite(cpu_state_populations[i], sizeof(float), num_geno_populations_per_run, stateFileOut);
+        status = cudaMemcpy(sim_state.cpu_energies[i], pMem_energies_current[i], size_energies, cudaMemcpyDeviceToHost);
+        if(status != 0)
+        {
+          printf("ERROR: cudaMemcpy: couldn't copy pMem_energies_current to host.\n");
+          exit(1);
+        }
+        if(i < mypars->showTopRunNum)
+        {
+          printf("runIndex: %d wCURR", i);
+          for(unsigned long int j = 0; j < mypars->pop_size; j++)
+          {
+            if(j < mypars->showTopIdvNum)
+            {
+              printf(" %f", sim_state.cpu_energies[i][j]);
+            }
+            else
+            {
+              break;
+            }
+          }
+          printf("\n");
+        }
+        bytesWritten += fwrite(sim_state.cpu_energies[i], sizeof(float), mypars->pop_size, stateFileOut);
+      }
+      fclose(stateFileOut);
+    }
+  } // End of while-loop
+
+  if (strcmp(mypars->ls_method, "ad") == 0)
+  {
+    status = cudaFree(tData.gFloatBuff);
+    if(status != 0)
+    {
+      printf("ERROR: cudaFree: error freeing gFloatBuff.\n");
+      exit(1);
+    }
+  }
+  // Profiler
+  profile.nev_at_stop = mpz_get_ui(total_evals)/mypars->num_of_runs;
+  profile.autostopped = autostop.did_stop();
+
+  clock_stop_docking = clock();
+  if (mypars->autostop==0)
+  {
+    //update progress bar (bar length is 50)mem_num_of_rotatingatoms_per_rotbond_const
+    while (curr_progress_cnt < 50) {
+      curr_progress_cnt++;
+      para_printf("*");
+      fflush(stdout);
+    }
+    para_printf("\n");
+  }
+  auto const t3 = std::chrono::steady_clock::now();
+
+  // ===============================================================================
+  // Modification based on:
+  // http://www.cc.gatech.edu/~vetter/keeneland/tutorial-2012-02-20/08-opencl.pdf
+  // ===============================================================================
+  //processing results
+  char  stateFileOutName[768];
+  sprintf(stateFileOutName, "%s_last.bin", mypars->stateFileOutPre);
+  FILE *stateFileOutLast = fopen(stateFileOutName, "wb");
+  if(stateFileOutLast == NULL)
+  {
+    printf("ERROR: Cannot open output state file %s.\n", stateFileOutName);
+    exit(1);
+  }
+  size_t bytesWritten = 0;
+  for(unsigned long int i = 0; i < mypars->num_of_runs; i++)
+  {
+    // prev and indexMap
+    status = cudaMemcpy(cpu_state_populations[i], pMem_conformations_next[i], size_populations_per_run, cudaMemcpyDeviceToHost);
+    if(status != 0)
+    {
+      printf("ERROR: cudaMemcpy: couldn't copy pMem_conformations_next to host.\n");
+      exit(1);
+    }
+    bytesWritten += fwrite(cpu_state_populations[i], sizeof(float), num_geno_populations_per_run, stateFileOutLast);
+    status = cudaMemcpy(sim_state.cpu_energies[i], pMem_energies_next[i], size_energies, cudaMemcpyDeviceToHost);
+    if(status != 0)
+    {
+      printf("ERROR: cudaMemcpy: couldn't copy pMem_energies_next to host.\n");
+      exit(1);
+    }
+    status = cudaMemcpy(energyToConforIndex, tData.pMem_energyToConforIndex[i], size_energyToConforIndex, cudaMemcpyDeviceToHost);
+    if(status != 0)
+    {
+      printf("ERROR: cudaMemcpy: couldn't copy tData.pMem_energyToConforIndex to host.\n");
+      exit(1);
+    }
+    if(i < mypars->showTopRunNum)
+    {
+      printf("runIndex: %d fPREV", i);
+      for(unsigned long int j = 0; j < mypars->pop_size; j++)
+      {
+        if(j < mypars->showTopIdvNum)
+        {
+          printf(" %f", sim_state.cpu_energies[i][j]);
+        }
+        else
+        {
+          break;
+        }
+      }
+      printf("\n");
+
+      printf("runIndex: %d fSPRE", i);
+      for(unsigned long int j = 0; j < mypars->pop_size; j++)
+      {
+        if(j < mypars->showTopIdvNum)
+        {
+          printf(" %f", sim_state.cpu_energies[i][energyToConforIndex[j]]);
+        }
+        else
+        {
+          break;
+        }
+      }
+      printf("\n");
+    }
+    bytesWritten += fwrite(sim_state.cpu_energies[i], sizeof(float), mypars->pop_size, stateFileOutLast);
+    bytesWritten += fwrite(energyToConforIndex,       sizeof(int),   mypars->pop_size, stateFileOutLast);
+
+    // now
+    status = cudaMemcpy(cpu_final_populations[i], pMem_conformations_current[i], size_populations_per_run, cudaMemcpyDeviceToHost);
+    if(status != 0)
+    {
+      printf("ERROR: cudaMemcpy: couldn't copy pMem_conformations_current to host.\n");
+      exit(1);
+    }
+    bytesWritten += fwrite(cpu_final_populations[i], sizeof(float), num_geno_populations_per_run, stateFileOutLast);
+    status = cudaMemcpy(sim_state.cpu_energies[i], pMem_energies_current[i], size_energies, cudaMemcpyDeviceToHost);
+    if(status != 0)
+    {
+      printf("ERROR: cudaMemcpy: couldn't copy pMem_energies_current to host.\n");
+      exit(1);
+    }
+    if(i < mypars->showTopRunNum)
+    {
+      printf("runIndex: %d fCURR", i);
+      for(unsigned long int j = 0; j < mypars->pop_size; j++)
+      {
+        if(j < mypars->showTopIdvNum)
+        {
+          printf(" %f", sim_state.cpu_energies[i][j]);
+        }
+        else
+        {
+          break;
+        }
+      }
+      printf("\n");
+    }
+    bytesWritten += fwrite(sim_state.cpu_energies[i], sizeof(float), mypars->pop_size, stateFileOutLast);
+  }
+  fclose(stateFileOutLast);
+  // Final autostop statistics output
+  if (mypars->autostop) autostop.output_final_stddev(generation_cnt, sim_state.cpu_energies, total_evals);
+  para_printf("\nDocking time %fs\n", elapsed_seconds(t2, t3));
+#if defined (DOCK_DEBUG)
+#endif
+
+  // Assign simulation results to sim_state
+  sim_state.myligand_reference = myligand_reference;
+  sim_state.sec_per_run = ELAPSEDSECS(clock_stop_docking, clock_start_docking)/mypars->num_of_runs;
+  mpz_set(sim_state.total_evals, total_evals);
+
+  free(cpu_prng_seeds);
+
+  free(KerConst_interintra->atom_charges_const);
+  free(KerConst_interintra->atom_types_const);
+  free(KerConst_interintra->atom_types_map_const);
+  free(KerConst_interintra->ignore_inter_const);
+  delete KerConst_interintra;
+  free(KerConst_intracontrib->intraE_contributors_const);
+  delete KerConst_intracontrib;
+  free(KerConst_intra->atom_types_reqm_const);
+  free(KerConst_intra->VWpars_exp_const);
+  free(KerConst_intra->reqm_AB_const);
+  free(KerConst_intra->VWpars_AC_const);
+  free(KerConst_intra->VWpars_BD_const);
+  free(KerConst_intra->dspars_S_const);
+  free(KerConst_intra->dspars_V_const);
+  delete KerConst_intra;
+  free(KerConst_rotlist->rotlist_const);
+  free(KerConst_rotlist->rotlist_atomId);
+  free(KerConst_rotlist->rotlist_rotatableBondId);
+  delete KerConst_rotlist;
+  free(KerConst_conform->ref_coords_const);
+  free(KerConst_conform->rotbonds_moving_vectors_const);
+  free(KerConst_conform->rotbonds_unit_vectors_const);
+  delete KerConst_conform;
+  free(KerConst_grads->rotbonds);
+  free(KerConst_grads->rotbonds_atoms);
+  free(KerConst_grads->num_rotating_atoms_per_rotbond);
+  delete KerConst_grads;
+
+  auto const t4 = std::chrono::steady_clock::now();
+  para_printf("\nShutdown time %fs\n", elapsed_seconds(t3, t4));
+  return 0;
+}
+
+double check_progress(
+                      int* evals_of_runs,
+                    mpz_t generation_cnt,
+                    mpz_t max_num_of_evals,
+                    mpz_t max_num_of_gens,
+                      int num_of_runs,
+                   mpz_t &total_evals
+                     )
+// The function checks if the stop condition of the docking is satisfied, returns 0 if no, and returns 1 if yes. The fitst
+// parameter points to the array which stores the number of evaluations performed for each run. The second parameter stores
+// the generations used. The other parameters describe the maximum number of energy evaluations, the maximum number of
+// generations, and the number of runs, respectively. The stop condition is satisfied, if the generations used is higher
+// than the maximal value, or if the average number of evaluations used is higher than the maximal value.
+{
+  // Stops if the sum of evals of every run reached the sum of the total number of evals
+
+  int i;
+  unsigned long evalsOfOneGen;
+  double evals_progress;
+  double gens_progress;
+
+  // calculating progress according to number of runs
+
+  evalsOfOneGen = 0;
+  for(i = 0; i < num_of_runs; i++)
+  {
+    evalsOfOneGen += evals_of_runs[i];
+  }
+  mpz_add_ui(total_evals, total_evals, evalsOfOneGen);
+
+  mpf_t evals_progress_mpf;
+  mpf_t tmp_mpf;
+
+  mpf_init(evals_progress_mpf);
+  mpf_init(tmp_mpf);
+
+  mpf_set_z(evals_progress_mpf, total_evals);
+  mpf_set_z(tmp_mpf, max_num_of_evals);
+  mpf_div_ui(evals_progress_mpf, evals_progress_mpf, (unsigned long) num_of_runs);
+  mpf_div(evals_progress_mpf, evals_progress_mpf, tmp_mpf);
+  mpf_mul_ui(evals_progress_mpf, evals_progress_mpf, 100l);
+  evals_progress = mpf_get_d(evals_progress_mpf);
+
+  mpf_t generation_cnt_mpf;
+  mpf_t max_num_of_gens_mpf;
+  mpf_t gens_progress_mpf;
+
+  mpf_init(generation_cnt_mpf);
+  mpf_init(max_num_of_gens_mpf);
+  mpf_init(gens_progress_mpf);
+  mpf_set_z(generation_cnt_mpf, generation_cnt);
+  mpf_set_z(max_num_of_gens_mpf, max_num_of_gens);
+  mpf_div(gens_progress_mpf, generation_cnt_mpf, max_num_of_gens_mpf);
+  gens_progress = mpf_get_d(gens_progress_mpf);
+
+  mpf_clear(generation_cnt_mpf);
+  mpf_clear(max_num_of_gens_mpf);
+  mpf_clear(gens_progress_mpf);
+
+  if (evals_progress > gens_progress)
+    return evals_progress;
+  else
+    return gens_progress;
+}
