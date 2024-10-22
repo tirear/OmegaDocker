@@ -28,9 +28,27 @@ NOT YET
 The first step is to set environmental variables `GPU_INCLUDE_PATH` and `GPU_LIBRARY_PATH`,
 as described here: https://github.com/ccsb-scripps/AutoDock-GPU/wiki/Guideline-for-users
 
-```zsh
+1. set PATH variable for gcc and nvcc path
+2. set GPU_INCLUDE_PATH variable for cuda include path
+3. set GPU_LIBRARY_PATH variable for cuda library path
+
+Under bash shell:
+
+```bash
+export PATH="/path/to/gcc:$PATH"
+export PATH="/path/to/cuda/nvcc:$PATH"
+export GPU_INCLUDE_PATH="/path/to/cuda/include"
+export GPU_LIBRARY_PATH="/path/to/cuda/lib64"
+cd /path/to/OmegaDocker
 make DEVICE=<TYPE> NUMWI=<NWI>
 ```
+
+Test excution:
+
+```bash
+bin/omegadocker_gpu_128wi
+```
+
 
 | Parameters | Description                  | Values                                             |
 |:----------:|:----------------------------:|:--------------------------------------------------:|
@@ -56,7 +74,7 @@ Both options can alternatively be provided in the contents of the files specifie
 
 ## Example
 ```zsh
-./bin/autodock_gpu_64wi \
+bin/omegadocker_gpu_128wi \
 --ffile ./input/1stp/derived/1stp_protein.maps.fld \
 --lfile ./input/1stp/derived/1stp_ligand.pdbqt
 ```
