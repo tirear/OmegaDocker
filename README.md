@@ -82,8 +82,7 @@ By default the output log file is written in the current working folder. Example
 |--rlige            |   | Print reference ligand energies                       | 0 (no)           |
 |--gfpop            |   | Output all poses from all populations of each LGA run | 0 (no)           |
 |--npdb             |   | # pose pdbqt files from populations of each LGA run   | 0                |
-|--gbest            |   | Number of output pdbqt files of the best pose of each | 0                |
-|                   |   | run (up to the number of run)                         |                  |
+|--gbest            |   | Number of output pdbqt files of the best pose of each run (up to the number of run) | 0                |
 |--miniCoorOut      |   | The coordinates in the minimization stage will be     | 0 (no)           |
 |                   |   | written to standard output if the value is not zero.  |                  |
 |                   |   | If this value is not equal to 0, then the following   |                  |
