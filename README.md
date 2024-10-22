@@ -32,6 +32,17 @@ as described here: https://github.com/ccsb-scripps/AutoDock-GPU/wiki/Guideline-f
 2. set GPU_INCLUDE_PATH variable for cuda include path
 3. set GPU_LIBRARY_PATH variable for cuda library path
 
+Compilation parameters:
+
+```bash
+make DEVICE=<TYPE> NUMWI=<NWI>
+```
+
+| Parameters | Description                  | Values                                             |
+|:----------:|:----------------------------:|:--------------------------------------------------:|
+| `<TYPE>`   | Accelerator chosen           | `CUDA`                                             |
+| `<NWI>`    | work-group/thread block size | `128`, `256`                                       |
+
 Under bash shell:
 
 ```bash
@@ -48,17 +59,6 @@ Test excution:
 ```bash
 bin/omegadocker_gpu_128wi
 ```
-
-Parameters:
-
-```bash
-make DEVICE=<TYPE> NUMWI=<NWI>
-```
-
-| Parameters | Description                  | Values                                             |
-|:----------:|:----------------------------:|:--------------------------------------------------:|
-| `<TYPE>`   | Accelerator chosen           | `CUDA`                                             |
-| `<NWI>`    | work-group/thread block size | `128`, `256`                                       |
 
 # Usage
 
