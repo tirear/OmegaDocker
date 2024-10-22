@@ -40,7 +40,7 @@ export PATH="/path/to/cuda/nvcc:$PATH"
 export GPU_INCLUDE_PATH="/path/to/cuda/include"
 export GPU_LIBRARY_PATH="/path/to/cuda/lib64"
 cd /path/to/OmegaDocker
-make DEVICE=<TYPE> NUMWI=<NWI>
+make DEVICE=CUDA NUMWI=128
 ```
 
 Test excution:
@@ -49,6 +49,11 @@ Test excution:
 bin/omegadocker_gpu_128wi
 ```
 
+Parameters:
+
+```bash
+make DEVICE=<TYPE> NUMWI=<NWI>
+```
 
 | Parameters | Description                  | Values                                             |
 |:----------:|:----------------------------:|:--------------------------------------------------:|
