@@ -66,12 +66,12 @@ By default the output log file is written in the current working folder. Example
 | Argument          |    | Description                                           | Default value    |
 |:------------------|:---|:------------------------------------------------------|-----------------:|
 |<tr><td colspan="4">**INPUT**</td></tr>
-|--lfile            |-L | Ligand pdbqt file                                     | no default       |
-|--ffile            |-M | Grid map files descriptor fld file                    | no default       |
-|--flexres          |-F | Flexible residue pdbqt file                           | no default       |
-|--filelist         |-B | Batch file                                            | no default       |
-|--import_dpf       |-I | Import AD4-type dpf input file (only partial support) | no default       |
-|--xraylfile        |-R | reference ligand file for RMSD analysis               | ligand file      <tr><td colspan="4">**CONVERSION**</td></tr>
+|--lfile            |-L  | Ligand pdbqt file                                     | no default       |
+|--ffile            |-M  | Grid map files descriptor fld file                    | no default       |
+|--flexres          |-F  | Flexible residue pdbqt file                           | no default       |
+|--filelist         |-B  | Batch file                                            | no default       |
+|--import_dpf       |-I  | Import AD4-type dpf input file (only partial support) | no default       |
+|--xraylfile        |-R  | reference ligand file for RMSD analysis               | ligand file      <tr><td colspan="4">**CONVERSION**</td></tr>
 |--xml2dlg          |-X | One (or many) AD-GPU xml file(s) to convert to dlg(s) | no default       |
 |--stateFileInName  |   | Name for the input docking state file.                | stateIn.bin      <tr><td colspan="4">**OUTPUT**</td></tr>
 |--resnam           |-N | Name for docking output log                           | ligand basename  |
