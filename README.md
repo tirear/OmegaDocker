@@ -83,14 +83,10 @@ By default the output log file is written in the current working folder. Example
 |--gfpop            |   | Output all poses from all populations of each LGA run | 0 (no)           |
 |--npdb             |   | # pose pdbqt files from populations of each LGA run   | 0                |
 |--gbest            |   | Number of output pdbqt files of the best pose of each run (up to the number of run) | 0                |
-|--miniCoorOut      |   | The coordinates in the minimization stage will be     | 0 (no)           |
-|                   |   | written to standard output if the value is not zero.  |                  |
-|                   |   | If this value is not equal to 0, then the following   |                  |
-|                   |   | is set: --psize 2 --nrun 1 --heurmax 10.              |                  |
+|--miniCoorOut      |   | The coordinates in the minimization stage will be written to standard output if the value is not zero. If this value is not equal to 0, then the following is set: --psize 2 --nrun 1 --heurmax 10.  | 0 (no)           |
 |--stateFileOutPre  |   | Prefix for the output docking state file.             | stateOut         |
 |--showTopRunNum    |   | The number of top runs of that the energy be showed.  | 0                |
-|--showTopIdvNum    |   | The number of top individuals of that the energy be   | 0                |
-|                   |   | showed.                                               |                  |
+|--showTopIdvNum    |   | The number of top individuals of that the energy be showed.  | 0                |
 |--cautionOn        |   | Show the caution information.                         | 0 (no)           |
 |--warningOn        |   | Show the warning information.                         | 0 (no)           |
 |--clustering       |   | Output clustering analysis in dlg and/or xml file     | 1 (yes)          |
@@ -109,8 +105,7 @@ By default the output log file is written in the current working folder. Example
 |--lsmet            |-l | Local-search method                                   | ad (ADADELTA)    |
 |--lsit             |-i | # Local-search iterations (max.)                      | 300              |
 |--psize            |-p | Population size                                       | 150              |
-|--inputConfRatio   |   | The ratio of the population that the conformation     | 0.2              |
-|                   |   | genes are initialized as file input.                  |                  |
+|--inputConfRatio   |   | The ratio of the population that the conformation genes are initialized as file input.    | 0.2              |
 |--mrat             |   | Mutation rate                                         | 2   (%)          |
 |--crat             |   | Crossover rate                                        | 80  (%)          |
 |--lsrat            |   | Local-search rate                                     | 100 (%)          |
@@ -125,25 +120,15 @@ By default the output log file is written in the current working folder. Example
 |--initswgens       |   | Initial # generations of Solis-Wets instead of -lsmet | 0 (no)           |
 |--ligaStepSize     |   | The step size for ligand only minimization.           | 0.1              |
 |--compStepSize     |   | The step size for complex minimization.               | 0.1              |
-|--ligaRhoLimit     |   | The maximal rho value for ligand minimization. Larger | 100              |
-|                   |   | rho, more steps for ligand minimization.              |                  |
-|--compRhoLimit     |   | The maximal rho value for complex minimization.       | 1000             |
-|                   |   | Larger rho, more steps for complex minimization.      |                  |
-|--collRhoLimit     |   | The maximal rho value for collision-eliminating       | 5                |
-|                   |   | minimization. Larger rho, more steps for              |                  |
-|                   |   | collision-eliminating minimization.                   |                  |
-|--collDistance     |   | The distance at which non-bonded atoms are considered | 1.3              |
-|                   |   | to have collided (exclude H-H).                       |                  |
-|--rebornRatio      |   | The ratio of population that is treated as bad        | 0.2              |
-|                   |   | samples and will be regenerated.                      |                  |
-|--miniOnly         |   | Do minimization only. If this value is not equal to   | 0 (no)           |
-|                   |   | 0, then the following is set: --miniCoorOut 1.        |                  |
-|--addonEng         |   | The amount of energy that needs to be added to set    | 400              |
-|                   |   | the threshold of low energy.                          |                  |
-|--lowEngNumRatio   |   | The maximal ratio of the low energy number in the     | 0.1              |
-|                   |   | population.                                           |                  |
-|--convergedThre    |   | The threshold of energy difference to define the      | 0.01             |
-|                   |   | convergence of the energy used for comparison.        |                  |
+|--ligaRhoLimit     |   | The maximal rho value for ligand minimization. Larger rho, more steps for ligand minimization. | 100              |
+|--compRhoLimit     |   | The maximal rho value for complex minimization. Larger rho, more steps for complex minimization.      | 1000             |
+|--collRhoLimit     |   | The maximal rho value for collision-eliminating minimization. Larger rho, more steps for collision-eliminating minimization.      | 5                |
+|--collDistance     |   | The distance at which non-bonded atoms are considered to have collided (exclude H-H). | 1.3              |
+|--rebornRatio      |   | The ratio of population that is treated as bad samples and will be regenerated.       | 0.2              |
+|--miniOnly         |   | Do minimization only. If this value is not equal to 0, then the following is set: --miniCoorOut 1.  | 0 (no)           |
+|--addonEng         |   | The amount of energy that needs to be added to set the threshold of low energy.   | 400              |
+|--lowEngNumRatio   |   | The maximal ratio of the low energy number in the population.    | 0.1              |               |
+|--convergedThre    |   | The threshold of energy difference to define the convergence of the energy used for comparison.     | 0.01             |
 |--ligandOnly       |   | Find the lowest energy conformation of ligand alone.  | 0 (no)           <tr><td colspan="4">**SCORING**</td></tr>
 |--derivtype        |-T | Derivative atom types (e.g. C1,C2,C3=C/S4=S/H5=HD)    | no default       |
 |--modpair          |-P | Modify vdW pair params (e.g. C1:S4,1.60,1.200,13,7)   | no default       |
@@ -151,16 +136,13 @@ By default the output log file is written in the current working folder. Example
 |--smooth           |   | Smoothing parameter for vdW interactions              | 0.5 (Å)          |
 |--elecmindist      |   | Min. electrostatic potential distance (w/ dpf: 0.5 Å) | 0.01 (Å)         |
 |--modqp            |   | Use modified QASP from VirtualDrug or AD4 original    | 0 (no, use AD4)  |
-|--savetime         |   | Do not re-calculate final energy with CPU as the the  | 0 (no)           |
-|                   |   | number of run is more than one. (0/1)                 |                  |
+|--savetime         |   | Do not re-calculate final energy with CPU as the the number of run is more than one. (0/1) | 0 (no)           |
 |--topN4rescore     |   | The number of top individuals of that the energy be   | 1                |
 |                   |   | re-calculated as the number of run is one.            |                  |
 |--enthalpyScaling  |   | The value for enthalpy scaling.                       | 0.7564           |
 |--entropyScaling   |   | The value for entropy scaling.                        | 0.9              |
-|--shakingRadius    |   | The radius of atom shaking for calculate entropy (in  | 0.75             |
-|                   |   | Å).                                                   |                  |
-|--wellDepth        |   | The depth of a energy landscape for calculating       | 0.35             |
-|                   |   | entropy (in kcal/mol).                                |                  |
+|--shakingRadius    |   | The radius of atom shaking for calculate entropy (in Å). | 0.75             |
+|--wellDepth        |   | The depth of a energy landscape for calculating entropy (in kcal/mol).      | 0.35             |
 
 # Documentation
 
