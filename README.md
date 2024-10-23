@@ -64,7 +64,7 @@ bin/omegadocker_gpu_128wi
 
 ## Basic command
 ```zsh
-./bin/autodock_<type>_<N>wi \
+/path/to/OmegaDocker/bin/omegadocker_<type>_<N>wi \
 --ffile <protein>.maps.fld \
 --lfile <ligand>.pdbqt \
 --nrun <nruns>
@@ -79,7 +79,7 @@ Both options can alternatively be provided in the contents of the files specifie
 
 ## Example
 ```zsh
-bin/omegadocker_gpu_128wi \
+/path/to/OmegaDocker/bin/omegadocker_gpu_128wi \
 --ffile ./input/1stp/derived/1stp_protein.maps.fld \
 --lfile ./input/1stp/derived/1stp_ligand.pdbqt
 ```
