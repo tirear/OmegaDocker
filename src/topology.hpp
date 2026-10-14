@@ -52,6 +52,7 @@ struct Torsion {
   int residue = -1;              // residue of the unit (backbone) or of atoms[1]
   double angle = 0.0;            // input value in degrees, (-180, 180]
   bool inFlexRange = true;       // StaM: within the docking box extended by staFlexMargin
+  bool broken = false;           // the bond is broken and closed by constraints (spec 4.8)
   bool rotatable = false;        // default of spec 4.2 / 4.4
 };
 
@@ -59,6 +60,11 @@ struct Topology {
   BackboneType backboneType = BackboneType::None;
   std::vector<BackboneUnit> units;
   std::vector<Torsion> torsions;
+  // Crosslinks to break automatically (spec 4.7): bond indices of inter-residue
+  // bonds, other than backbone links and metal bonds, that close a cycle.
+  std::vector<int> crosslinkBreaks;
+  // Bonds treated as broken when classifying ring bonds (spec 4.5, 4.8).
+  std::vector<int> brokenBonds;
   // DSSP code per residue (spec 4.6; set by assignDssp): H G I P E B T S, '.' for
   // none, ' ' for residues outside the protein backbone. Empty if not assigned.
   std::string dsspSS;
@@ -74,6 +80,8 @@ struct TopologyParams {
   // residue information, at atoms) within the box extended by staFlexMargin.
   std::optional<Box> box;
   double staFlexMargin = 4.0;
+  // Broken bonds (indices into Molecule::bonds); crosslinkBreaks when not given.
+  std::optional<std::vector<int>> brokenBonds;
 };
 
 Topology analyzeTopology(const Molecule& m, const TopologyParams& p);
@@ -81,6 +89,9 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p);
 // Indices of omega torsions whose input angle differs from both 0 and 180
 // degrees by more than toleranceDeg (spec 4.3).
 std::vector<int> nonPlanarOmegas(const Topology& t, double toleranceDeg);
+
+// Bonds of the whole bond graph that lie in a ring, indexed like Molecule::bonds.
+std::vector<bool> ringBondMask(const Molecule& m);
 
 double dihedralDeg(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d);
 

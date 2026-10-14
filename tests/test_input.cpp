@@ -6,13 +6,17 @@
 
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <sstream>
 #include <string>
 
+#include <unistd.h>
+
 #include "ccd.hpp"
 #include "log.hpp"
 #include "dssp.hpp"
+#include "molconfig.hpp"
 #include "read_input.hpp"
 #include "topology.hpp"
 
@@ -316,4 +320,191 @@ TEST_CASE("dssp: molecules without a protein backbone") {
   auto d = od::analyzeTopology(dna[0], {});
   od::assignDssp({&dna[0]}, {&d});
   CHECK(d.dsspSS.empty());
+}
+
+TEST_CASE("topology: crosslinks are broken without disconnecting the molecule (2KJJ)") {
+  auto mols = od::loadMolecules(kData + "/2KJJ.cif", od::Role::MobM, ccd());
+  const auto& m = mols[0];
+  auto t = od::analyzeTopology(m, {});
+  // Three disulfides; one joins chains A and B and is kept.
+  REQUIRE(t.crosslinkBreaks.size() == 2);
+  CHECK(t.brokenBonds == t.crosslinkBreaks);
+  for (int bi : t.crosslinkBreaks) {
+    CHECK(m.atoms[m.bonds[bi].a].atomicNum == 16);
+    CHECK(m.atoms[m.bonds[bi].b].atomicNum == 16);
+  }
+  int brokenTorsions = 0;
+  for (const auto& tor : t.torsions) {
+    brokenTorsions += tor.broken;
+    if (tor.broken) CHECK_FALSE(tor.rotatable);
+  }
+  CHECK(brokenTorsions == 2);
+  auto ringPhi = [](const od::Topology& x) {
+    int n = 0;
+    for (const auto& tor : x.torsions)
+      n += tor.backbone == od::BackboneAngle::Phi && tor.category == od::TorsionCategory::Ring;
+    return n;
+  };
+  od::TopologyParams p;
+  p.brokenBonds = std::vector<int>{};
+  auto whole = od::analyzeTopology(m, p);
+  CHECK(whole.crosslinkBreaks == t.crosslinkBreaks);
+  CHECK(ringPhi(t) == 1);  // the proline
+  CHECK(ringPhi(whole) > ringPhi(t));
+}
+
+namespace {
+
+struct ConfigFixture {
+  std::vector<od::Molecule> mols;
+  std::vector<od::Topology> topos;
+  std::vector<od::MolInput> inputs;
+  std::string path;
+
+  ConfigFixture() {
+    for (const char* f : {"1L2Y.cif", "BTN_ideal.sdf", "1RNG.cif"}) {
+      mols.push_back(od::loadMolecules(kData + "/" + f, od::Role::MobM, ccd()).front());
+      topos.push_back(od::analyzeTopology(mols.back(), {}));
+      od::assignDssp({&mols.back()}, {&topos.back()});
+    }
+    for (std::size_t i = 0; i < mols.size(); ++i) inputs.push_back({&mols[i], &topos[i]});
+    path = (std::filesystem::temp_directory_path() / std::format("od_test_molconfig_{}.toml", ::getpid())).string();
+  }
+  ~ConfigFixture() { std::filesystem::remove(path); }
+
+  std::vector<std::string> errorsOf(const std::string& text) {
+    std::ofstream(path) << text;
+    std::vector<std::string> errors;
+    auto cfg = od::readMolConfig(path, inputs, {}, errors);
+    CHECK(cfg.has_value() == errors.empty());
+    return errors;
+  }
+};
+
+// Replaces the first occurrence of from after the first occurrence of anchor.
+std::string replaceAfter(std::string s, const std::string& anchor, const std::string& from, const std::string& to) {
+  const auto a = s.find(anchor);
+  REQUIRE(a != std::string::npos);
+  const auto i = s.find(from, a);
+  REQUIRE(i != std::string::npos);
+  return s.replace(i, from.size(), to);
+}
+
+bool hasError(const std::vector<std::string>& errors, const std::string& part) {
+  for (const auto& e : errors)
+    if (e.find(part) != std::string::npos) return true;
+  return false;
+}
+
+}  // namespace
+
+TEST_CASE("molconfig: default file is accepted and keeps the defaults") {
+  ConfigFixture f;
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  std::ofstream(f.path) << text;
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  CHECK(errors.empty());
+  REQUIRE(cfg->molecules.size() == 3);
+  for (std::size_t i = 0; i < 3; ++i) {
+    const auto& s = cfg->molecules[i];
+    REQUIRE(s.mode.size() == f.topos[i].torsions.size());
+    for (std::size_t k = 0; k < s.mode.size(); ++k)
+      CHECK((s.mode[k] == od::TorsionMode::Free) == f.topos[i].torsions[k].rotatable);
+  }
+  CHECK(cfg->molecules[0].csgm1 == od::Csgm1::A);
+  // 1L2Y: helix residues default to O, others to R.
+  const auto& t0 = cfg->molecules[0].topology;
+  for (std::size_t u = 0; u < t0.units.size(); ++u) {
+    const char c = t0.dsspSS[t0.units[u].residue];
+    CHECK(cfg->molecules[0].ssType[u] == (c == 'H' || c == 'G' || c == 'I' ? "O" : "R"));
+  }
+  CHECK(text.find("dsspSS") != std::string::npos);
+  CHECK(text.find("alpha   = true") != std::string::npos);
+  CHECK(text.find("delta   = false") != std::string::npos);
+}
+
+TEST_CASE("molconfig: validation errors") {
+  ConfigFixture f;
+  const std::string text = od::defaultMolConfigText(f.inputs);
+
+  CHECK(hasError(f.errorsOf("formatVersion = 1\n[[molecule\n"), "line 2:"));
+  CHECK(hasError(f.errorsOf(replaceAfter(text, "formatVersion", "1", "2")), "formatVersion: must be 1"));
+
+  // Proline phi is in the pyrrolidine ring.
+  auto e = f.errorsOf(replaceAfter(text, "resName = \"PRO\"", "phi     = false", "phi     = true"));
+  CHECK(hasError(e, "residue A:12.phi: category 'ring' is not rotatable"));
+  // Nucleic delta is in the ribose ring.
+  e = f.errorsOf(replaceAfter(text, "mob:1RNG", "delta   = false", "delta   = true"));
+  CHECK(hasError(e, "residue A:1.delta: category 'ring'"));
+
+  e = f.errorsOf(replaceAfter(text, "resSeq  = 5", "ssType  = \"O\"", "ssType  = \"Q\""));
+  CHECK(hasError(e, "ssType 'Q' is not defined"));
+  e = f.errorsOf(replaceAfter(text, "resSeq  = 6", "omega   = \"fixed\"", "omega   = \"trans\""));
+  CHECK(hasError(e, "omega: must be fixed or cisTrans"));
+  CHECK(f.errorsOf(replaceAfter(text, "resSeq  = 6", "omega   = \"fixed\"", "omega   = \"cisTrans\"")).empty());
+  e = f.errorsOf(replaceAfter(text, "resSeq  = 7", "psi     = true", "psi     = 1"));
+  CHECK(hasError(e, "psi: must be true or false"));
+  e = f.errorsOf(replaceAfter(text, "resSeq  = 3", "iCode", "colour = 1\n  iCode"));
+  CHECK(hasError(e, "residue A:3.colour: unknown key"));
+  e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"", "backboneType = \"none\"\ncsgm1 = \"1a\""));
+  CHECK(hasError(e, "csgm1: only allowed for protein molecules"));
+  e = f.errorsOf(replaceAfter(text, "mob:1L2Y", "csgm1        = \"1a\"", "csgm1        = \"1c\""));
+  CHECK(hasError(e, "csgm1: must be 1a or 1b"));
+  e = f.errorsOf(replaceAfter(text, "[[molecule]]\nid           = \"mob:BTN", "mob:BTN_ideal.sdf:1", "mob:BTN_ideal.sdf:2"));
+  CHECK(hasError(e, "id 'mob:BTN_ideal.sdf:2' does not match any input molecule"));
+  CHECK(hasError(e, "molecule: id 'mob:BTN_ideal.sdf:1' is missing"));
+
+  // Residue and torsion lists must match the detected ones.
+  e = f.errorsOf(replaceAfter(text, "resSeq  = 2", "resSeq  = 2", "resSeq  = 99"));
+  CHECK(hasError(e, "residue A:99 is not a backbone residue"));
+  CHECK(hasError(e, "residue A:2 is missing"));
+  e = f.errorsOf(replaceAfter(text, "mob:BTN", "[\"#2\", \"#1\", \"#4\", \"#5\"]", "[\"#2\", \"#1\", \"#4\", \"#99\"]"));
+  CHECK(hasError(e, "atom '#99' not found"));
+  CHECK(hasError(e, "torsion [#2, #1, #4, #5] is missing"));
+
+  // Custom ssType rules.
+  const std::string custom = "[[ssType]]\nname = \"A\"\n[[ssType.point]]\nphi = -58\npsi = -48\nprob = 0.9\n"
+                             "[[ssType.point]]\nphi = -58\npsi = -48\nprob = 0.2\n\n[[ssType]]\nname    = \"R\"";
+  e = f.errorsOf(replaceAfter(text, "[[ssType]]", "[[ssType]]\nname    = \"R\"", custom));
+  CHECK(hasError(e, "sum of prob is 1.1"));
+  CHECK(hasError(e, "(phi, psi) = (-58, -48) is repeated"));
+  e = f.errorsOf(replaceAfter(text, "name    = \"O\"", "name    = \"O\"\nbuiltin = true", "name    = \"O\"\nbuiltin = false"));
+  CHECK(hasError(e, "built-in type 'O' is required"));
+}
+
+TEST_CASE("molconfig: ringBreak makes ring bonds rotatable (biotin)") {
+  ConfigFixture f;
+  std::string text = od::defaultMolConfigText(f.inputs);
+  auto setTrue = [&](const std::string& atoms) {
+    text = replaceAfter(text, "atoms     = " + atoms, "rotatable = false", "rotatable = true");
+  };
+  // Atom #9 is the thioether S of the tetrahydrothiophene ring.
+  setTrue("[\"#7\", \"#8\", \"#9\", \"#10\"]");
+  auto e = f.errorsOf(text);
+  CHECK(hasError(e, "category 'ring' is not rotatable (a ringBreak in the ring changes this)"));
+  text = replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
+                      "backboneType = \"none\"\n[[molecule.ringBreak]]\nbond = [\"#9\", \"#10\"]");
+  CHECK(f.errorsOf(text).empty());
+  setTrue("[\"#8\", \"#9\", \"#10\", \"#11\"]");  // the broken bond itself
+  setTrue("[\"#10\", \"#11\", \"#16\", \"#8\"]");  // still in the imidazolidinone ring
+  e = f.errorsOf(text);
+  CHECK(e.size() == 2);
+  CHECK(hasError(e, "the bond is broken"));
+  CHECK(hasError(e, "category 'ring'"));
+  text = replaceAfter(text, "[[molecule.ringBreak]]", "bond = [\"#9\", \"#10\"]",
+                      "bond = [\"#9\", \"#10\"]\n[[molecule.ringBreak]]\nbond = [\"#1\", \"#2\"]");
+  CHECK(hasError(f.errorsOf(text), "ringBreak.bond: the bond is not in a ring"));
+}
+
+TEST_CASE("molconfig: default file name does not overwrite") {
+  ConfigFixture f;
+  const std::string prefix = (std::filesystem::temp_directory_path() / std::format("od_test_{}", ::getpid())).string();
+  const std::string p0 = od::writeDefaultMolConfig(prefix, f.inputs);
+  const std::string p1 = od::writeDefaultMolConfig(prefix, f.inputs);
+  CHECK(p0 == prefix + ".molconfig.default.toml");
+  CHECK(p1 == prefix + ".molconfig.default.1.toml");
+  std::filesystem::remove(p0);
+  std::filesystem::remove(p1);
 }

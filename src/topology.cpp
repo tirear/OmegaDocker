@@ -25,25 +25,35 @@ struct Edge {
 struct Graph {
   const Molecule& m;
   std::vector<std::vector<Edge>> adj;
-  std::vector<bool> ringBond;
+  std::vector<bool> ringBond;  // ring bonds of the whole bond graph (backbone detection)
   std::vector<bool> ringAtom;
+  std::vector<bool> classRing;  // ring bonds after removing broken bonds (classification)
   std::map<std::pair<int, int>, int> bondOf;
 
-  explicit Graph(const Molecule& mol) : m(mol), adj(mol.atoms.size()), ringBond(mol.bonds.size(), true),
-                                        ringAtom(mol.atoms.size(), false) {
+  explicit Graph(const Molecule& mol) : m(mol), adj(mol.atoms.size()), ringAtom(mol.atoms.size(), false) {
     for (std::size_t i = 0; i < m.bonds.size(); ++i) {
       const Bond& b = m.bonds[i];
       adj[b.a].push_back({b.b, static_cast<int>(i)});
       adj[b.b].push_back({b.a, static_cast<int>(i)});
       bondOf[{std::min(b.a, b.b), std::max(b.a, b.b)}] = static_cast<int>(i);
     }
-    markBridges();
+    ringBond = markBridges({});
     for (std::size_t i = 0; i < m.bonds.size(); ++i)
       if (ringBond[i]) ringAtom[m.bonds[i].a] = ringAtom[m.bonds[i].b] = true;
+    classRing = ringBond;
+  }
+
+  void setBroken(const std::vector<int>& broken) {
+    std::vector<bool> skip(m.bonds.size(), false);
+    for (int b : broken) skip[b] = true;
+    classRing = markBridges(skip);
+    for (int b : broken) classRing[b] = false;
   }
 
   // A bond lies in a ring if and only if it is not a bridge (iterative Tarjan).
-  void markBridges() {
+  // Bonds marked in skip are treated as absent.
+  std::vector<bool> markBridges(const std::vector<bool>& skip) const {
+    std::vector<bool> ring(m.bonds.size(), true);
     const int n = static_cast<int>(adj.size());
     std::vector<int> disc(n, -1), low(n, 0);
     int t = 0;
@@ -59,7 +69,7 @@ struct Graph {
         Frame& f = st.back();
         if (f.next < adj[f.v].size()) {
           const Edge e = adj[f.v][f.next++];
-          if (e.bond == f.parentBond) continue;
+          if (e.bond == f.parentBond || (!skip.empty() && skip[e.bond])) continue;
           if (disc[e.to] < 0) {
             disc[e.to] = low[e.to] = t++;
             st.push_back({e.to, e.bond, 0});
@@ -71,11 +81,12 @@ struct Graph {
           st.pop_back();
           if (!st.empty()) {
             low[st.back().v] = std::min(low[st.back().v], low[done.v]);
-            if (low[done.v] > disc[st.back().v]) ringBond[done.parentBond] = false;
+            if (low[done.v] > disc[st.back().v]) ring[done.parentBond] = false;
           }
         }
       }
     }
+    return ring;
   }
 
   int z(int i) const { return m.atoms[i].atomicNum; }
@@ -250,7 +261,7 @@ TorsionCategory classify(const Graph& g, int bondIdx) {
   const Bond& b = g.m.bonds[bondIdx];
   if (b.order == BondOrder::Metal || isMetal(g.z(b.a)) || isMetal(g.z(b.b))) return TorsionCategory::Metal;
   if (b.aromatic) return TorsionCategory::Aromatic;
-  if (g.ringBond[bondIdx]) return TorsionCategory::Ring;
+  if (g.classRing[bondIdx]) return TorsionCategory::Ring;
   if (b.order == BondOrder::Triple || collinearEnd(g, b.a, b.b) || collinearEnd(g, b.b, b.a))
     return TorsionCategory::Triple;
   if (b.order == BondOrder::Double) return TorsionCategory::Double;
@@ -275,6 +286,48 @@ int dihedralNeighbor(const Graph& g, int end, int other) {
   return best >= 0 ? best : bestMetal;
 }
 
+// Inter-residue bonds other than backbone links and metal bonds that close a
+// cycle. Bonds are added to a spanning forest in index order with these
+// candidates last, so the molecule stays connected after they are broken.
+std::vector<int> findCrosslinkBreaks(const Graph& g, const Topology& t) {
+  const Molecule& m = g.m;
+  std::vector<bool> link(m.bonds.size(), false);
+  for (const BackboneUnit& u : t.units) {
+    if (u.next < 0) continue;
+    const int from = t.backboneType == BackboneType::Protein ? u.atoms[2] : u.atoms[5];
+    const int bi = g.bond(from, t.units[u.next].atoms[0]);
+    if (bi >= 0) link[bi] = true;
+  }
+  auto candidate = [&](int bi) {
+    const Bond& b = m.bonds[bi];
+    const int ra = m.atoms[b.a].residue, rb = m.atoms[b.b].residue;
+    return ra >= 0 && rb >= 0 && ra != rb && !link[bi] && b.order != BondOrder::Metal && !isMetal(g.z(b.a)) &&
+           !isMetal(g.z(b.b));
+  };
+  std::vector<int> parent(m.atoms.size());
+  for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+  auto find = [&](int x) {
+    while (parent[x] != x) x = parent[x] = parent[parent[x]];
+    return x;
+  };
+  std::vector<int> cand, out;
+  for (int bi = 0; bi < static_cast<int>(m.bonds.size()); ++bi) {
+    if (candidate(bi)) {
+      cand.push_back(bi);
+      continue;
+    }
+    parent[find(m.bonds[bi].a)] = find(m.bonds[bi].b);
+  }
+  for (int bi : cand) {
+    const int a = find(m.bonds[bi].a), b = find(m.bonds[bi].b);
+    if (a == b)
+      out.push_back(bi);
+    else
+      parent[a] = b;
+  }
+  return out;
+}
+
 bool insideBox(const Vec3& x, const Box& box, double margin) {
   for (int k = 0; k < 3; ++k)
     if (std::abs(x[k] - box.center[k]) > box.size[k] / 2 + margin) return false;
@@ -284,7 +337,7 @@ bool insideBox(const Vec3& x, const Box& box, double margin) {
 }  // namespace
 
 Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
-  const Graph g(m);
+  Graph g(m);
   Topology t;
   auto prot = findProteinUnits(g);
   auto nuc = findNucleicUnits(g);
@@ -299,6 +352,12 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
     t.backboneType = BackboneType::Nucleic;
     t.units = std::move(nuc);
   }
+
+  t.crosslinkBreaks = findCrosslinkBreaks(g, t);
+  t.brokenBonds = p.brokenBonds ? *p.brokenBonds : t.crosslinkBreaks;
+  g.setBroken(t.brokenBonds);
+  std::vector<bool> broken(m.bonds.size(), false);
+  for (int b : t.brokenBonds) broken[b] = true;
 
   // Backbone angles keyed by bond index.
   std::map<int, Torsion> bb;
@@ -364,7 +423,8 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
     const auto& x = tor.atoms;
     tor.angle = dihedralDeg(m.atoms[x[0]].xyz, m.atoms[x[1]].xyz, m.atoms[x[2]].xyz, m.atoms[x[3]].xyz);
     tor.inFlexRange = !restrict || inRange(b.a) || inRange(b.b);
-    if (tor.backbone == BackboneAngle::Omega)
+    tor.broken = broken[bi];
+    if (tor.backbone == BackboneAngle::Omega || tor.broken)
       tor.rotatable = false;
     else if (tor.backbone != BackboneAngle::None)
       tor.rotatable = tor.category == TorsionCategory::Single && m.role == Role::MobM;
@@ -374,6 +434,8 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
   }
   return t;
 }
+
+std::vector<bool> ringBondMask(const Molecule& m) { return Graph(m).ringBond; }
 
 std::vector<int> nonPlanarOmegas(const Topology& t, double toleranceDeg) {
   std::vector<int> out;

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.3 |
+| 文件版本 | 1.4 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -160,6 +160,8 @@
 
 - 使用者在分子設定檔的 `ringBreak` 中指定要斷開的鍵。
 - 斷開後，環內鍵依 4.4 重新判斷是否可轉動。
+- `ringBreak` 的鍵必須在環內（以未斷開的鍵結圖判斷），且不可為芳香鍵或金屬配位鍵。
+- 被斷開的鍵（`ringBreak`、`chainBreak`）本身的兩面角由閉合約束決定（4.8），不可設為可轉動。
 - 以距離約束恢復斷鍵，方式見 4.8。每對約束原子：能量 `E = G·d²`、梯度 `2G·d`（`G` 預設 200，`--closureG`）。
 - 源自 OmegaDocker v0.34.0 的 G 原子對做法（`pdbqtAddDistFix.pl`），新版不再需要前處理腳本，並修正兩個已知問題：
   1. 梯度只有正確值一半（`calcLigandEneGra.cu` 中累加 `G·d`）。
@@ -196,6 +198,11 @@
 | 整條鏈無固定殘基 | 該鏈最靠近質心的殘基 | 由錨點往兩端 | 無 |
 
 - 交聯鍵（雙硫鍵 S–S 等跨殘基共價鍵）若使扭轉樹形成環，自動在該鍵斷開，並依 4.8 約束閉合。
+  - 候選鍵：兩端原子屬於不同殘基、不是主鏈相連鍵（蛋白質 C–N、核酸 O3′–P）、不是金屬配位鍵。
+  - 選取方式：先放入所有非候選鍵，再依鍵的順序放入候選鍵；兩端已相連的候選鍵才斷開。因此分子不會因斷鍵而分成兩段（例如 A、B 兩條鏈之間有兩個雙硫鍵時，只斷開一個）。
+  - 判斷兩面角類別時，已斷開的鍵不算在環內（4.4、4.5）。
+  - 沒有殘基資訊的分子（SDF、無 substructure 的 mol2）不偵測交聯鍵；需要時使用 `ringBreak`。
+  - 金屬配位鍵不自動斷開。
 
 #### `staFixedResMovable = true`
 - 錨點為每條鏈最靠近該鏈質心的殘基（無殘基資訊時為最靠近質心的重原子）；轉動兩面角時，遠離錨點的一側移動。
@@ -233,12 +240,24 @@ flowchart TD
   D -- 通過 --> E["開始對接"]
 ```
 
-- 程式**不覆寫**使用者的檔案；預設檔一律使用新檔名。
-- 錯誤訊息須包含：行號、欄位名稱、原因。
+- 程式**不覆寫**使用者的檔案；預設檔一律使用新檔名。檔案已存在時改用 `<outPrefix>.molconfig.default.<n>.toml`（n = 1, 2, …）。
+- 未指定 `--molConfig` 時，寫出預設檔後以狀態 0 結束；驗證失敗時以狀態 1 結束。
+- 錯誤訊息須包含：行號、欄位名稱、原因；依行號排序，一次列出全部錯誤。
+- ω 檢查（4.3）在設定檔驗證通過後進行，只檢查設為 `fixed` 的 ω。
 
 ### 5.2 格式
 
-原子參照：有原子名稱且在該殘基內唯一時用名稱；否則用 `#<檔案內原子序號>`（1 起算）。
+原子參照：
+- 同一殘基項目內的原子：有原子名稱且在該殘基內唯一時用名稱，例如 `"CB"`。
+- 其他殘基的原子，以及分子層級的項目（`molecule.torsion`、`ringBreak`、`chainBreak`）：`<鏈>:<殘基序號><插入碼>:<原子名稱>`，例如 `"A:45:C"`。
+- 原子沒有殘基資訊、名稱空白或在殘基內不唯一時：`#<檔案內原子序號>`（1 起算；SDF / mol2 為該筆紀錄內的序號）。
+
+項目的位置：
+- 有主鏈的分子：每個主鏈單元一個 `[[molecule.residue]]`，依鏈的順序排列。有殘基資訊時以 `chain`、`resSeq`、`iCode` 識別（`resName` 必須與偵測結果一致）；沒有殘基資訊時以 `unit`（依序 1 起算）識別。
+- 主鏈兩面角寫成殘基的欄位：蛋白質 `phi`、`psi`、`omega`；核酸 `alpha`～`zeta`。鏈端缺少的角度不寫。
+- 其他兩面角：中間鍵第一個原子所在的殘基若有主鏈單元，寫在該殘基的 `[[molecule.residue.torsion]]`；否則寫在 `[[molecule.torsion]]`。
+- `ssType`、`dsspSS`、`csgm1` 只用於蛋白質分子。
+- `[[ssType]]` 列出全部內建類型（`R`、`O` 與 7.5 的 `RAMA_*`）。
 
 分子 `id`：
 - 有殘基與鏈資訊：`<sta|mob>:<檔名>:<鏈名稱，多條以 + 連接>`；同一檔案中有重複時，再加上 `:<第一個殘基名稱><序號><插入碼>`（例如水分子 `sta:r.cif:A:HOH501`）。
@@ -257,6 +276,8 @@ builtin = true
 [[ssType]]
 name    = "O"                    # 保持輸入角度，不可轉動
 builtin = true
+
+# RAMA_GENERAL、RAMA_GLY、RAMA_TRANSPRO、RAMA_CISPRO、RAMA_PREPRO、RAMA_ILEVAL、RAMA_AUTO 同上（builtin = true）
 
 [[ssType]]
 name = "A"                       # 自訂範例：alpha
@@ -279,6 +300,7 @@ csgm1        = "1a"              # 僅蛋白質：1a | 1b
   source = "auto-loop"           # auto-loop | auto-crosslink | user
 
   [[molecule.residue]]
+  chain    = "A"
   resName  = "SER"
   resSeq   = 12
   iCode    = ""
@@ -291,6 +313,26 @@ csgm1        = "1a"              # 僅蛋白質：1a | 1b
     atoms     = ["N", "CA", "CB", "OG"]
     rotatable = true
     category  = "single"         # 分類結果（參考用）
+
+# ---------- 核酸分子 ----------
+[[molecule]]
+id           = "mob:rna.cif:A"
+role         = "MobM"
+file         = "rna.cif"
+chain        = "A"
+backboneType = "nucleic"
+
+  [[molecule.residue]]
+  chain   = "A"
+  resName = "G"
+  resSeq  = 2
+  iCode   = ""
+  alpha   = true                 # StaM 預設 false；MobM 預設 true
+  beta    = true
+  gamma   = true
+  delta   = false                # 核糖環內，不可設為 true（除非 ringBreak）
+  epsilon = true
+  zeta    = true
 
 # ---------- 無主鏈分子 ----------
 [[molecule]]
@@ -312,13 +354,15 @@ backboneType = "none"
 
 | 項目 | 規則 |
 |---|---|
-| 版本 | `formatVersion` 必須為程式支援的版本 |
+| 版本 | `formatVersion` 必須為程式支援的版本（目前為 1） |
+| 欄位 | 不認得的欄位視為錯誤；設定欄位（`csgm1`、`ssType`、主鏈兩面角、`rotatable`、`source`）必須寫出；參考欄位（`role`、`file`、`chain`、`dsspSS`、`category`、`generatedBy`）不檢查內容 |
 | 分子 | 每個偵測到的分子都必須出現一次；`id`、`backboneType` 必須與偵測結果一致 |
 | 殘基與兩面角 | 必須與偵測結果一一對應，不可增減 |
-| 不可轉動的類別 | `category` 屬於 4.4 不可轉動類別者，`rotatable = true` 視為錯誤 |
-| 脯胺酸 φ | 不可設為 `true`（除非該環有 `ringBreak`） |
+| 不可轉動的類別 | 依斷鍵後重新分類的結果（4.5），不可轉動類別者 `rotatable = true` 視為錯誤（主鏈兩面角相同） |
+| 脯胺酸 φ、核酸 δ | 不可設為 `true`（除非該環有 `ringBreak`） |
+| 斷鍵 | `ringBreak` 見 4.5；`chainBreak` 的 `source` 為 `auto-loop`、`auto-crosslink`、`user`；兩者的鍵必須存在、不可為金屬配位鍵、不可重複；被斷開的鍵不可設為可轉動，該處的 ω 不可設為 `cisTrans` |
 | `csgm1` | 只有 `backboneType = "protein"` 可設定，值為 `1a` 或 `1b` |
-| `ssType` 名稱 | 必須已定義；必須包含 `R`、`O` |
+| `ssType` 名稱 | 必須已定義；必須包含 `R`、`O`；`builtin = true` 只能用於內建名稱，且不可有 `point`；自訂類型不可使用內建名稱 |
 | 自訂類型 | 至少一個 `point`；同一類型內 (φ, ψ) 不可重複；`prob` 皆 > 0 且總和 ≤ 1 |
 | 角度範圍 | (−180°, 180°] |
 
@@ -954,6 +998,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | 輸入只支援 mmCIF、SDF/MOL、mol2；不支援 PDB、pdbqt 輸入 |
 | — | 輸出格式 PDB、mmCIF、SDF/MOL、mol2 各自以參數開關；預設只開 PDB（第 10 節） |
 | — | 二級結構改用 DSSP（取代 STRIDE）；設定檔欄位 `dsspSS`（4.6） |
+| — | 核酸殘基的設定檔欄位 `alpha`～`zeta`（δ 不可設為 true，除非斷環）（5.2） |
 
 ### 17.2 待確認
 （目前無）
@@ -979,3 +1024,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.1 | 2026-10-14 | 實作階段 1：補充 mmCIF / SDF / mol2 讀取細則（3.1）、分子 `id` 規則（5.2）、第三方套件版本與原始碼位置（15.2、15.3.2）、libgomp 靜態連結（15.3.1）；刪除與 `--closureG` 重複的 `--ringRestraintG` |
 | 1.2 | 2026-10-14 | 實作拓撲分析：補充主鏈辨識細則（4.1）、主鏈兩面角歸屬與角度慣例（4.2）、兩面角列出範圍、原子選取、分類順序與對稱基團判定（4.4） |
 | 1.3 | 2026-10-14 | 二級結構判定由 STRIDE 改為 DSSP（4.6、5.1、15.2）；設定檔欄位 `strideSS` 改名為 `dsspSS`（5.2） |
+| 1.4 | 2026-10-14 | 實作分子設定檔：補充斷環規則（4.5）、交聯鍵選取方式（4.7）、流程細則（5.1）、原子參照與項目位置、核酸 `alpha`～`zeta` 欄位（5.2）、驗證規則（5.3） |

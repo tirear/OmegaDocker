@@ -12,6 +12,7 @@
 #include "log.hpp"
 #include "read_input.hpp"
 #include "dssp.hpp"
+#include "molconfig.hpp"
 #include "topology.hpp"
 #include "version.hpp"
 
@@ -30,35 +31,44 @@ void printMolecule(const od::Molecule& m) {
                           m.chargesFromFile ? " (file)" : " (Gasteiger)"));
 }
 
-od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
+od::TopologyParams topologyParams(const od::Options& opt) {
   od::TopologyParams p;
   p.box = od::Box{*opt.boxCenter, *opt.boxSize};
   p.staFlexMargin = opt.staFlexMargin;
-  od::Topology t = od::analyzeTopology(m, p);
+  return p;
+}
+
+od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
+  od::Topology t = od::analyzeTopology(m, topologyParams(opt));
   int rotatable = 0;
   for (const auto& tor : t.torsions) rotatable += tor.rotatable;
   od::logInfo(std::format("    backbone {} ({} units), torsions {}, rotatable by default {}",
                           od::backboneTypeName(t.backboneType), t.units.size(), t.torsions.size(), rotatable));
-
-  const auto bad = od::nonPlanarOmegas(t, opt.omegaTolerance);
-  if (!bad.empty()) {
-    std::string list;
-    for (int i : bad) {
-      const od::Torsion& tor = t.torsions[i];
-      const od::Atom& c = m.atoms[tor.atoms[1]];
-      std::string where = c.residue >= 0 ? std::format("{}:{}{}:{}", m.residues[c.residue].info.chain,
-                                                       m.residues[c.residue].info.seq,
-                                                       m.residues[c.residue].info.iCode, m.residues[c.residue].info.name)
-                                         : std::format("#{}", c.fileSerial);
-      list += std::format("\n  {} omega {:.1f}", where, tor.angle);
-    }
-    if (!opt.acceptNonPlanarOmega)
-      od::fail("{}: {} fixed omega angle(s) differ from 0 and 180 degrees by more than {} degrees "
-               "(--acceptNonPlanarOmega continues):{}",
-               m.id, bad.size(), opt.omegaTolerance, list);
-    od::logWarn(std::format("{}: {} non-planar fixed omega angle(s):{}", m.id, bad.size(), list));
-  }
   return t;
+}
+
+// Spec 4.3, for omega angles set to fixed.
+void checkOmegas(const od::Molecule& m, const od::MolSettings& s, const od::Options& opt) {
+  const od::Topology& t = s.topology;
+  std::vector<int> bad;
+  for (int i : od::nonPlanarOmegas(t, opt.omegaTolerance))
+    if (s.mode[i] == od::TorsionMode::Fixed) bad.push_back(i);
+  if (bad.empty()) return;
+  std::string list;
+  for (int i : bad) {
+    const od::Torsion& tor = t.torsions[i];
+    const od::Atom& c = m.atoms[tor.atoms[1]];
+    std::string where = c.residue >= 0 ? std::format("{}:{}{}:{}", m.residues[c.residue].info.chain,
+                                                     m.residues[c.residue].info.seq,
+                                                     m.residues[c.residue].info.iCode, m.residues[c.residue].info.name)
+                                       : std::format("#{}", c.fileSerial);
+    list += std::format("\n  {} omega {:.1f}", where, tor.angle);
+  }
+  if (!opt.acceptNonPlanarOmega)
+    od::fail("{}: {} fixed omega angle(s) differ from 0 and 180 degrees by more than {} degrees "
+             "(--acceptNonPlanarOmega continues):{}",
+             m.id, bad.size(), opt.omegaTolerance, list);
+  od::logWarn(std::format("{}: {} non-planar fixed omega angle(s):{}", m.id, bad.size(), list));
 }
 
 // DSSP residue counts, e.g. "H 12  E 10  . 5".
@@ -104,6 +114,8 @@ int run(int argc, char** argv) {
     od::assignDssp(mols, topos);
     for (const auto& t : staTopo) printDssp(t);
   }
+  std::vector<od::Molecule> mobs;
+  std::vector<od::Topology> mobTopo;
   for (const auto& f : opt.mob) {
     auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
     if (mob.size() != 1) od::fail("{}: --mob file must contain exactly one molecule, found {}", f, mob.size());
@@ -112,6 +124,38 @@ int run(int argc, char** argv) {
     od::Topology t = analyze(mob.front(), opt);
     od::assignDssp({&mob.front()}, {&t});
     printDssp(t);
+    mobs.push_back(std::move(mob.front()));
+    mobTopo.push_back(std::move(t));
+  }
+
+  // Molecule configuration (spec 5.1).
+  std::vector<od::MolInput> inputs;
+  for (std::size_t i = 0; i < sta.size(); ++i) inputs.push_back({&sta[i], &staTopo[i]});
+  for (std::size_t i = 0; i < mobs.size(); ++i) inputs.push_back({&mobs[i], &mobTopo[i]});
+  if (opt.molConfig.empty()) {
+    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs);
+    od::logInfo(std::format("Default molecule configuration written to {}\n"
+                            "Review it (a copy may be edited) and run again with --molConfig <file>.",
+                            path));
+    return 0;
+  }
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(opt.molConfig, inputs, topologyParams(opt), errors);
+  if (!cfg) {
+    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs);
+    std::string list;
+    for (const auto& e : errors) list += "\n  " + e;
+    od::fail("{}: {} problem(s) found:{}\nDefault molecule configuration written to {}", opt.molConfig, errors.size(),
+             list, path);
+  }
+  od::logInfo(std::format("Molecule configuration {}:", opt.molConfig));
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    const od::MolSettings& s = cfg->molecules[i];
+    checkOmegas(*inputs[i].mol, s, opt);
+    const auto free = std::count(s.mode.begin(), s.mode.end(), od::TorsionMode::Free);
+    const auto cisTrans = std::count(s.mode.begin(), s.mode.end(), od::TorsionMode::CisTrans);
+    od::logInfo(std::format("  {:<40} rotatable {:>5}  cisTrans omega {:>4}  ringBreak {:>3}  chainBreak {:>3}",
+                            inputs[i].mol->id, free, cisTrans, s.ringBreaks.size(), s.chainBreaks.size()));
   }
   return 0;
 }

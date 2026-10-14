@@ -74,6 +74,7 @@ add_library(od_core STATIC
   src/read_input.cpp
   src/topology.cpp
   src/dssp.cpp
+  src/molconfig.cpp
   ${OD_CCD_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(od_core PUBLIC od_gemmi od_tomlpp ${OD_RDKIT_LIBS} Eigen3::Eigen)
