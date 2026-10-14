@@ -13,6 +13,7 @@
 #include "ccd.hpp"
 #include "log.hpp"
 #include "read_input.hpp"
+#include "topology.hpp"
 
 namespace {
 
@@ -163,4 +164,113 @@ TEST_CASE("mol2: residues, aromaticity, multiple records") {
 
   auto two = od::loadMolecules(kData + "/pyrazole_pyridine.mol2", od::Role::StaM, ccd());
   CHECK(two.size() == 2);
+}
+
+
+namespace {
+
+int countAngle(const od::Topology& t, od::BackboneAngle a) {
+  int n = 0;
+  for (const auto& tor : t.torsions) n += tor.backbone == a;
+  return n;
+}
+
+int countRotatable(const od::Topology& t) {
+  int n = 0;
+  for (const auto& tor : t.torsions) n += tor.rotatable;
+  return n;
+}
+
+const od::Torsion& torsionAt(const od::Molecule& m, const od::Topology& t, int seq, const std::string& b,
+                             const std::string& c) {
+  for (const auto& tor : t.torsions) {
+    const auto& x = m.atoms[tor.atoms[1]];
+    const auto& y = m.atoms[tor.atoms[2]];
+    if (x.residue >= 0 && m.residues[x.residue].info.seq == seq && x.name == b && y.name == c) return tor;
+  }
+  FAIL("torsion not found: " << seq << ":" << b << "-" << c);
+  return t.torsions.front();
+}
+
+}  // namespace
+
+TEST_CASE("topology: dihedral sign convention") {
+  CHECK(od::dihedralDeg({1, 0, 0}, {0, 0, 0}, {0, 0, 1}, {0, 1, 1}) == doctest::Approx(90));
+  CHECK(od::dihedralDeg({1, 0, 0}, {0, 0, 0}, {0, 0, 1}, {-1, 0, 1}) == doctest::Approx(180));
+}
+
+TEST_CASE("topology: protein backbone and side chains (1L2Y)") {
+  auto mob = od::loadMolecules(kData + "/1L2Y.cif", od::Role::MobM, ccd());
+  const auto& m = mob[0];
+  auto t = od::analyzeTopology(m, {});
+  CHECK(t.backboneType == od::BackboneType::Protein);
+  CHECK(t.units.size() == 20);
+  CHECK(countAngle(t, od::BackboneAngle::Phi) == 19);
+  CHECK(countAngle(t, od::BackboneAngle::Psi) == 19);
+  CHECK(countAngle(t, od::BackboneAngle::Omega) == 19);
+
+  const auto& phi3 = torsionAt(m, t, 3, "N", "CA");
+  CHECK(phi3.backbone == od::BackboneAngle::Phi);
+  CHECK(phi3.angle == doctest::Approx(-66.5).epsilon(0.002));
+  CHECK(phi3.rotatable);
+  const auto& phiPro = torsionAt(m, t, 12, "N", "CA");  // proline phi lies in the ring
+  CHECK(phiPro.category == od::TorsionCategory::Ring);
+  CHECK_FALSE(phiPro.rotatable);
+  const auto& omega = torsionAt(m, t, 5, "C", "N");
+  CHECK(omega.backbone == od::BackboneAngle::Omega);
+  CHECK(omega.category == od::TorsionCategory::Amide);
+  CHECK_FALSE(omega.rotatable);
+  CHECK(torsionAt(m, t, 16, "NE", "CZ").category == od::TorsionCategory::Resonance);
+  CHECK(torsionAt(m, t, 9, "CB", "CG").category == od::TorsionCategory::Symmetric);  // carboxylate
+  CHECK(torsionAt(m, t, 3, "CG", "CD1").category == od::TorsionCategory::Aromatic);
+  CHECK(torsionAt(m, t, 8, "CD", "CE").rotatable);
+
+  CHECK(od::nonPlanarOmegas(t, 30).empty());
+  CHECK_FALSE(od::nonPlanarOmegas(t, 5).empty());
+
+  // StaM: backbone fixed; side chains rotatable only near the box.
+  auto sta = od::loadMolecules(kData + "/1L2Y.cif", od::Role::StaM, ccd());
+  auto all = od::analyzeTopology(sta[0], {});
+  CHECK_FALSE(torsionAt(sta[0], all, 3, "N", "CA").rotatable);
+  CHECK(torsionAt(sta[0], all, 8, "CD", "CE").rotatable);
+  od::TopologyParams p;
+  p.box = od::Box{atomOf(sta[0], "A", 6, "CA").xyz, {1, 1, 1}};
+  p.staFlexMargin = 0;
+  auto near = od::analyzeTopology(sta[0], p);
+  CHECK(countRotatable(near) == 2);  // TRP6 chi1, chi2
+  CHECK(torsionAt(sta[0], near, 6, "CA", "CB").rotatable);
+  CHECK_FALSE(torsionAt(sta[0], near, 8, "CD", "CE").rotatable);
+}
+
+TEST_CASE("topology: nucleic-acid backbone (1D18 DNA, 1RNG RNA)") {
+  auto dna = od::loadMolecules(kData + "/1D18.cif", od::Role::MobM, ccd());
+  REQUIRE(dna.size() == 2);
+  auto t = od::analyzeTopology(dna[0], {});
+  CHECK(t.backboneType == od::BackboneType::Nucleic);
+  CHECK(t.units.size() == 8);
+  CHECK(countAngle(t, od::BackboneAngle::Alpha) == 7);  // the 5' residue has no phosphate
+  CHECK(countAngle(t, od::BackboneAngle::Beta) == 7);
+  CHECK(countAngle(t, od::BackboneAngle::Gamma) == 8);
+  CHECK(countAngle(t, od::BackboneAngle::Delta) == 8);
+  CHECK(countAngle(t, od::BackboneAngle::Epsilon) == 7);
+  CHECK(countAngle(t, od::BackboneAngle::Zeta) == 7);
+  const auto& delta = torsionAt(dna[0], t, 2, "C4'", "C3'");
+  CHECK(delta.category == od::TorsionCategory::Ring);
+  CHECK_FALSE(delta.rotatable);
+  CHECK(torsionAt(dna[0], t, 2, "P", "O5'").angle == doctest::Approx(-64.8).epsilon(0.002));
+  CHECK(countRotatable(t) == 7 + 7 + 8 + 7 + 7 + 8);  // alpha..zeta except delta, plus chi
+
+  auto rna = od::loadMolecules(kData + "/1RNG.cif", od::Role::MobM, ccd());
+  REQUIRE(rna.size() == 1);
+  auto r = od::analyzeTopology(rna[0], {});
+  CHECK(r.backboneType == od::BackboneType::Nucleic);
+  CHECK(r.units.size() == 12);
+}
+
+TEST_CASE("topology: small molecule (biotin)") {
+  auto mols = od::loadMolecules(kData + "/BTN_ideal.sdf", od::Role::MobM, ccd());
+  auto t = od::analyzeTopology(mols[0], {});
+  CHECK(t.backboneType == od::BackboneType::None);
+  CHECK(t.torsions.size() == 14);
+  CHECK(countRotatable(t) == 5);
 }

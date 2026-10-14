@@ -28,7 +28,15 @@ TEST_CASE("cli: required options and values") {
   CHECK((*o.boxSize)[2] == doctest::Approx(30));
   CHECK(o.outCif);
   CHECK_FALSE(o.outPdb);
+  CHECK(o.omegaTolerance == doctest::Approx(30));
+  CHECK_FALSE(o.acceptNonPlanarOmega);
+  CHECK(o.staFlexMargin == doctest::Approx(4));
   CHECK_NOTHROW(od::validateOptions(o));
+
+  auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--staFlexMargin=6.5"});
+  CHECK(t.omegaTolerance == doctest::Approx(20));
+  CHECK(t.acceptNonPlanarOmega);
+  CHECK(t.staFlexMargin == doctest::Approx(6.5));
 }
 
 TEST_CASE("cli: errors") {
@@ -45,6 +53,12 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);  // all output formats disabled
   o.outMol2 = true;
   CHECK_NOTHROW(od::validateOptions(o));
+  o.omegaTolerance = 95;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.omegaTolerance = 30;
+  o.staFlexMargin = -1;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.staFlexMargin = 4;
   o.boxSize = od::Vec3{10, 0, 10};
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 }

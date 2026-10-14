@@ -78,6 +78,12 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.outSdf = parseBool("outSdf", v); }},
       {"outMol2", Kind::Value, "true|false", "false", "Write mol2 output",
        [](Options& o, const std::string& v) { o.outMol2 = parseBool("outMol2", v); }},
+      {"omegaTolerance", Kind::Value, "<deg>", "30", "Allowed deviation of a fixed omega from 0 or 180 degrees",
+       [](Options& o, const std::string& v) { o.omegaTolerance = parseDouble("omegaTolerance", v); }},
+      {"acceptNonPlanarOmega", Kind::Flag, "", "", "Continue when a fixed omega exceeds --omegaTolerance",
+       [](Options& o, const std::string&) { o.acceptNonPlanarOmega = true; }},
+      {"staFlexMargin", Kind::Value, "<dist>", "4", "StaM torsions are rotatable by default within the box extended by this margin (Å)",
+       [](Options& o, const std::string& v) { o.staFlexMargin = parseDouble("staFlexMargin", v); }},
       {"help", Kind::Flag, "", "", "Show this help", [](Options& o, const std::string&) { o.showHelp = true; }},
       {"version", Kind::Flag, "", "", "Show version", [](Options& o, const std::string&) { o.showVersion = true; }},
   };
@@ -123,6 +129,8 @@ void validateOptions(const Options& o) {
   for (double v : *o.boxSize)
     if (!(v > 0)) fail("--boxSize: all components must be > 0");
   if (o.outPrefix.empty()) fail("--outPrefix is required");
+  if (!(o.omegaTolerance >= 0 && o.omegaTolerance <= 90)) fail("--omegaTolerance must be within [0, 90]");
+  if (!(o.staFlexMargin >= 0)) fail("--staFlexMargin must be >= 0");
   if (!o.outPdb && !o.outCif && !o.outSdf && !o.outMol2)
     fail("All output formats are disabled (--outPdb, --outCif, --outSdf, --outMol2)");
 }

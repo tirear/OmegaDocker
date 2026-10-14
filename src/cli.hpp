@@ -25,6 +25,9 @@ struct Options {
   bool outCif = false;
   bool outSdf = false;
   bool outMol2 = false;
+  double omegaTolerance = 30.0;
+  bool acceptNonPlanarOmega = false;
+  double staFlexMargin = 4.0;
 
   bool showHelp = false;
   bool showVersion = false;
