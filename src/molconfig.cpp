@@ -302,12 +302,13 @@ template <class T>
 std::optional<T> get(const toml::table& t, const std::string& key, const std::string& where, Errors& e,
                      bool required) {
   const toml::node* n = t.get(key);
+  const std::string field = where.empty() ? key : where + "." + key;
   if (!n) {
-    if (required) e.add(lineOf(t), where + "." + key, "missing");
+    if (required) e.add(lineOf(t), field, "missing");
     return std::nullopt;
   }
   if (!hasType<T>(*n)) {
-    e.add(lineOf(*n), where + "." + key, std::format("must be {}", typeName<T>()));
+    e.add(lineOf(*n), field, std::format("must be {}", typeName<T>()));
     return std::nullopt;
   }
   return n->value<T>();
@@ -766,8 +767,14 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
   o += std::format("formatVersion = {}\n", kMolConfigFormatVersion);
   o += std::format("generatedBy   = {}\n", quote(std::format("OmegaDocker {}", kVersion)));
   o += "\n# ---------- secondary-structure sampling types (csgm1b only) ----------\n";
+  o += "# ssHalfWidth: phi and psi range (+- degrees) around each custom point and around the input\n";
+  o += "#   angles for O; 0 < ssHalfWidth <= 90.\n";
+  o += "# ssOriginalProb: probability of the O range; otherwise R; 0 < ssOriginalProb <= 1.\n";
+  o += "ssHalfWidth    = 15.0\n";
+  o += "ssOriginalProb = 0.9\n";
   o += "# Built-in types cannot be changed; R and O are required.\n";
-  o += "#   R: uniform; O: keep the original secondary structure (from the input, spec 7.5);\n";
+  o += "#   R: uniform; O (Original): keep the original secondary structure: phi and psi within\n";
+  o += "#   +-ssHalfWidth of the input angles with ssOriginalProb, otherwise R (spec 7.5);\n";
   o += "#   RAMA_*: Top8000 distributions (spec 7.5).\n";
   o += "#   RAMA_GLY: Gly; RAMA_TRANSPRO / RAMA_CISPRO: Pro after a trans / cis omega;\n";
   o += "#   RAMA_PREPRO: residue before Pro (not Gly, Pro); RAMA_ILEVAL: Ile, Val (not before Pro);\n";
@@ -776,7 +783,8 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
   o += "# chain-end residues (without phi or psi) and residues with only one of phi, psi rotatable\n";
   o += "# use R. Non-rotatable angles always keep the input angles.\n";
   o += "# Custom type: [[ssType]] name = \"A\" with [[ssType.point]] phi, psi, prob entries; a chosen\n";
-  o += "# point gives phi and psi uniformly within +-15 degrees of its values.\n";
+  o += "# point gives phi and psi uniformly within +-ssHalfWidth of its values; the remaining\n";
+  o += "# probability gives angles outside all point ranges.\n";
   for (const auto& n : builtinSsTypes()) o += std::format("\n[[ssType]]\nname    = {}\nbuiltin = true\n", quote(n));
   o += "\n# ---------- molecules ----------\n";
   o += "# [[molecule.ringBreak]] bond = [\"<atom>\", \"<atom>\"] breaks a ring bond (spec 4.5).\n";
@@ -818,12 +826,20 @@ std::optional<MolConfig> readMolConfig(const std::string& path, const std::vecto
     return std::nullopt;
   }
   Errors e;
-  checkKeys(root, {"formatVersion", "generatedBy", "ssType", "molecule"}, "", e);
+  checkKeys(root, {"formatVersion", "generatedBy", "ssHalfWidth", "ssOriginalProb", "ssType", "molecule"}, "", e);
   if (auto v = get<std::int64_t>(root, "formatVersion", "", e, true); v && *v != kMolConfigFormatVersion)
     e.add(lineOf(*root.get("formatVersion")), "formatVersion", std::format("must be {}", kMolConfigFormatVersion));
   get<std::string>(root, "generatedBy", "", e, false);
 
   MolConfig cfg;
+  if (auto v = get<double>(root, "ssHalfWidth", "", e, false)) {
+    if (*v > 0 && *v <= 90) cfg.ssHalfWidth = *v;
+    else e.add(lineOf(*root.get("ssHalfWidth")), "ssHalfWidth", "must be > 0 and <= 90");
+  }
+  if (auto v = get<double>(root, "ssOriginalProb", "", e, false)) {
+    if (*v > 0 && *v <= 1) cfg.ssOriginalProb = *v;
+    else e.add(lineOf(*root.get("ssOriginalProb")), "ssOriginalProb", "must be > 0 and <= 1");
+  }
   cfg.ssTypes = readSsTypes(root, e);
   std::set<std::string> ssNames;
   for (const auto& s : cfg.ssTypes) ssNames.insert(s.name);

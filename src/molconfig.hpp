@@ -49,6 +49,10 @@ struct MolSettings {
 
 struct MolConfig {
   std::vector<SsType> ssTypes;
+  // csgm1b (spec 7.5): half width (degrees) of the phi and psi range around each
+  // custom point and around the input angles for O; probability of that range for O.
+  double ssHalfWidth = 15.0;
+  double ssOriginalProb = 0.9;
   std::vector<MolSettings> molecules;  // same order as the input molecules
 };
 

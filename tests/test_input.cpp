@@ -692,3 +692,32 @@ TEST_CASE("molconfig: RAMA types must match the residue (1L2Y)") {
   CHECK(text.substr(r1, 13) == "ssType  = \"R\"");
   CHECK(text.substr(r20, 13) == "ssType  = \"R\"");
 }
+
+TEST_CASE("molconfig: ssHalfWidth and ssOriginalProb") {
+  ConfigFixture f;
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  CHECK(text.find("ssHalfWidth    = 15.0\n") != std::string::npos);
+  CHECK(text.find("ssOriginalProb = 0.9\n") != std::string::npos);
+  auto read = [&](const std::string& s) {
+    std::ofstream(f.path) << s;
+    std::vector<std::string> errors;
+    auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+    REQUIRE(cfg);
+    return *cfg;
+  };
+  auto cfg = read(text);
+  CHECK(cfg.ssHalfWidth == 15.0);
+  CHECK(cfg.ssOriginalProb == 0.9);
+  cfg = read(replaceAfter(replaceAfter(text, "ssHalfWidth", "15.0", "10"), "ssOriginalProb", "0.9", "1"));
+  CHECK(cfg.ssHalfWidth == 10.0);
+  CHECK(cfg.ssOriginalProb == 1.0);
+  std::string none = replaceAfter(text, "ssHalfWidth    = 15.0\n", "ssOriginalProb = 0.9\n", "");
+  none = replaceAfter(none, "# ssOriginalProb", "ssHalfWidth    = 15.0\n", "");
+  cfg = read(none);
+  CHECK(cfg.ssHalfWidth == 15.0);
+  CHECK(cfg.ssOriginalProb == 0.9);
+  CHECK(hasError(f.errorsOf(replaceAfter(text, "ssHalfWidth", "15.0", "0")), "ssHalfWidth: must be > 0 and <= 90"));
+  CHECK(hasError(f.errorsOf(replaceAfter(text, "ssHalfWidth", "15.0", "91")), "ssHalfWidth: must be > 0 and <= 90"));
+  CHECK(hasError(f.errorsOf(replaceAfter(text, "ssOriginalProb", "0.9", "1.5")), "ssOriginalProb: must be > 0 and <= 1"));
+  CHECK(hasError(f.errorsOf(replaceAfter(text, "ssOriginalProb", "0.9", "\"x\"")), "line 17: ssOriginalProb: must be a number"));
+}

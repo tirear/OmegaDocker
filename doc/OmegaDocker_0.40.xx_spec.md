@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.6 |
+| 文件版本 | 1.7 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -292,13 +292,16 @@ formatVersion = 1
 generatedBy   = "OmegaDocker <version>"
 
 # ---------- 二級結構產生類型（僅 csgm1b 使用） ----------
+ssHalfWidth    = 15.0            # 自訂 point 與 O 的 φ、ψ 範圍（±度），所有點統一；0 < 值 ≤ 90
+ssOriginalProb = 0.9             # O 取輸入角度範圍內的機率，其餘依 R；0 < 值 ≤ 1
+
 # R、O 為必要的內建類型，不可刪除或修改
 [[ssType]]
 name    = "R"                    # 均勻分佈
 builtin = true
 
 [[ssType]]
-name    = "O"                    # Original：盡量保持輸入結構的二級結構
+name    = "O"                    # Original：以輸入角度 ± ssHalfWidth，機率 ssOriginalProb
 builtin = true
 
 # RAMA_GENERAL、RAMA_GLY、RAMA_TRANSPRO、RAMA_CISPRO、RAMA_PREPRO、RAMA_ILEVAL、RAMA_AUTO 同上（builtin = true）
@@ -308,7 +311,7 @@ name = "A"                       # 自訂範例：alpha
   [[ssType.point]]
   phi  = -58
   psi  = -48
-  prob = 0.9                     # 在 (−58±15°, −48±15°) 內均勻取值；其餘 0.1 均勻分配給範圍外的所有角度組合
+  prob = 0.9                     # 在 (−58 ± ssHalfWidth, −48 ± ssHalfWidth) 內均勻取值；其餘 0.1 均勻分配給範圍外的所有角度組合
 
 # ---------- 蛋白質分子 ----------
 [[molecule]]
@@ -385,6 +388,7 @@ backboneType = "none"
 | 項目 | 規則 |
 |---|---|
 | 版本 | `formatVersion` 必須為程式支援的版本（目前為 1） |
+| 取值範圍參數 | `ssHalfWidth`：數值，0 < 值 ≤ 90，省略時為 15；`ssOriginalProb`：數值，0 < 值 ≤ 1，省略時為 0.9 |
 | 欄位 | 不認得的欄位視為錯誤；設定欄位（`csgm1`、`ssType`、主鏈兩面角、`rotatable`、`source`）必須寫出；參考欄位（`role`、`file`、`chain`、`dsspSS`、`category`、`generatedBy`）不檢查內容 |
 | 分子 | 每個偵測到的分子都必須出現一次；`id`、`backboneType` 必須與偵測結果一致 |
 | 殘基與兩面角 | 必須與偵測結果一一對應，不可增減 |
@@ -395,7 +399,7 @@ backboneType = "none"
 | `csgm1` | 只有 `backboneType = "protein"` 可設定，值為 `1a` 或 `1b` |
 | `ssType` 名稱 | 必須已定義；必須包含 `R`、`O`；`builtin = true` 只能用於內建名稱，且不可有 `point`；自訂類型不可使用內建名稱 |
 | `RAMA_*` 與殘基 | `RAMA_AUTO` 以外的 `RAMA_*` 必須與殘基類別相符（7.5），否則報錯；Pro 前一個 ω 為 `cisTrans` 時不可用 `RAMA_TRANSPRO`、`RAMA_CISPRO`（改用 `RAMA_AUTO`） |
-| 自訂類型 | 至少一個 `point`；同一類型內 (φ, ψ) 不可重複；`prob` 皆 > 0 且總和 ≤ 1；每個 `point` 的範圍為 φ ± 15°、ψ ± 15°（跨越 ±180° 時環繞） |
+| 自訂類型 | 至少一個 `point`；同一類型內 (φ, ψ) 不可重複；`prob` 皆 > 0 且總和 ≤ 1；每個 `point` 的範圍為 φ ± `ssHalfWidth`、ψ ± `ssHalfWidth`（所有點統一，不可個別設定；跨越 ±180° 時環繞） |
 | 角度範圍 | (−180°, 180°] |
 
 ---
@@ -482,8 +486,8 @@ nextL1 = min(nextL1, maxL1BatchNum)
 - **兩面角是否可轉動，一律以分子設定檔的開關為最終標準**（所有分子，不論是否有主鏈）。`ssType` 只決定「可轉動的主鏈 φ、ψ 依什麼機率分佈取值」；不可轉動的兩面角維持輸入角度，與 `ssType` 無關。
 - φ、ψ 都可轉動的殘基，依 `ssType` 同時取 (φ, ψ)：
   - `R`：φ、ψ 依 csgm1a。
-  - `O`（Original）：盡量保持該殘基在輸入結構中（以 DSSP 判定）的二級結構；具體的機率分佈待確認（17.2 P1）。
-  - 自訂類型：以 `prob` 選中某個 `point`，在 φ ± 15°、ψ ± 15° 內均勻取值；否則（機率 `1 − Σprob`）從所有 `point` 範圍以外的角度組合中均勻選取。例如 `A` 類型以 90% 取 α 螺旋附近的角度，10% 取其他角度。
+  - `O`（Original）：盡量保持該殘基在輸入結構中的二級結構。以機率 `ssOriginalProb`（預設 0.9）在輸入角度 φ₀ ± `ssHalfWidth`、ψ₀ ± `ssHalfWidth`（預設 ±15°）內均勻取值；否則（機率 `1 − ssOriginalProb`）依 `R`。
+  - 自訂類型：以 `prob` 選中某個 `point`，在 φ ± `ssHalfWidth`、ψ ± `ssHalfWidth` 內均勻取值；否則（機率 `1 − Σprob`）從所有 `point` 範圍以外的角度組合中均勻選取。例如 `A` 類型以 90% 取 α 螺旋附近的角度，10% 取其他角度。
   - `RAMA_*`：見下表。
 - 鏈端殘基（缺 φ 或 ψ）：不論 `ssType`，一律依 `R`。
 - 只有 φ、ψ 其中之一可轉動的殘基：不論 `ssType`，可轉動的角度依 `R`。
@@ -1044,7 +1048,8 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | 金屬配位鍵在環內時，由使用者以 `metalBond` 選擇 `keep`（選項 A，預設，保留，環內不可轉動）或 `break`（選項 B，斷開，距離約束）；設定衝突時報錯結束（4.7、4.8、5.3） |
 | — | `O` 為 Original：csgm1b 下盡量保持輸入結構的二級結構（7.5） |
 | — | 只有 φ、ψ 其中之一可轉動時依 `R`（7.5） |
-| — | 自訂類型的 `point` 範圍為 ±15°（5.3、7.5） |
+| — | 自訂類型的 `point` 範圍為 ±`ssHalfWidth`（預設 15°，所有點統一，使用者可設定）（5.2、5.3、7.5） |
+| — | `O` 以輸入角度 ± `ssHalfWidth`、機率 `ssOriginalProb`（預設 0.9）取值，其餘依 `R`（5.2、7.5） |
 | — | Gasteiger 電荷計算前移除金屬配位鍵，金屬使用形式電荷（3.1） |
 | — | 兩面角是否可轉動以設定檔開關為最終標準；`ssType` 只用於 csgm1b 且 φ、ψ 可轉動的殘基（7.5） |
 | — | 鏈端殘基一律依 `R`（7.5） |
@@ -1054,9 +1059,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | GPU 效能最佳化依原子數分級，之後處理（15.1） |
 
 ### 17.2 待確認
-| # | 問題 |
-|---|---|
-| P1 | `O` 的具體機率分佈。候選：(a) 以輸入的 (φ, ψ) 為 `point`，範圍 ±15°，`prob` 為某個值（例如 0.9），其餘依 `R`；(b) 依該殘基的 DSSP 代碼，取該二級結構在 Ramachandran 圖上的區域（例如 H → α 區域），其餘依 `R`；(c) 其他 |
+（目前無）
 
 ---
 
@@ -1082,3 +1085,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.4 | 2026-10-14 | 實作分子設定檔：補充斷環規則（4.5）、交聯鍵選取方式（4.7）、流程細則（5.1）、原子參照與項目位置、核酸 `alpha`～`zeta` 欄位（5.2）、驗證規則（5.3） |
 | 1.5 | 2026-10-14 | 金屬配位鍵 `metalBond`（4.7、4.8、5.2、5.3）；Gasteiger 電荷排除金屬配位鍵（3.1）；交聯鍵選取不計金屬配位鍵（4.7）；csgm1b 與開關的關係、鏈端用 `R`、`RAMA_*` 殘基檢查與類別判定、Top8000 嵌入（5.2、5.3、7.5、15.2）；`rotStep` 預設 7.5°（8.3、8.4、14）；GPU 效能最佳化依原子數分級的註記（15.1）；待確認 P1–P3（17.2） |
 | 1.6 | 2026-10-14 | `metalBond` 預設改為 `keep`（選項 A），選項 B 的斷鍵以註解列出（4.7、5.2）；`O` 定義為 Original（5.2、7.5）；只有 φ、ψ 其中之一可轉動時依 `R`（7.5）；自訂 `point` 範圍 ±15°（5.3、7.5）；P2、P3 已確認，P1 改為 `O` 的分佈 |
+| 1.7 | 2026-10-14 | 設定檔頂層 `ssHalfWidth`（預設 15°）與 `ssOriginalProb`（預設 0.9）；`O` 的分佈確定（P1）（5.2、5.3、7.5） |
