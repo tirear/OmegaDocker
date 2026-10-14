@@ -1753,6 +1753,12 @@ parameters argc and argv:
       printf("ERROR: pMem_conformations_current: failed to upload to GPU memory.\n");
       exit(1);
     }
+    status = cudaMemcpy(pMem_conformations_next[i], cpu_init_populations[i], size_populations_per_run, cudaMemcpyHostToDevice);
+    if(status != 0)
+    {
+      printf("ERROR: pMem_conformations_next: failed to upload to GPU memory.\n");
+      exit(1);
+    }
   }
   // sans <==
 //   RTERROR(status, "pMem_conformations_current: failed to upload to GPU memory.\n"); // sans
@@ -2526,8 +2532,8 @@ parameters argc and argv:
         gpu_gen_and_eval_newpops(mypars->pop_size, kernel4_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, runIndex + run_window);
         cudaDeviceSynchronize();
       }
-    gpu_gen_and_eval_newpops(mypars->pop_size, kernel4_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
-    cudaDeviceSynchronize();
+      gpu_gen_and_eval_newpops(mypars->pop_size, kernel4_lxsize, mypars->ligandOnly, pMem_conformations_current, pMem_energies_current, pMem_conformations_next, pMem_energies_next, tData.pMem_energyToConforIndex, cData.pMem_evals_of_new_entities, tData.gFloatBuff, elemNum_gFloatBuffBase, runIndex, mypars->num_of_runs);
+      cudaDeviceSynchronize();
     }
 //     printf("sans docking_with_gpu15\n");fflush(stdout);
     // sans check ==>
