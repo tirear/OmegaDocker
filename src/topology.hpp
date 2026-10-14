@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "molecule.hpp"
@@ -58,6 +59,9 @@ struct Topology {
   BackboneType backboneType = BackboneType::None;
   std::vector<BackboneUnit> units;
   std::vector<Torsion> torsions;
+  // DSSP code per residue (spec 4.6; set by assignDssp): H G I P E B T S, '.' for
+  // none, ' ' for residues outside the protein backbone. Empty if not assigned.
+  std::string dsspSS;
 };
 
 struct Box {

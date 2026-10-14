@@ -12,6 +12,7 @@
 
 #include "ccd.hpp"
 #include "log.hpp"
+#include "dssp.hpp"
 #include "read_input.hpp"
 #include "topology.hpp"
 
@@ -273,4 +274,46 @@ TEST_CASE("topology: small molecule (biotin)") {
   CHECK(t.backboneType == od::BackboneType::None);
   CHECK(t.torsions.size() == 14);
   CHECK(countRotatable(t) == 5);
+}
+
+
+namespace {
+
+std::string dsspString(const std::string& file) {
+  auto mols = od::loadMolecules(kData + "/" + file, od::Role::StaM, ccd());
+  std::vector<od::Topology> topo;
+  for (const auto& m : mols) topo.push_back(od::analyzeTopology(m, {}));
+  std::vector<const od::Molecule*> mp;
+  std::vector<od::Topology*> tp;
+  for (std::size_t i = 0; i < mols.size(); ++i) {
+    mp.push_back(&mols[i]);
+    tp.push_back(&topo[i]);
+  }
+  od::assignDssp(mp, tp);
+  std::string s;
+  for (const auto& t : topo)
+    for (char c : t.dsspSS)
+      if (c != ' ') s += c;
+  return s;
+}
+
+}  // namespace
+
+// Reference strings from mkdssp 4.6.1 on the same files.
+TEST_CASE("dssp: agreement with DSSP 4") {
+  CHECK(dsspString("1L2Y.cif") == ".HHHHHHHTTGGGGT.PPP.");
+  CHECK(dsspString("1D3Z.cif") ==
+        ".EEEEE.TTS.EEEEE..TT.BHHHHHHHHHHHH...GGGEEEEETTEEPPTTSBTGGGT..TT.EEEEEE..S..");
+  CHECK(dsspString("2KJJ.cif") == ".HIIIIISS.B.HHHHHTTB....B...SHHHHHHHHHHTGGG.B......");
+}
+
+TEST_CASE("dssp: molecules without a protein backbone") {
+  auto mols = od::loadMolecules(kData + "/BTN_ideal.sdf", od::Role::MobM, ccd());
+  auto t = od::analyzeTopology(mols[0], {});
+  od::assignDssp({&mols[0]}, {&t});
+  CHECK(t.dsspSS.empty());
+  auto dna = od::loadMolecules(kData + "/1D18.cif", od::Role::MobM, ccd());
+  auto d = od::analyzeTopology(dna[0], {});
+  od::assignDssp({&dna[0]}, {&d});
+  CHECK(d.dsspSS.empty());
 }

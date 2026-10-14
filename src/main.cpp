@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <cstdio>
+#include <algorithm>
 #include <format>
 #include <numeric>
 
@@ -10,6 +11,7 @@
 #include "cli.hpp"
 #include "log.hpp"
 #include "read_input.hpp"
+#include "dssp.hpp"
 #include "topology.hpp"
 #include "version.hpp"
 
@@ -59,6 +61,17 @@ od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
   return t;
 }
 
+// DSSP residue counts, e.g. "H 12  E 10  . 5".
+void printDssp(const od::Topology& t) {
+  if (t.dsspSS.empty()) return;
+  std::string line;
+  for (char c : std::string("HGIPEBTS.")) {
+    const auto n = std::count(t.dsspSS.begin(), t.dsspSS.end(), c);
+    if (n > 0) line += std::format("  {} {}", c, n);
+  }
+  od::logInfo("    DSSP" + line);
+}
+
 int run(int argc, char** argv) {
   od::Options opt = od::parseCommandLine(argc, argv);
   if (opt.showHelp) {
@@ -76,16 +89,29 @@ int run(int argc, char** argv) {
 
   auto sta = od::loadMolecules(opt.sta, od::Role::StaM, ccd);
   od::logInfo(std::format("StaM group from {}: {} molecule(s)", opt.sta, sta.size()));
+  std::vector<od::Topology> staTopo;
   for (const auto& m : sta) {
     printMolecule(m);
-    analyze(m, opt);
+    staTopo.push_back(analyze(m, opt));
+  }
+  {
+    std::vector<const od::Molecule*> mols;
+    std::vector<od::Topology*> topos;
+    for (std::size_t i = 0; i < sta.size(); ++i) {
+      mols.push_back(&sta[i]);
+      topos.push_back(&staTopo[i]);
+    }
+    od::assignDssp(mols, topos);
+    for (const auto& t : staTopo) printDssp(t);
   }
   for (const auto& f : opt.mob) {
     auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
     if (mob.size() != 1) od::fail("{}: --mob file must contain exactly one molecule, found {}", f, mob.size());
     od::logInfo(std::format("MobM from {}:", f));
     printMolecule(mob.front());
-    analyze(mob.front(), opt);
+    od::Topology t = analyze(mob.front(), opt);
+    od::assignDssp({&mob.front()}, {&t});
+    printDssp(t);
   }
   return 0;
 }

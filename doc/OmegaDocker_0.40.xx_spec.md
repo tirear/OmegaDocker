@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.2 |
+| 文件版本 | 1.3 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -168,9 +168,13 @@
 
 ### 4.6 二級結構判定
 
-- 對所有蛋白質分子（StaM 與 MobM）以 **STRIDE 演算法** 判定每個殘基的二級結構。
-- 依 Frishman & Argos (1995) 論文自行實作（clean-room），**不使用 STRIDE 原始碼**。原因：STRIDE 授權僅限學術使用，與 OmegaDocker 的 LGPL 不相容。
-- 驗證：開發時以外部 STRIDE 執行檔比對結果（使用者自行安裝；OmegaDocker 不散佈）。
+- 對所有蛋白質分子（StaM 與 MobM）以 **DSSP 演算法**（Kabsch & Sander 1983）判定每個殘基的二級結構，包含 DSSP 4 新增的 κ 螺旋（PPII，代碼 `P`；Hekkelman et al. 2025）。
+- 不使用 STRIDE：STRIDE 授權僅限學術使用；且其判定所需的 φ/ψ 機率表只見於原始碼，論文中沒有數值，無法自行實作。
+- 自行實作，行為與 DSSP 4（PDB-REDO/dssp，BSD-2-Clause）一致，包括單精度座標、氫鍵能量取到 0.001 kcal/mol、H 原子由前一個殘基的 C=O 方向放置、梯子（ladder）合併時的間隔判斷。
+- 判定範圍：StaM 群組的所有分子一起判定（可找到分子之間的 β 摺板）；每個 MobM 各自判定。
+- 殘基依主鏈單元（4.1）取得 N、CA、C、O，不依原子名稱；N 除了 CA 與前一殘基的 C 之外另連有重原子者（脯胺酸、N-甲基化殘基）不作為氫鍵供體。
+- 代碼：`H` α 螺旋、`G` 3₁₀ 螺旋、`I` π 螺旋、`P` κ 螺旋、`E` 摺板、`B` 孤立橋、`T` 轉角、`S` 彎曲、`.` 無。
+- 驗證：開發時以 mkdssp 4.6.1 比對（只用於驗證，不隨 OmegaDocker 散佈）；18 個 PDB 結構共約 5,800 個殘基，結果完全一致。
 
 ### 4.7 扭轉樹與錨點
 
@@ -221,7 +225,7 @@
 
 ```mermaid
 flowchart TD
-  A["讀取結構檔"] --> B["拓撲分析<br/>主鏈、兩面角分類、STRIDE"]
+  A["讀取結構檔"] --> B["拓撲分析<br/>主鏈、兩面角分類、DSSP"]
   B --> C{"有指定 --molConfig？"}
   C -- 否 --> W["寫出預設設定檔<br/>&lt;outPrefix&gt;.molconfig.default.toml"] --> X["印出說明並結束"]
   C -- 是 --> D{"格式與內容驗證"}
@@ -278,7 +282,7 @@ csgm1        = "1a"              # 僅蛋白質：1a | 1b
   resName  = "SER"
   resSeq   = 12
   iCode    = ""
-  strideSS = "C"                 # STRIDE 結果（參考用）
+  dsspSS   = "."                 # DSSP 結果（參考用）
   ssType   = "R"                 # 預設：helix(H/G/I) → O；其他 → R
   phi      = false               # StaM 預設 false；MobM 預設 true
   psi      = false
@@ -832,7 +836,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | Ramachandran 資料 | Top8000 | 資料檔 | 放入 `third_party/`，附原 `LICENSE` | CC BY 4.0 |
 
 - `third_party/` 中每個套件固定版本（git submodule，同 AutoDock-GPU 1.6 的 `wmma_extension`），並保留其授權檔。
-- STRIDE：不內嵌（授權僅限學術使用，與 LGPL 不相容），依論文自行實作；外部 STRIDE 執行檔僅作開發驗證。
+- DSSP：自行實作（4.6），不連結 DSSP 4 函式庫；mkdssp 僅作開發驗證。行為比照 DSSP 4（BSD-2-Clause），其版權聲明列於 `src/dssp.cpp` 與 README。
 - Top8000 資料檔隨程式散佈時，附上原 `LICENSE` 與出處說明，並在文件中列出引用文獻。
 - 未採用 Dunbrack NDRD（同為 CC BY 4.0）：需填表申請下載，且只含 loop 區域（不含 α 螺旋與 β 摺板），不適合作為全部殘基的分佈。
 - CPU FFT 不使用 FFTW：FFTW 為 GPL，與 LGPL 散佈不相容。
@@ -949,6 +953,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | R9 | `G` 預設 200；約束能量不計入 9c 排序與 `E_max` |
 | — | 輸入只支援 mmCIF、SDF/MOL、mol2；不支援 PDB、pdbqt 輸入 |
 | — | 輸出格式 PDB、mmCIF、SDF/MOL、mol2 各自以參數開關；預設只開 PDB（第 10 節） |
+| — | 二級結構改用 DSSP（取代 STRIDE）；設定檔欄位 `dsspSS`（4.6） |
 
 ### 17.2 待確認
 （目前無）
@@ -973,3 +978,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.0 | 2026-10-14 | 定案（草案 0.11 內容） |
 | 1.1 | 2026-10-14 | 實作階段 1：補充 mmCIF / SDF / mol2 讀取細則（3.1）、分子 `id` 規則（5.2）、第三方套件版本與原始碼位置（15.2、15.3.2）、libgomp 靜態連結（15.3.1）；刪除與 `--closureG` 重複的 `--ringRestraintG` |
 | 1.2 | 2026-10-14 | 實作拓撲分析：補充主鏈辨識細則（4.1）、主鏈兩面角歸屬與角度慣例（4.2）、兩面角列出範圍、原子選取、分類順序與對稱基團判定（4.4） |
+| 1.3 | 2026-10-14 | 二級結構判定由 STRIDE 改為 DSSP（4.6、5.1、15.2）；設定檔欄位 `strideSS` 改名為 `dsspSS`（5.2） |

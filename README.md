@@ -6,7 +6,7 @@ OmegaDocker: an OligoMEr-supported and Gpu-Accelerated Docking program
 
 * OmegaDocker is a docking program for small molecules, biomolecules and oligomers (oligopeptides, oligonucleotides and other oligomers), without a fixed upper limit on the number of atoms.
 * Version 0.40.0 is a redesign; versions up to 0.33.0 (see the git tags) were modified from AutoDock-GPU v1.5.2.
-* Status: under development. The CPU version currently reads the input structures (mmCIF, SDF/MOL, mol2) and analyzes their topology (backbone, torsion classes); docking is not implemented yet.
+* Status: under development. The CPU version currently reads the input structures (mmCIF, SDF/MOL, mol2) and analyzes their topology (backbone, torsion classes, DSSP secondary structure); docking is not implemented yet.
 * Specification: [doc/OmegaDocker_0.40.xx_spec.md](doc/OmegaDocker_0.40.xx_spec.md)
 
 # Build
@@ -42,5 +42,6 @@ AutoDock is a Trade Mark of the Scripps Research Institute.
 | wwPDB Chemical Component Dictionary subset | `data/ccd/` | CC0 1.0 |
 | PDB entries 1D18, 1D3Z, 1L2Y, 1PIT, 1RNG, 2KJJ, 2KOC, 2LZX and ligand BTN | `tests/data/` | CC0 1.0 |
 | RDKit test files `benzene.mol2`, `pyrazole_pyridine.mol2` | `tests/data/` | BSD-3-Clause |
+| DSSP algorithm, behavior following DSSP 4 ([PDB-REDO/dssp](https://github.com/PDB-REDO/dssp)), Copyright (c) 2020 NKI/AVL, Netherlands Cancer Institute | `src/dssp.cpp` | BSD-2-Clause |
 
 Linked at build time: RDKit (BSD-3-Clause), Boost (BSL-1.0), Eigen (MPL-2.0).
