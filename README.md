@@ -29,6 +29,8 @@ Versions up to 0.33.0 are modified from [AutoDock-GPU](https://github.com/ccsb-s
 * Copyright (C) 2017 TU Darmstadt, Embedded Systems and Applications Group, Germany.
 * For some of the code, Copyright (C) 2019 Computational Structural Biology Center, the Scripps Research Institute.
 
+Version 0.40.0 uses the AD4 parameters and energy function forms of AutoDock-GPU v1.6 (`src/ad4.cpp`, `src/ad4_pair.hpp`; same license and copyright holders).
+
 AutoDock is a Trade Mark of the Scripps Research Institute.
 
 ## Third-party components

@@ -8,15 +8,20 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <numbers>
+#include <random>
 #include <fstream>
 #include <sstream>
 #include <string>
 
 #include <unistd.h>
 
+#include "ad4.hpp"
+#include "ad4_pair.hpp"
 #include "ccd.hpp"
 #include "log.hpp"
 #include "dssp.hpp"
+#include "energy.hpp"
 #include "molconfig.hpp"
 #include "rama.hpp"
 #include "read_input.hpp"
@@ -978,4 +983,244 @@ TEST_CASE("torsion tree: metal restraints (1ZNF)") {
   for (double& a : angles) a += 15;
   xyz = od::buildCoordinates(f.mols.back(), s.tree, angles);
   CHECK(od::evaluateClosure(s.tree, xyz, 200).maxDeviation > 0.5);
+}
+
+namespace {
+
+int atomOf(const od::Molecule& m, int seq, const std::string& name) {
+  for (std::size_t a = 0; a < m.atoms.size(); ++a)
+    if (m.atoms[a].residue >= 0 && m.residues[m.atoms[a].residue].info.seq == seq && m.atoms[a].name == name)
+      return static_cast<int>(a);
+  return -1;
+}
+
+// Number of torsions whose analytic gradient differs from the numeric one.
+int gradientMismatches(const od::EnergySystem& sys, std::vector<double> angles) {
+  std::vector<double> g;
+  sys.evaluate(angles, &g);
+  const double h = 1e-4;  // degrees
+  int bad = 0;
+  for (std::size_t i = 0; i < angles.size(); ++i) {
+    const double a = angles[i];
+    auto at = [&](double d) {
+      angles[i] = a + d;
+      return sys.evaluate(angles).total();
+    };
+    // Fourth-order central difference: clashing pairs give large higher derivatives.
+    const double fd = (8 * (at(h) - at(-h)) - (at(2 * h) - at(-2 * h))) / (12 * h) * 180.0 / std::numbers::pi;
+    angles[i] = a;
+    if (std::abs(fd - g[i]) > 1e-5 * std::max(1.0, std::abs(g[i])) + 1e-6) {
+      ++bad;
+      MESSAGE(std::format("torsion {}: analytic {} numeric {}", i, g[i], fd));
+    }
+  }
+  return bad;
+}
+
+std::vector<double> perturbed(std::vector<double> v, double width, unsigned seed) {
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<double> u(-width, width);
+  for (double& x : v) x += u(rng);
+  return v;
+}
+
+}  // namespace
+
+TEST_CASE("energy: AD4 pair functions") {
+  const od::Ad4Coeffs c;
+  double e, d;
+  auto vdw = od::ad4PairParams(od::Ad4Type::C, od::Ad4Type::OA, c);
+  CHECK(vdw.n == 6);
+  CHECK(vdw.reqm == doctest::Approx(3.6));
+  od::ad4VdwHb(vdw.reqm, vdw.AC, vdw.BD, vdw.m, vdw.n, vdw.reqm, 0.25, e, d);
+  CHECK(e == doctest::Approx(-0.1662 * std::sqrt(0.15 * 0.2)));
+  CHECK(d == 0);
+  auto hb = od::ad4PairParams(od::Ad4Type::HD, od::Ad4Type::OA, c);
+  CHECK(hb.n == 10);
+  CHECK(hb.reqm == doctest::Approx(1.9));
+  od::ad4VdwHb(2.0, hb.AC, hb.BD, hb.m, hb.n, hb.reqm, 0.25, e, d);
+  CHECK(e == doctest::Approx(-0.1209 * 5.0));
+  CHECK(od::ad4PairParams(od::Ad4Type::HD, od::Ad4Type::SA, c).reqm == doctest::Approx(2.5));
+  CHECK(od::ad4PairParams(od::Ad4Type::HD, od::Ad4Type::N, c).n == 6);
+  // Desolvation: fitted Gaussian is 1 at r = 0.
+  od::ad4Desolv(0.0, 2.0, 0.0, e, d);
+  CHECK(e == doctest::Approx(2.0));
+  // Derivatives by central differences.
+  auto fd = [](auto f, double r) {
+    double ep, em, dd;
+    f(r + 1e-6, ep, dd);
+    f(r - 1e-6, em, dd);
+    return (ep - em) / 2e-6;
+  };
+  for (double r : {0.9, 1.5, 3.0, 4.2, 7.5, 12.0, 19.0}) {
+    auto fv = [&](double x, double& ee, double& dd) { od::ad4VdwHb(x, vdw.AC, vdw.BD, 12, 6, vdw.reqm, 0.25, ee, dd); };
+    auto fe = [&](double x, double& ee, double& dd) { od::ad4Elec(x, -10.0, 0.01, ee, dd); };
+    auto fs = [&](double x, double& ee, double& dd) { od::ad4Desolv(x, 0.5, 0.01, ee, dd); };
+    fv(r, e, d);
+    CHECK(d == doctest::Approx(fd(fv, r)).epsilon(1e-6));
+    fe(r, e, d);
+    CHECK(d == doctest::Approx(fd(fe, r)).epsilon(1e-6));
+    fs(r, e, d);
+    CHECK(d == doctest::Approx(fd(fs, r)).epsilon(1e-6));
+  }
+  od::clashPenalty(1.0, 1.8, 10000.0, 1000.0, e, d);
+  CHECK(e == doctest::Approx(10000 + 1000 * 0.64));
+  CHECK(d == doctest::Approx(-1600));
+}
+
+TEST_CASE("energy: AD4 types (1L2Y, biotin)") {
+  const auto m = od::loadMolecules(kData + "/1L2Y.cif", od::Role::MobM, ccd()).front();
+  const auto t = od::assignAd4Types(m);
+  CHECK(t.unsupported.empty());
+  auto type = [&](int seq, const char* name) {
+    const int a = atomOf(m, seq, name);
+    REQUIRE(a >= 0);
+    return std::string(od::ad4TypeName(t.type[a]));
+  };
+  CHECK(type(1, "N") == "N");     // N-terminal NH3+
+  CHECK(type(2, "N") == "N");     // amide
+  CHECK(type(2, "O") == "OA");
+  CHECK(type(1, "ND2") == "N");   // Asn amide
+  CHECK(type(1, "OD1") == "OA");
+  CHECK(type(5, "NE2") == "N");   // Gln amide
+  CHECK(type(3, "OH") == "OA");   // Tyr
+  CHECK(type(3, "CZ") == "A");
+  CHECK(type(3, "CB") == "C");
+  CHECK(type(6, "NE1") == "N");   // Trp pyrrole N-H
+  CHECK(type(6, "CD1") == "A");
+  CHECK(type(8, "NZ") == "N");    // Lys NH3+
+  CHECK(type(9, "OD1") == "OA");
+  CHECK(type(16, "NH1") == "N");  // Arg
+  CHECK(type(16, "NE") == "N");
+  CHECK(type(6, "HE1") == "HD");
+  CHECK(type(13, "HG") == "HD");  // Ser OG-H
+  CHECK(type(6, "HA") == "-");
+  // Merged hydrogens move their charge to the heavy atom.
+  double sumIn = 0, sumOut = 0;
+  for (std::size_t a = 0; a < m.atoms.size(); ++a) {
+    sumIn += m.atoms[a].partialCharge;
+    sumOut += t.charge[a];
+    if (t.type[a] == od::Ad4Type::Merged) CHECK(t.charge[a] == 0);
+  }
+  CHECK(sumOut == doctest::Approx(sumIn));
+  const int ca = atomOf(m, 6, "CA"), ha = atomOf(m, 6, "HA");
+  CHECK(t.charge[ca] == doctest::Approx(m.atoms[ca].partialCharge + m.atoms[ha].partialCharge));
+
+  const auto btn = od::loadMolecules(kData + "/BTN_ideal.sdf", od::Role::MobM, ccd()).front();
+  const auto tb = od::assignAd4Types(btn);
+  for (std::size_t a = 0; a < btn.atoms.size(); ++a) {
+    const int z = btn.atoms[a].atomicNum;
+    if (z == 16) CHECK(tb.type[a] == od::Ad4Type::SA);  // thioether
+    if (z == 7) CHECK(tb.type[a] == od::Ad4Type::N);    // ureido
+    if (z == 8) CHECK(tb.type[a] == od::Ad4Type::OA);
+  }
+}
+
+TEST_CASE("energy: pairs, gradient and clash (1L2Y)") {
+  ConfigFixture f;
+  std::ofstream(f.path) << od::defaultMolConfigText(f.inputs);
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  const od::Molecule& m = f.mols[0];
+  const od::TorsionTree& tree = cfg->molecules[0].tree;
+  const od::EnergySystem sys({{&m, &tree}}, {});
+  CHECK(sys.torsionCount() == static_cast<int>(tree.torsions.size()));
+
+  // Pairs: no atoms within three bonds; every excluded pair keeps its distance.
+  const int n = static_cast<int>(m.atoms.size());
+  std::vector<std::vector<int>> adj(n);
+  for (const auto& b : m.bonds) {
+    adj[b.a].push_back(b.b);
+    adj[b.b].push_back(b.a);
+  }
+  std::vector<std::vector<int>> hops(n, std::vector<int>(n, 99));
+  for (int s = 0; s < n; ++s) {
+    std::vector<int> q{s};
+    hops[s][s] = 0;
+    for (std::size_t i = 0; i < q.size(); ++i)
+      for (int o : adj[q[i]])
+        if (hops[s][o] == 99) {
+          hops[s][o] = hops[s][q[i]] + 1;
+          q.push_back(o);
+        }
+  }
+  std::vector<std::vector<bool>> listed(n, std::vector<bool>(n, false));
+  for (const auto& p : sys.pairs()) {
+    CHECK(hops[p.i][p.j] > 3);
+    listed[p.i][p.j] = listed[p.j][p.i] = true;
+  }
+  std::vector<od::Vec3> x0, x1;
+  sys.evaluate(perturbed(sys.inputAngles(), 180, 1), nullptr, &x0);
+  sys.evaluate(perturbed(sys.inputAngles(), 180, 2), nullptr, &x1);
+  const auto& type = sys.typing(0).type;
+  int excluded = 0, notConstant = 0;
+  for (int i = 0; i < n; ++i)
+    for (int j = i + 1; j < n; ++j) {
+      if (type[i] == od::Ad4Type::Merged || type[j] == od::Ad4Type::Merged || hops[i][j] <= 3 || listed[i][j]) continue;
+      ++excluded;
+      if (std::abs(distance(x0[i], x0[j]) - distance(x1[i], x1[j])) > 1e-9) ++notConstant;
+    }
+  CHECK(excluded > 0);
+  CHECK(notConstant == 0);
+
+  // Input conformation: no clash; analytic gradient matches numeric.
+  const auto e0 = sys.evaluate(sys.inputAngles());
+  CHECK(e0.clashPairs == 0);
+  CHECK(e0.closure == 0);
+  CHECK(e0.intra() < 0);
+  CHECK(gradientMismatches(sys, sys.inputAngles()) == 0);
+  CHECK(gradientMismatches(sys, perturbed(sys.inputAngles(), 20, 3)) == 0);
+
+  // A random conformation with mild clashes (severe overlaps make the numeric gradient inaccurate).
+  bool found = false;
+  for (unsigned seed = 10; seed < 2000 && !found; ++seed) {
+    const auto a = perturbed(sys.inputAngles(), 40, seed);
+    const auto e = sys.evaluate(a);
+    if (e.clashPairs == 0 || e.total() > 1e5) continue;
+    found = true;
+    CHECK(e.clash >= 10000.0 * e.clashPairs);
+    CHECK(e.filterEnergy() > 1000);
+    CHECK(gradientMismatches(sys, a) == 0);
+  }
+  CHECK(found);
+}
+
+TEST_CASE("energy: StaM loop closure (2KJJ)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 10, 14));
+  const od::EnergySystem sys({{&f.mols[0], &cfg.molecules[0].tree}}, {});
+  const auto e0 = sys.evaluate(sys.inputAngles());
+  CHECK(e0.closure < 1e-12);
+  CHECK(e0.closureMaxDeviation < 1e-9);
+  // Pairs between two fixed backbone atoms are constant and not listed.
+  std::vector<bool> anchor(f.mols[0].atoms.size(), false);
+  for (int a : cfg.molecules[0].tree.anchors) anchor[a] = true;
+  for (const auto& p : sys.pairs()) CHECK_FALSE((anchor[p.i] && anchor[p.j]));
+  const auto a = perturbed(sys.inputAngles(), 10, 5);
+  const auto e = sys.evaluate(a);
+  CHECK(e.closure > 0);
+  CHECK(e.total() == doctest::Approx(e.filterEnergy() + e.closure));
+  CHECK(gradientMismatches(sys, a) == 0);
+}
+
+TEST_CASE("energy: metal restraints (1ZNF)") {
+  ConfigFixture f;
+  f.mols.push_back(zincFinger());
+  f.topos.push_back(od::analyzeTopology(f.mols.back(), {}));
+  od::assignDssp({&f.mols.back()}, {&f.topos.back()});
+  f.inputs.clear();
+  for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  std::ofstream(f.path) << phi10(setQuoted(uncommentMetal(text), "id           = \"mob:1ZNF.cif:A\"", "metalBond    = ", "break"));
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  const od::EnergySystem sys({{&f.mols.back(), &cfg->molecules.back().tree}}, {});
+  const auto& t = sys.typing(0);
+  for (std::size_t a = 0; a < f.mols.back().atoms.size(); ++a)
+    if (f.mols.back().atoms[a].atomicNum == 30) CHECK(t.type[a] == od::Ad4Type::Zn);
+  const auto a = perturbed(sys.inputAngles(), 10, 7);
+  CHECK(sys.evaluate(a).closure > 0);
+  CHECK(gradientMismatches(sys, a) == 0);
 }

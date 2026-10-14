@@ -91,6 +91,14 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.maxBreakDist = parseDouble("maxBreakDist", v); }},
       {"closureG", Kind::Value, "<k>", "200", "Closure constraint stiffness G (kcal/mol/Å²)",
        [](Options& o, const std::string& v) { o.closureG = parseDouble("closureG", v); }},
+      {"clashDistance", Kind::Value, "<dist>", "1.8", "Heavy-atom pairs closer than this clash (Å)",
+       [](Options& o, const std::string& v) { o.clashDistance = parseDouble("clashDistance", v); }},
+      {"Emax", Kind::Value, "<E>", "1000", "9a: conformations with energy below this enter the L2 pool (kcal/mol)",
+       [](Options& o, const std::string& v) { o.Emax = parseDouble("Emax", v); }},
+      {"EclashBase", Kind::Value, "<E>", "10000", "Constant part of the clash penalty; must exceed --Emax (kcal/mol)",
+       [](Options& o, const std::string& v) { o.EclashBase = parseDouble("EclashBase", v); }},
+      {"Kclash", Kind::Value, "<k>", "1000", "Quadratic part of the clash penalty (kcal/mol/Å²)",
+       [](Options& o, const std::string& v) { o.Kclash = parseDouble("Kclash", v); }},
       {"help", Kind::Flag, "", "", "Show this help", [](Options& o, const std::string&) { o.showHelp = true; }},
       {"version", Kind::Flag, "", "", "Show version", [](Options& o, const std::string&) { o.showVersion = true; }},
   };
@@ -140,6 +148,9 @@ void validateOptions(const Options& o) {
   if (!(o.staFlexMargin >= 0)) fail("--staFlexMargin must be >= 0");
   if (!(o.maxBreakDist > 0)) fail("--maxBreakDist must be > 0");
   if (!(o.closureG > 0)) fail("--closureG must be > 0");
+  if (!(o.clashDistance > 0)) fail("--clashDistance must be > 0");
+  if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
+  if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   if (!o.outPdb && !o.outCif && !o.outSdf && !o.outMol2)
     fail("All output formats are disabled (--outPdb, --outCif, --outSdf, --outMol2)");
 }

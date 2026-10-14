@@ -31,6 +31,10 @@ struct Options {
   bool staFixedResMovable = false;
   double maxBreakDist = 0.5;
   double closureG = 200.0;
+  double clashDistance = 1.8;
+  double Emax = 1000.0;
+  double EclashBase = 10000.0;
+  double Kclash = 1000.0;
 
   bool showHelp = false;
   bool showVersion = false;

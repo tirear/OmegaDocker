@@ -12,6 +12,7 @@
 #include "log.hpp"
 #include "read_input.hpp"
 #include "dssp.hpp"
+#include "energy.hpp"
 #include "molconfig.hpp"
 #include "topology.hpp"
 #include "version.hpp"
@@ -115,6 +116,32 @@ void printTree(const od::Molecule& m, const od::MolSettings& s) {
                               atomRef(m.bonds[c.bond].b)));
 }
 
+od::EnergyParams energyParams(const od::Options& opt) {
+  od::EnergyParams p;
+  p.clashDistance = opt.clashDistance;
+  p.clashBase = opt.EclashBase;
+  p.clashK = opt.Kclash;
+  p.closureG = opt.closureG;
+  return p;
+}
+
+// 9a energy of the input conformation (spec 7.9).
+void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>& parts, const od::Options& opt) {
+  const od::EnergySystem sys(parts, energyParams(opt));
+  int merged = 0, hd = 0;
+  for (std::size_t k = 0; k < parts.size(); ++k)
+    for (od::Ad4Type t : sys.typing(static_cast<int>(k)).type) {
+      merged += t == od::Ad4Type::Merged;
+      hd += t == od::Ad4Type::HD;
+    }
+  const auto e = sys.evaluate(sys.inputAngles());
+  od::logInfo(std::format("  {:<40} torsions {:>5}  pairs {:>9}  merged H {:>5}  HD {:>5}", name, sys.torsionCount(),
+                          sys.pairCount(), merged, hd));
+  od::logInfo(std::format("    input: E {:.3f} (vdW {:.3f}  hbond {:.3f}  elec {:.3f}  desolv {:.3f}  clash {:.1f} "
+                          "in {} pairs)  closure {:.3g}",
+                          e.filterEnergy(), e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.clashPairs, e.closure));
+}
+
 // DSSP residue counts, e.g. "H 12  E 10  . 5".
 void printDssp(const od::Topology& t) {
   if (t.dsspSS.empty()) return;
@@ -202,6 +229,15 @@ int run(int argc, char** argv) {
                             inputs[i].mol->id, free, cisTrans, s.ringBreaks.size(), s.chainBreaks.size()));
     printTree(*inputs[i].mol, s);
   }
+
+  od::logInfo("9a energy:");
+  {
+    std::vector<od::EnergyPart> parts;
+    for (std::size_t i = 0; i < sta.size(); ++i) parts.push_back({&sta[i], &cfg->molecules[i].tree});
+    printInputEnergy("StaM group", parts, opt);
+  }
+  for (std::size_t i = 0; i < mobs.size(); ++i)
+    printInputEnergy(mobs[i].id, {{&mobs[i], &cfg->molecules[sta.size() + i].tree}}, opt);
   return 0;
 }
 
