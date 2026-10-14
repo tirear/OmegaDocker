@@ -643,7 +643,7 @@ gpu_gen_and_eval_newpops_ligand_kernel(
   __shared__ float  sFloatAccumulator;
 //   int run_id; // sans
   int temp_covr_point;
-  float energy;
+  // float energy; // sans
   // int bestID;
 
   // In this case this compute-unit is responsible for elitist selection
@@ -977,7 +977,7 @@ gpu_gen_and_eval_newpops_ligand_kernel(
           }
           else
           {
-            offspring_genotype[gene_counter] = gpu_randf(cData.pMem_prng_states, overallID) * 360;
+            offspring_genotype[gene_counter] = gpu_randf(cData.pMem_prng_states, overallID) * 360.0f;
           }
         }
       }
@@ -988,7 +988,7 @@ gpu_gen_and_eval_newpops_ligand_kernel(
       __syncthreads();
       gpu_calc_ligand_energy(
                       offspring_genotype,
-                      energy,
+                      ligandEnergy,
 //                       run_id, // sans useless
                       calc_coords,
                       &sFloatAccumulator
@@ -1013,7 +1013,7 @@ gpu_gen_and_eval_newpops_ligand_kernel(
       // <== sans
     }
     if (threadIdx.x == 0) {
-      pMem_energies_next[blockIdx.x] = energy;
+      pMem_energies_next[blockIdx.x] = ligandEnergy;
 //       cData.pMem_evals_of_new_entities[run_id][blockIdx.x] = 1; // sans
       // pMem_evals_of_new_entities[blockIdx.x] = 1; // sans
       pMem_evals_of_new_entities[blockIdx.x] = evalNum; // sans
