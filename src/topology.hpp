@@ -84,8 +84,8 @@ struct TopologyParams {
   // residue information, at atoms) within the box extended by staFlexMargin.
   std::optional<Box> box;
   double staFlexMargin = 4.0;
-  // Broken bonds (indices into Molecule::bonds); crosslinkBreaks and metalBreaks
-  // when not given.
+  // Broken bonds (indices into Molecule::bonds); crosslinkBreaks when not given
+  // (metal bonds are kept by default, spec 4.7).
   std::optional<std::vector<int>> brokenBonds;
 };
 

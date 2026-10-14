@@ -215,16 +215,18 @@ void writeMolecule(std::string& o, const Molecule& m, const Topology& t) {
   if (m.hasResidueInfo) o += std::format("chain        = {}\n", quote(chainList(m)));
   o += std::format("backboneType = {}\n", quote(backboneTypeName(t.backboneType)));
   if (protein) o += "csgm1        = \"1a\"\n";
-  if (hasMetalRing(m)) o += "metalBond    = \"break\"           # \"break\" | \"keep\" (see the top of this file)\n";
+  if (hasMetalRing(m)) o += "metalBond    = \"keep\"            # \"keep\" | \"break\" (see the top of this file)\n";
 
-  auto writeBreak = [&](int bi, const char* source) {
-    o += "\n  [[molecule.chainBreak]]\n";
-    o += std::format("  bond   = [{}, {}]\n", quote(refs.ref(m.bonds[bi].a, -1)), quote(refs.ref(m.bonds[bi].b, -1)));
-    o += std::format("  source = \"{}\"\n", source);
+  auto writeBreak = [&](int bi, const char* source, const char* c) {
+    o += std::format("\n  {}[[molecule.chainBreak]]\n", c);
+    o += std::format("  {}bond   = [{}, {}]\n", c, quote(refs.ref(m.bonds[bi].a, -1)), quote(refs.ref(m.bonds[bi].b, -1)));
+    o += std::format("  {}source = \"{}\"\n", c, source);
   };
-  for (int bi : t.crosslinkBreaks) writeBreak(bi, "auto-crosslink");
-  if (hasMetalRing(m))
-    for (int bi : t.metalBreaks) writeBreak(bi, "auto-metal");
+  for (int bi : t.crosslinkBreaks) writeBreak(bi, "auto-crosslink", "");
+  if (hasMetalRing(m)) {
+    o += "\n  # metalBond = \"break\": set metalBond and remove the leading \"# \" of these entries (spec 4.7)";
+    for (int bi : t.metalBreaks) writeBreak(bi, "auto-metal", "# ");
+  }
 
   for (std::size_t k = 0; k < l.units.size(); ++k) {
     const int u = l.units[k];
@@ -765,25 +767,29 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
   o += std::format("generatedBy   = {}\n", quote(std::format("OmegaDocker {}", kVersion)));
   o += "\n# ---------- secondary-structure sampling types (csgm1b only) ----------\n";
   o += "# Built-in types cannot be changed; R and O are required.\n";
-  o += "#   R: uniform; O: keep the input angles; RAMA_*: Top8000 distributions (spec 7.5).\n";
+  o += "#   R: uniform; O: keep the original secondary structure (from the input, spec 7.5);\n";
+  o += "#   RAMA_*: Top8000 distributions (spec 7.5).\n";
   o += "#   RAMA_GLY: Gly; RAMA_TRANSPRO / RAMA_CISPRO: Pro after a trans / cis omega;\n";
   o += "#   RAMA_PREPRO: residue before Pro (not Gly, Pro); RAMA_ILEVAL: Ile, Val (not before Pro);\n";
   o += "#   RAMA_GENERAL: other residues; RAMA_AUTO: chosen per residue.\n";
-  o += "# ssType is used only with csgm1 = \"1b\" for residues whose phi and psi are rotatable;\n";
-  o += "# chain-end residues (without phi or psi) always use R.\n";
-  o += "# Custom type: [[ssType]] name = \"A\" with [[ssType.point]] phi, psi, prob entries.\n";
+  o += "# ssType is used only with csgm1 = \"1b\" for residues whose phi and psi are both rotatable;\n";
+  o += "# chain-end residues (without phi or psi) and residues with only one of phi, psi rotatable\n";
+  o += "# use R. Non-rotatable angles always keep the input angles.\n";
+  o += "# Custom type: [[ssType]] name = \"A\" with [[ssType.point]] phi, psi, prob entries; a chosen\n";
+  o += "# point gives phi and psi uniformly within +-15 degrees of its values.\n";
   for (const auto& n : builtinSsTypes()) o += std::format("\n[[ssType]]\nname    = {}\nbuiltin = true\n", quote(n));
   o += "\n# ---------- molecules ----------\n";
   o += "# [[molecule.ringBreak]] bond = [\"<atom>\", \"<atom>\"] breaks a ring bond (spec 4.5).\n";
   o += "# [[molecule.chainBreak]] source = \"auto-loop\" | \"auto-crosslink\" | \"auto-metal\" | \"user\" (spec 4.8).\n";
   o += "#\n";
   o += "# metalBond: only for molecules with metal coordination bonds in rings (spec 4.7).\n";
-  o += "#   \"break\" (default): the metal bonds listed as [[molecule.chainBreak]] source = \"auto-metal\"\n";
-  o += "#            are broken and held by distance restraints (spec 4.8); the metal stays bonded\n";
-  o += "#            to one ligand atom and moves with the molecule. Bonds in rings through the\n";
-  o += "#            metal become rotatable again (e.g. the backbone between coordinating residues).\n";
-  o += "#   \"keep\":  no metal bond is broken; every bond in a ring through the metal is not\n";
-  o += "#            rotatable. Remove the auto-metal chainBreak entries when choosing \"keep\".\n";
+  o += "#   \"keep\" (default, option A): no metal bond is broken; every bond in a ring through the\n";
+  o += "#            metal is not rotatable (e.g. the backbone between coordinating residues).\n";
+  o += "#   \"break\" (option B): the metal bonds in the commented [[molecule.chainBreak]] entries with\n";
+  o += "#            source = \"auto-metal\" are broken and held by distance restraints (spec 4.8); the\n";
+  o += "#            metal stays bonded to one ligand atom and moves with the molecule. Bonds in rings\n";
+  o += "#            through the metal then may be set rotatable. To choose \"break\", set metalBond and\n";
+  o += "#            remove the leading \"# \" of those entries; no metal bond may remain in a ring.\n";
   for (const MolInput& in : mols) writeMolecule(o, *in.mol, *in.topo);
   return o;
 }

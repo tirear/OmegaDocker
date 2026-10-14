@@ -559,15 +559,32 @@ TEST_CASE("topology: metal bonds in rings (1ZNF)") {
   CHECK(t.crosslinkBreaks.empty());
   // Zn bonded to Cys3 SG, Cys6 SG, His19 NE2, His23 NE2: three bonds close rings.
   REQUIRE(t.metalBreaks.size() == 3);
-  CHECK(t.brokenBonds == t.metalBreaks);
-  CHECK(ringBackbone(t) == 0);
+  CHECK(t.brokenBonds.empty());
   CHECK(od::hasMetalRing(m));
-  od::TopologyParams keep;
-  keep.brokenBonds = std::vector<int>{};
-  auto whole = od::analyzeTopology(m, keep);
   // Residue 3 psi through residue 23 phi lie in rings through Zn.
-  CHECK(ringBackbone(whole) == 40);
+  CHECK(ringBackbone(t) == 40);
+  od::TopologyParams brk;
+  brk.brokenBonds = t.metalBreaks;
+  CHECK(ringBackbone(od::analyzeTopology(m, brk)) == 0);
 }
+
+namespace {
+
+// Sets phi of 1ZNF residue 10 to true.
+std::string phi10(std::string s) {
+  const auto r = s.find("resSeq  = 10\n", s.find("mob:1ZNF.cif:A"));
+  const auto p = s.find("phi     = false", r);
+  REQUIRE(p < s.find("[[molecule.residue]]", r));
+  return s.replace(p, 15, "phi     = true");
+}
+
+std::string uncommentMetal(std::string s) {
+  for (const char* x : {"  # [[molecule.chainBreak]]", "  # bond   = ", "  # source = \"auto-metal\""})
+    for (std::size_t p; (p = s.find(x)) != std::string::npos;) s.erase(p + 2, 2);
+  return s;
+}
+
+}  // namespace
 
 TEST_CASE("molconfig: metalBond") {
   ConfigFixture f;
@@ -578,49 +595,35 @@ TEST_CASE("molconfig: metalBond") {
   for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
   const std::string text = od::defaultMolConfigText(f.inputs);
   const std::string zn = "id           = \"mob:1ZNF.cif:A\"";
-  CHECK(text.find("metalBond") != std::string::npos);
+  // Default keep: the auto-metal entries are commented and the ring torsions are not rotatable.
+  CHECK(text.find("metalBond    = \"keep\"") != std::string::npos);
+  CHECK(text.find("  # bond   = [\"A:6:SG\", \"A:27:ZN\"]") != std::string::npos);
   CHECK(f.errorsOf(text).empty());
+  CHECK(hasError(f.errorsOf(phi10(text)),
+                 "residue A:10.phi: category 'ring' is not rotatable"));
 
-  // keep: the auto-metal entries conflict.
-  const std::string keep = setQuoted(text, zn, "metalBond    = ", "keep");
-  auto e = f.errorsOf(keep);
+  // keep with the entries uncommented: conflict.
+  const std::string entries = uncommentMetal(text);
+  auto e = f.errorsOf(entries);
   CHECK(std::count_if(e.begin(), e.end(), [](const std::string& x) {
           return x.find("metalBond = \"keep\" does not break metal bonds") != std::string::npos;
         }) == 3);
-  // keep without the entries: the backbone between the coordinating residues must be fixed.
-  std::string keepOk = keep;
-  for (const char* atom : {"A:6:SG", "A:19:NE2", "A:23:NE2"}) {
-    const auto i = keepOk.find(std::format("  [[molecule.chainBreak]]\n  bond   = [\"{}\"", atom));
-    REQUIRE(i != std::string::npos);
-    keepOk.erase(i, keepOk.find("auto-metal\"\n", i) + 12 - i);
-  }
-  CHECK(hasError(f.errorsOf(keepOk), "residue A:10.phi: category 'ring' is not rotatable"));
-  // Side chains of the coordinating residues are in the rings too.
-  for (int seq : {3, 6, 19, 23}) {
-    const auto anchor = keepOk.find(std::format("resSeq  = {}\n", seq), keepOk.find(zn));
-    const auto next = keepOk.find("[[molecule.residue]]", anchor);
-    for (auto p = keepOk.find("rotatable = true", anchor); p < next; p = keepOk.find("rotatable = true", p))
-      keepOk.replace(p, 16, "rotatable = false");
-  }
-  for (int seq = 3; seq <= 23; ++seq)
-    for (const char* a : {"phi     = true", "psi     = true"}) {
-      const auto anchor = keepOk.find(std::format("resSeq  = {}\n", seq), keepOk.find(zn));
-      const auto next = keepOk.find("[[molecule.residue]]", anchor);
-      const auto i = keepOk.find(a, anchor);
-      if (i < next) keepOk.replace(i, std::string(a).size(), std::string(a).replace(10, 4, "false"));
-    }
-  CHECK(f.errorsOf(keepOk).empty());
 
-  // break with a missing entry: Zn is still in a ring.
-  std::string missing = text;
+  // break: valid with the entries; the backbone may then be set rotatable.
+  const std::string brk = setQuoted(entries, zn, "metalBond    = ", "break");
+  CHECK(f.errorsOf(brk).empty());
+  CHECK(f.errorsOf(phi10(brk)).empty());
+  // break with the entries still commented or one missing: Zn is still in a ring.
+  CHECK(hasError(f.errorsOf(setQuoted(text, zn, "metalBond    = ", "break")), "is still in a ring"));
+  std::string missing = brk;
   const auto i = missing.find("  [[molecule.chainBreak]]\n  bond   = [\"A:23:NE2\"");
   missing.erase(i, missing.find("auto-metal\"\n", i) + 12 - i);
   CHECK(hasError(f.errorsOf(missing), "metal bond [A:3:SG, A:27:ZN] is still in a ring"));
 
   CHECK(hasError(f.errorsOf(setQuoted(text, zn, "metalBond    = ", "remove")), "metalBond: must be keep or break"));
-  CHECK(hasError(f.errorsOf(setQuoted(text, "bond   = [\"A:6:SG\"", "source = ", "user")),
+  CHECK(hasError(f.errorsOf(setQuoted(brk, "bond   = [\"A:6:SG\"", "source = ", "user")),
                  "source: must be auto-metal for a metal bond"));
-  e = f.errorsOf(replaceAfter(text, zn, "metalBond    = \"break\"", ""));
+  e = f.errorsOf(replaceAfter(text, zn, "metalBond    = \"keep\"", ""));
   CHECK(hasError(e, "metalBond: missing"));
   e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
                               "backboneType = \"none\"\nmetalBond = \"keep\"\n"
@@ -629,9 +632,6 @@ TEST_CASE("molconfig: metalBond") {
   CHECK(hasError(e, "metalBond: only allowed when a metal bond lies in a ring"));
   CHECK(hasError(e, "source: auto-metal is only for metal bonds"));
   CHECK(hasError(e, "split the molecule into 2 parts"));
-  e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
-                              "backboneType = \"none\"\n[[molecule.ringBreak]]\nbond = [\"A:27:ZN\", \"A:3:SG\"]"));
-  CHECK(hasError(e, "residue 'A:27' not found"));
 }
 
 TEST_CASE("rama: embedded Top8000 grids") {

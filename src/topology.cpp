@@ -369,7 +369,6 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
     t.brokenBonds = *p.brokenBonds;
   } else {
     t.brokenBonds = t.crosslinkBreaks;
-    t.brokenBonds.insert(t.brokenBonds.end(), t.metalBreaks.begin(), t.metalBreaks.end());
     std::sort(t.brokenBonds.begin(), t.brokenBonds.end());
   }
   g.setBroken(t.brokenBonds);
