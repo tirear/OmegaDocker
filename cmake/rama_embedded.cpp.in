@@ -1,0 +1,18 @@
+// Generated from cmake/rama_embedded.cpp.in. Do not edit.
+// Embeds the Top8000 rama8000 grids (third_party/top8000, CC BY 4.0).
+
+#define OD_RAMA_INCBIN(name, file)            \
+  ".global od_rama_" name "_begin\n"          \
+  "od_rama_" name "_begin:\n"                 \
+  ".incbin \"@OD_RAMA_DIR@/" file "\"\n"      \
+  ".global od_rama_" name "_end\n"            \
+  "od_rama_" name "_end:\n"
+
+__asm__(".section .rodata\n"
+        OD_RAMA_INCBIN("general", "rama8000-general-noGPIVpreP.data")
+        OD_RAMA_INCBIN("gly", "rama8000-gly-sym.data")
+        OD_RAMA_INCBIN("transpro", "rama8000-transpro.data")
+        OD_RAMA_INCBIN("cispro", "rama8000-cispro.data")
+        OD_RAMA_INCBIN("prepro", "rama8000-prepro-noGP.data")
+        OD_RAMA_INCBIN("ileval", "rama8000-ileval-nopreP.data")
+        ".previous\n");

@@ -286,9 +286,31 @@ int dihedralNeighbor(const Graph& g, int end, int other) {
   return best >= 0 ? best : bestMetal;
 }
 
+// Bonds of the given class that close a cycle. Bonds outside skip are added
+// to a spanning forest in index order with the candidates last, so the
+// molecule stays connected after the returned bonds are broken.
+std::vector<int> cycleClosing(const Molecule& m, const std::vector<bool>& candidate, const std::vector<bool>& skip) {
+  std::vector<int> parent(m.atoms.size());
+  for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+  auto find = [&](int x) {
+    while (parent[x] != x) x = parent[x] = parent[parent[x]];
+    return x;
+  };
+  std::vector<int> out;
+  for (int pass = 0; pass < 2; ++pass)
+    for (int bi = 0; bi < static_cast<int>(m.bonds.size()); ++bi) {
+      if (skip[bi] || candidate[bi] != (pass == 1)) continue;
+      const int a = find(m.bonds[bi].a), b = find(m.bonds[bi].b);
+      if (a == b && pass == 1)
+        out.push_back(bi);
+      else
+        parent[a] = b;
+    }
+  return out;
+}
+
 // Inter-residue bonds other than backbone links and metal bonds that close a
-// cycle. Bonds are added to a spanning forest in index order with these
-// candidates last, so the molecule stays connected after they are broken.
+// cycle of the bond graph without metal bonds.
 std::vector<int> findCrosslinkBreaks(const Graph& g, const Topology& t) {
   const Molecule& m = g.m;
   std::vector<bool> link(m.bonds.size(), false);
@@ -298,34 +320,22 @@ std::vector<int> findCrosslinkBreaks(const Graph& g, const Topology& t) {
     const int bi = g.bond(from, t.units[u.next].atoms[0]);
     if (bi >= 0) link[bi] = true;
   }
-  auto candidate = [&](int bi) {
+  std::vector<bool> candidate(m.bonds.size(), false), metal(m.bonds.size(), false);
+  for (std::size_t bi = 0; bi < m.bonds.size(); ++bi) {
     const Bond& b = m.bonds[bi];
     const int ra = m.atoms[b.a].residue, rb = m.atoms[b.b].residue;
-    return ra >= 0 && rb >= 0 && ra != rb && !link[bi] && b.order != BondOrder::Metal && !isMetal(g.z(b.a)) &&
-           !isMetal(g.z(b.b));
-  };
-  std::vector<int> parent(m.atoms.size());
-  for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
-  auto find = [&](int x) {
-    while (parent[x] != x) x = parent[x] = parent[parent[x]];
-    return x;
-  };
-  std::vector<int> cand, out;
-  for (int bi = 0; bi < static_cast<int>(m.bonds.size()); ++bi) {
-    if (candidate(bi)) {
-      cand.push_back(bi);
-      continue;
-    }
-    parent[find(m.bonds[bi].a)] = find(m.bonds[bi].b);
+    metal[bi] = isMetalBond(m, b);
+    candidate[bi] = ra >= 0 && rb >= 0 && ra != rb && !link[bi] && !metal[bi];
   }
-  for (int bi : cand) {
-    const int a = find(m.bonds[bi].a), b = find(m.bonds[bi].b);
-    if (a == b)
-      out.push_back(bi);
-    else
-      parent[a] = b;
-  }
-  return out;
+  return cycleClosing(m, candidate, metal);
+}
+
+// Metal bonds that close a cycle once crosslinks are broken.
+std::vector<int> findMetalBreaks(const Molecule& m, const std::vector<int>& crosslinks) {
+  std::vector<bool> metal(m.bonds.size(), false), skip(m.bonds.size(), false);
+  for (std::size_t bi = 0; bi < m.bonds.size(); ++bi) metal[bi] = isMetalBond(m, m.bonds[bi]);
+  for (int bi : crosslinks) skip[bi] = true;
+  return cycleClosing(m, metal, skip);
 }
 
 bool insideBox(const Vec3& x, const Box& box, double margin) {
@@ -354,7 +364,14 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
   }
 
   t.crosslinkBreaks = findCrosslinkBreaks(g, t);
-  t.brokenBonds = p.brokenBonds ? *p.brokenBonds : t.crosslinkBreaks;
+  t.metalBreaks = findMetalBreaks(m, t.crosslinkBreaks);
+  if (p.brokenBonds) {
+    t.brokenBonds = *p.brokenBonds;
+  } else {
+    t.brokenBonds = t.crosslinkBreaks;
+    t.brokenBonds.insert(t.brokenBonds.end(), t.metalBreaks.begin(), t.metalBreaks.end());
+    std::sort(t.brokenBonds.begin(), t.brokenBonds.end());
+  }
   g.setBroken(t.brokenBonds);
   std::vector<bool> broken(m.bonds.size(), false);
   for (int b : t.brokenBonds) broken[b] = true;
@@ -435,7 +452,11 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
   return t;
 }
 
-std::vector<bool> ringBondMask(const Molecule& m) { return Graph(m).ringBond; }
+std::vector<bool> ringBondMask(const Molecule& m, const std::vector<int>& broken) {
+  Graph g(m);
+  if (!broken.empty()) g.setBroken(broken);
+  return g.classRing;
+}
 
 std::vector<int> nonPlanarOmegas(const Topology& t, double toleranceDeg) {
   std::vector<int> out;

@@ -64,6 +64,10 @@ bool isMetal(int z) {
   }
 }
 
+bool isMetalBond(const Molecule& m, const Bond& b) {
+  return b.order == BondOrder::Metal || isMetal(m.atoms[b.a].atomicNum) || isMetal(m.atoms[b.b].atomicNum);
+}
+
 const char* roleTag(Role r) { return r == Role::StaM ? "sta" : "mob"; }
 
 std::vector<Molecule> splitMolecules(const RawStructure& s) {

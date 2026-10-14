@@ -59,6 +59,12 @@ add_custom_command(
   DEPENDS ${OD_CCD_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_ccd.cmake
   COMMENT "Embedding CCD subset")
 
+set(OD_RAMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/top8000)
+file(GLOB OD_RAMA_FILES CONFIGURE_DEPENDS ${OD_RAMA_DIR}/rama8000-*.data)
+set(OD_RAMA_EMBED ${CMAKE_CURRENT_BINARY_DIR}/generated/rama_embedded.cpp)
+configure_file(cmake/rama_embedded.cpp.in ${OD_RAMA_EMBED} @ONLY)
+set_source_files_properties(${OD_RAMA_EMBED} PROPERTIES OBJECT_DEPENDS "${OD_RAMA_FILES}")
+
 configure_file(src/version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp @ONLY)
 
 # ---------- core library ----------
@@ -75,7 +81,9 @@ add_library(od_core STATIC
   src/topology.cpp
   src/dssp.cpp
   src/molconfig.cpp
-  ${OD_CCD_EMBED})
+  src/rama.cpp
+  ${OD_CCD_EMBED}
+  ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(od_core PUBLIC od_gemmi od_tomlpp ${OD_RDKIT_LIBS} Eigen3::Eigen)
 if(OD_STATIC_DEPS)

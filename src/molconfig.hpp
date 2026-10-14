@@ -19,6 +19,8 @@ inline constexpr int kMolConfigFormatVersion = 1;
 
 enum class TorsionMode : std::uint8_t { Fixed, Free, CisTrans };
 enum class Csgm1 : std::uint8_t { A, B };
+// Metal coordination bonds in rings (spec 4.7): None when the molecule has none.
+enum class MetalBond : std::uint8_t { None, Keep, Break };
 
 struct SsPoint {
   double phi = 0, psi = 0, prob = 0;
@@ -32,7 +34,7 @@ struct SsType {
 
 struct ChainBreak {
   int bond = -1;       // index into Molecule::bonds
-  std::string source;  // auto-loop | auto-crosslink | user
+  std::string source;  // auto-loop | auto-crosslink | auto-metal | user
 };
 
 struct MolSettings {
@@ -40,6 +42,7 @@ struct MolSettings {
   std::vector<TorsionMode> mode;   // per Topology::torsions
   std::vector<std::string> ssType; // per Topology::units; protein backbones only
   Csgm1 csgm1 = Csgm1::A;
+  MetalBond metalBond = MetalBond::None;
   std::vector<int> ringBreaks;     // indices into Molecule::bonds
   std::vector<ChainBreak> chainBreaks;
 };
@@ -54,6 +57,10 @@ struct MolInput {
   const Molecule* mol = nullptr;
   const Topology* topo = nullptr;
 };
+
+// True when a metal coordination bond of the molecule lies in a ring; the
+// configuration then needs metalBond (spec 4.7).
+bool hasMetalRing(const Molecule& m);
 
 // Built-in ssType names: R, O and the Ramachandran types of spec 7.5.
 const std::vector<std::string>& builtinSsTypes();

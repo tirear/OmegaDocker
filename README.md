@@ -38,9 +38,10 @@ AutoDock is a Trade Mark of the Scripps Research Institute.
 | gemmi 0.7.5 | `third_party/gemmi/` | MPL-2.0 |
 | toml++ 3.4.0 | `third_party/tomlplusplus/` | MIT |
 | pocketfft (C++) | `third_party/pocketfft/` | BSD-3-Clause |
+| Top8000 rama8000 Ramachandran contour grids, Copyright (c) 2016-2026 David C. Richardson, Jane S. Richardson, and contributors, Richardson Lab at Duke University ([rlabduke/reference_data](https://github.com/rlabduke/reference_data)); Williams CJ et al. (2018) Protein Science 27:293-315, https://doi.org/10.1002/pro.3330 | `third_party/top8000/` (embedded in the executable) | CC BY 4.0 |
 | doctest 2.4.11 (bundled with gemmi) | `third_party/gemmi/third_party/` | MIT |
 | wwPDB Chemical Component Dictionary subset | `data/ccd/` | CC0 1.0 |
-| PDB entries 1D18, 1D3Z, 1L2Y, 1PIT, 1RNG, 2KJJ, 2KOC, 2LZX and ligand BTN | `tests/data/` | CC0 1.0 |
+| PDB entries 1D18, 1D3Z, 1L2Y, 1PIT, 1RNG, 2KJJ, 2KOC, 2LZX, 1ZNF (first model only), ligand BTN and CCD components ACE, NH2, ZN | `tests/data/` | CC0 1.0 |
 | RDKit test files `benzene.mol2`, `pyrazole_pyridine.mol2` | `tests/data/` | BSD-3-Clause |
 | DSSP algorithm, behavior following DSSP 4 ([PDB-REDO/dssp](https://github.com/PDB-REDO/dssp)), Copyright (c) 2020 NKI/AVL, Netherlands Cancer Institute | `src/dssp.cpp` | BSD-2-Clause |
 

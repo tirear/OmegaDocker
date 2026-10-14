@@ -16,6 +16,7 @@
 #include <toml.hpp>
 
 #include "log.hpp"
+#include "rama.hpp"
 #include "version.hpp"
 
 namespace od {
@@ -52,10 +53,6 @@ std::string chainList(const Molecule& m) {
   std::string k;
   for (const auto& c : chains) k += (k.empty() ? "" : "+") + c;
   return k;
-}
-
-bool isMetalBond(const Molecule& m, const Bond& b) {
-  return b.order == BondOrder::Metal || isMetal(m.atoms[b.a].atomicNum) || isMetal(m.atoms[b.b].atomicNum);
 }
 
 // Atom references of spec 5.2: "<name>" within the residue of the entry,
@@ -175,9 +172,14 @@ Layout layoutOf(const Topology& t) {
   return l;
 }
 
-std::string defaultSsType(const Topology& t, int unit) {
+// Chain-end residues (without phi or psi) always use R (spec 7.5).
+bool chainEnd(const std::map<BackboneAngle, int>& backbone) {
+  return !backbone.contains(BackboneAngle::Phi) || !backbone.contains(BackboneAngle::Psi);
+}
+
+std::string defaultSsType(const Topology& t, int unit, bool end) {
   const int r = t.units[unit].residue;
-  if (r < 0 || r >= static_cast<int>(t.dsspSS.size())) return "R";
+  if (end || r < 0 || r >= static_cast<int>(t.dsspSS.size())) return "R";
   const char c = t.dsspSS[r];
   return c == 'H' || c == 'G' || c == 'I' ? "O" : "R";
 }
@@ -213,12 +215,16 @@ void writeMolecule(std::string& o, const Molecule& m, const Topology& t) {
   if (m.hasResidueInfo) o += std::format("chain        = {}\n", quote(chainList(m)));
   o += std::format("backboneType = {}\n", quote(backboneTypeName(t.backboneType)));
   if (protein) o += "csgm1        = \"1a\"\n";
+  if (hasMetalRing(m)) o += "metalBond    = \"break\"           # \"break\" | \"keep\" (see the top of this file)\n";
 
-  for (int bi : t.crosslinkBreaks) {
+  auto writeBreak = [&](int bi, const char* source) {
     o += "\n  [[molecule.chainBreak]]\n";
     o += std::format("  bond   = [{}, {}]\n", quote(refs.ref(m.bonds[bi].a, -1)), quote(refs.ref(m.bonds[bi].b, -1)));
-    o += "  source = \"auto-crosslink\"\n";
-  }
+    o += std::format("  source = \"{}\"\n", source);
+  };
+  for (int bi : t.crosslinkBreaks) writeBreak(bi, "auto-crosslink");
+  if (hasMetalRing(m))
+    for (int bi : t.metalBreaks) writeBreak(bi, "auto-metal");
 
   for (std::size_t k = 0; k < l.units.size(); ++k) {
     const int u = l.units[k];
@@ -233,7 +239,7 @@ void writeMolecule(std::string& o, const Molecule& m, const Topology& t) {
     }
     if (protein) {
       if (r >= 0 && r < static_cast<int>(t.dsspSS.size())) o += std::format("  dsspSS  = {}\n", quote(std::string(1, t.dsspSS[r])));
-      o += std::format("  ssType  = {}\n", quote(defaultSsType(t, u)));
+      o += std::format("  ssType  = {}\n", quote(defaultSsType(t, u, chainEnd(l.backbone[k]))));
     }
     for (const auto& [a, ti] : l.backbone[k]) {
       const char* name = backboneAngleName(a);
@@ -398,9 +404,31 @@ std::vector<SsType> readSsTypes(const toml::table& root, Errors& e) {
   return out;
 }
 
+// Connected parts of the molecule without the broken bonds.
+int componentCount(const Molecule& m, const std::vector<int>& broken) {
+  std::vector<int> parent(m.atoms.size());
+  for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+  auto find = [&](int x) {
+    while (parent[x] != x) x = parent[x] = parent[parent[x]];
+    return x;
+  };
+  std::vector<bool> skip(m.bonds.size(), false);
+  for (int b : broken) skip[b] = true;
+  int n = static_cast<int>(m.atoms.size());
+  for (std::size_t i = 0; i < m.bonds.size(); ++i) {
+    if (skip[i]) continue;
+    const int a = find(m.bonds[i].a), b = find(m.bonds[i].b);
+    if (a != b) {
+      parent[a] = b;
+      --n;
+    }
+  }
+  return n;
+}
+
 // Reads ringBreak and chainBreak; returns the broken bond indices.
 std::vector<int> readBreaks(const toml::table& mt, const Molecule& m, const AtomRefs& refs, const std::string& where,
-                            MolSettings& s, Errors& e) {
+                            MetalBond metal, MolSettings& s, Errors& e) {
   std::map<std::pair<int, int>, int> bondOf;
   for (std::size_t i = 0; i < m.bonds.size(); ++i)
     bondOf[{std::min(m.bonds[i].a, m.bonds[i].b), std::max(m.bonds[i].a, m.bonds[i].b)}] = static_cast<int>(i);
@@ -418,18 +446,17 @@ std::vector<int> readBreaks(const toml::table& mt, const Molecule& m, const Atom
       e.add(lineOf(t), field + ".bond", "the bond is already broken by another entry");
       return -1;
     }
-    if (isMetalBond(m, m.bonds[it->second])) {
-      e.add(lineOf(t), field + ".bond", "metal bonds cannot be broken");
-      return -1;
-    }
     return it->second;
   };
+  auto metalBond = [&](int bi) { return isMetalBond(m, m.bonds[bi]); };
   for (const toml::table* t : tablesOf(mt, "ringBreak", where, e)) {
     const std::string field = where + ".ringBreak";
     checkKeys(*t, {"bond"}, field, e);
     const int bi = bondIndex(*t, field);
     if (bi < 0) continue;
-    if (!ring[bi])
+    if (metalBond(bi))
+      e.add(lineOf(*t), field + ".bond", "metal bonds are broken with [[molecule.chainBreak]] source = \"auto-metal\"");
+    else if (!ring[bi])
       e.add(lineOf(*t), field + ".bond", "the bond is not in a ring");
     else if (m.bonds[bi].aromatic)
       e.add(lineOf(*t), field + ".bond", "aromatic bonds cannot be broken");
@@ -440,10 +467,22 @@ std::vector<int> readBreaks(const toml::table& mt, const Molecule& m, const Atom
     const std::string field = where + ".chainBreak";
     checkKeys(*t, {"bond", "source"}, field, e);
     auto source = get<std::string>(*t, "source", field, e, true);
-    if (source && *source != "auto-loop" && *source != "auto-crosslink" && *source != "user")
-      e.add(lineOf(*t), field + ".source", "must be auto-loop, auto-crosslink or user");
+    if (source && *source != "auto-loop" && *source != "auto-crosslink" && *source != "auto-metal" &&
+        *source != "user") {
+      e.add(lineOf(*t), field + ".source", "must be auto-loop, auto-crosslink, auto-metal or user");
+      source.reset();
+    }
     const int bi = bondIndex(*t, field);
-    if (bi >= 0 && source) s.chainBreaks.push_back({bi, *source});
+    if (bi < 0 || !source) continue;
+    if (metalBond(bi) && metal == MetalBond::Keep)
+      e.add(lineOf(*t), field + ".bond",
+            "metalBond = \"keep\" does not break metal bonds; remove this entry or set metalBond = \"break\"");
+    else if (metalBond(bi) && *source != "auto-metal")
+      e.add(lineOf(*t), field + ".source", "must be auto-metal for a metal bond");
+    else if (!metalBond(bi) && *source == "auto-metal")
+      e.add(lineOf(*t), field + ".source", "auto-metal is only for metal bonds");
+    else
+      s.chainBreaks.push_back({bi, *source});
   }
   std::vector<int> broken(s.ringBreaks);
   for (const auto& c : s.chainBreaks) broken.push_back(c.bond);
@@ -491,6 +530,42 @@ void readTorsions(const toml::table& owner, const std::string& key, const std::v
     }
 }
 
+// RAMA_* types other than RAMA_AUTO must match the residue (spec 5.3, 7.5).
+void checkRamaTypes(const Molecule& m, const Layout& l, const std::vector<std::string>& keyOf,
+                    const std::vector<int>& ssLine, const std::string& where, const MolSettings& s, Errors& e) {
+  const Topology& t = s.topology;
+  std::vector<int> posOfUnit(t.units.size(), -1);
+  for (std::size_t k = 0; k < l.units.size(); ++k) posOfUnit[l.units[k]] = static_cast<int>(k);
+  auto resName = [&](int unit) { return unit >= 0 && t.units[unit].residue >= 0 ? m.residues[t.units[unit].residue].info.name : ""; };
+  for (std::size_t k = 0; k < l.units.size(); ++k) {
+    const int u = l.units[k];
+    const auto given = ramaClassFromTypeName(s.ssType[u]);
+    if (!given) continue;
+    const std::string field = std::format("{}.residue {}.ssType", where, keyOf[k]);
+    // The omega before the residue: cis when its input angle is within 90 degrees of 0; trans without one.
+    bool cis = false, cisTrans = false;
+    if (const int prev = t.units[u].prev; prev >= 0) {
+      const auto& bb = l.backbone[posOfUnit[prev]];
+      if (auto it = bb.find(BackboneAngle::Omega); it != bb.end()) {
+        cis = std::abs(t.torsions[it->second].angle) < 90.0;
+        cisTrans = s.mode[it->second] == TorsionMode::CisTrans;
+      }
+    }
+    const RamaClass want = ramaClassOf(resName(u), resName(t.units[u].next), cis);
+    if (cisTrans && (want == RamaClass::TransPro || want == RamaClass::CisPro) &&
+        (*given == RamaClass::TransPro || *given == RamaClass::CisPro)) {
+      e.add(ssLine[k], field,
+            std::format("{} cannot be used: the omega before this Pro is cisTrans; use RAMA_AUTO", s.ssType[u]));
+      continue;
+    }
+    if (*given != want)
+      e.add(ssLine[k], field,
+            std::format("{} is for {} residues; residue {} {} is {} (use {} or RAMA_AUTO)", s.ssType[u],
+                        ramaClassLabel(*given), keyOf[k], resName(u).empty() ? "(no residue name)" : resName(u),
+                        ramaClassLabel(want), ramaTypeName(want)));
+  }
+}
+
 MolSettings readMolecule(const toml::table& mt, const MolInput& in, const TopologyParams& base,
                          const std::set<std::string>& ssNames, Errors& e) {
   const Molecule& m = *in.mol;
@@ -499,7 +574,8 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
   const bool protein = bt == BackboneType::Protein;
   MolSettings s;
 
-  checkKeys(mt, {"id", "role", "file", "chain", "backboneType", "csgm1", "residue", "torsion", "ringBreak", "chainBreak"},
+  checkKeys(mt, {"id", "role", "file", "chain", "backboneType", "csgm1", "metalBond", "residue", "torsion", "ringBreak",
+                 "chainBreak"},
             where, e);
   for (const char* k : {"role", "file", "chain"}) get<std::string>(mt, k, where, e, false);
   if (auto b = get<std::string>(mt, "backboneType", where, e, true); b && *b != backboneTypeName(bt))
@@ -516,9 +592,35 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
     e.add(lineOf(*mt.get("csgm1")), where + ".csgm1", "only allowed for protein molecules");
   }
 
+  if (hasMetalRing(m)) {
+    if (auto v = get<std::string>(mt, "metalBond", where, e, true)) {
+      if (*v == "keep" || *v == "break")
+        s.metalBond = *v == "keep" ? MetalBond::Keep : MetalBond::Break;
+      else
+        e.add(lineOf(*mt.get("metalBond")), where + ".metalBond", "must be keep or break");
+    }
+  } else if (mt.contains("metalBond")) {
+    e.add(lineOf(*mt.get("metalBond")), where + ".metalBond", "only allowed when a metal bond lies in a ring");
+  }
+
   const AtomRefs refs(m);
   TopologyParams p = base;
-  p.brokenBonds = readBreaks(mt, m, refs, where, s, e);
+  p.brokenBonds = readBreaks(mt, m, refs, where, s.metalBond, s, e);
+  if (const int parts = componentCount(m, *p.brokenBonds) - componentCount(m, {}); parts > 0)
+    e.add(lineOf(mt), where, std::format("the broken bonds (ringBreak / chainBreak) split the molecule into {} parts; "
+                                         "only bonds in rings can be broken",
+                                         parts + 1));
+  if (s.metalBond == MetalBond::Break) {
+    const std::vector<bool> ring = ringBondMask(m, *p.brokenBonds);
+    for (std::size_t bi = 0; bi < m.bonds.size(); ++bi)
+      if (ring[bi] && isMetalBond(m, m.bonds[bi])) {
+        e.add(lineOf(*mt.get("metalBond")), where + ".metalBond",
+              std::format("\"break\": metal bond [{}, {}] is still in a ring; break it or another metal bond of the "
+                          "ring with [[molecule.chainBreak]] source = \"auto-metal\"",
+                          refs.ref(m.bonds[bi].a, -1), refs.ref(m.bonds[bi].b, -1)));
+        break;
+      }
+  }
   s.topology = analyzeTopology(m, p);
   s.topology.dsspSS = in.topo->dsspSS;
   s.mode.assign(s.topology.torsions.size(), TorsionMode::Fixed);
@@ -545,6 +647,7 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
   if (bt == BackboneType::None && !residues.empty())
     e.add(lineOf(*residues.front()), where + ".residue", "only allowed for molecules with a backbone");
   std::set<int> seen;
+  std::vector<int> ssLine(l.units.size(), 0);
   for (const toml::table* rt : bt == BackboneType::None ? std::vector<const toml::table*>{} : residues) {
     const std::string rfield = where + ".residue";
     std::string key;
@@ -578,10 +681,12 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
     get<std::string>(*rt, "dsspSS", field, e, false);
     if (protein) {
       if (auto ss = get<std::string>(*rt, "ssType", field, e, true)) {
-        if (!ssNames.contains(*ss))
+        if (!ssNames.contains(*ss)) {
           e.add(lineOf(*rt->get("ssType")), field + ".ssType", std::format("ssType '{}' is not defined", *ss));
-        else
+        } else {
           s.ssType[u] = *ss;
+          ssLine[k] = lineOf(*rt->get("ssType"));
+        }
       }
     }
     for (BackboneAngle a : protein ? std::vector<BackboneAngle>(std::begin(kProteinAngles), std::end(kProteinAngles))
@@ -623,6 +728,7 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
   if (bt != BackboneType::None)
     for (std::size_t k = 0; k < l.units.size(); ++k)
       if (!seen.contains(static_cast<int>(k))) e.add(lineOf(mt), where + ".residue", std::format("residue {} is missing", keyOf[k]));
+  if (protein) checkRamaTypes(m, l, keyOf, ssLine, where, s, e);
   readTorsions(mt, "torsion", l.molTorsions, refs, -1, where, s, e);
   return s;
 }
@@ -630,9 +736,20 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
 }  // namespace
 
 const std::vector<std::string>& builtinSsTypes() {
-  static const std::vector<std::string> names = {"R",          "O",           "RAMA_GENERAL", "RAMA_GLY", "RAMA_TRANSPRO",
-                                                 "RAMA_CISPRO", "RAMA_PREPRO", "RAMA_ILEVAL",  "RAMA_AUTO"};
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> v = {"R", "O"};
+    for (int i = 0; i < kRamaClassCount; ++i) v.push_back(ramaTypeName(static_cast<RamaClass>(i)));
+    v.push_back("RAMA_AUTO");
+    return v;
+  }();
   return names;
+}
+
+bool hasMetalRing(const Molecule& m) {
+  const std::vector<bool> ring = ringBondMask(m);
+  for (std::size_t bi = 0; bi < m.bonds.size(); ++bi)
+    if (ring[bi] && isMetalBond(m, m.bonds[bi])) return true;
+  return false;
 }
 
 std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
@@ -649,11 +766,24 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
   o += "\n# ---------- secondary-structure sampling types (csgm1b only) ----------\n";
   o += "# Built-in types cannot be changed; R and O are required.\n";
   o += "#   R: uniform; O: keep the input angles; RAMA_*: Top8000 distributions (spec 7.5).\n";
+  o += "#   RAMA_GLY: Gly; RAMA_TRANSPRO / RAMA_CISPRO: Pro after a trans / cis omega;\n";
+  o += "#   RAMA_PREPRO: residue before Pro (not Gly, Pro); RAMA_ILEVAL: Ile, Val (not before Pro);\n";
+  o += "#   RAMA_GENERAL: other residues; RAMA_AUTO: chosen per residue.\n";
+  o += "# ssType is used only with csgm1 = \"1b\" for residues whose phi and psi are rotatable;\n";
+  o += "# chain-end residues (without phi or psi) always use R.\n";
   o += "# Custom type: [[ssType]] name = \"A\" with [[ssType.point]] phi, psi, prob entries.\n";
   for (const auto& n : builtinSsTypes()) o += std::format("\n[[ssType]]\nname    = {}\nbuiltin = true\n", quote(n));
   o += "\n# ---------- molecules ----------\n";
   o += "# [[molecule.ringBreak]] bond = [\"<atom>\", \"<atom>\"] breaks a ring bond (spec 4.5).\n";
-  o += "# [[molecule.chainBreak]] source = \"auto-loop\" | \"auto-crosslink\" | \"user\" (spec 4.8).\n";
+  o += "# [[molecule.chainBreak]] source = \"auto-loop\" | \"auto-crosslink\" | \"auto-metal\" | \"user\" (spec 4.8).\n";
+  o += "#\n";
+  o += "# metalBond: only for molecules with metal coordination bonds in rings (spec 4.7).\n";
+  o += "#   \"break\" (default): the metal bonds listed as [[molecule.chainBreak]] source = \"auto-metal\"\n";
+  o += "#            are broken and held by distance restraints (spec 4.8); the metal stays bonded\n";
+  o += "#            to one ligand atom and moves with the molecule. Bonds in rings through the\n";
+  o += "#            metal become rotatable again (e.g. the backbone between coordinating residues).\n";
+  o += "#   \"keep\":  no metal bond is broken; every bond in a ring through the metal is not\n";
+  o += "#            rotatable. Remove the auto-metal chainBreak entries when choosing \"keep\".\n";
   for (const MolInput& in : mols) writeMolecule(o, *in.mol, *in.topo);
   return o;
 }

@@ -4,6 +4,7 @@
 
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <format>
@@ -17,6 +18,7 @@
 #include "log.hpp"
 #include "dssp.hpp"
 #include "molconfig.hpp"
+#include "rama.hpp"
 #include "read_input.hpp"
 #include "topology.hpp"
 
@@ -507,4 +509,186 @@ TEST_CASE("molconfig: default file name does not overwrite") {
   CHECK(p1 == prefix + ".molconfig.default.1.toml");
   std::filesystem::remove(p0);
   std::filesystem::remove(p1);
+}
+
+namespace {
+
+od::Molecule zincFinger() {
+  static od::CcdLibrary lib;
+  static bool loaded = false;
+  if (!loaded) {
+    lib.addFile(kData + "/1ZNF_ccd.cif");
+    loaded = true;
+  }
+  return od::loadMolecules(kData + "/1ZNF.cif", od::Role::MobM, lib).front();
+}
+
+int ringBackbone(const od::Topology& t) {
+  int n = 0;
+  for (const auto& tor : t.torsions)
+    n += (tor.backbone == od::BackboneAngle::Phi || tor.backbone == od::BackboneAngle::Psi) &&
+         tor.category == od::TorsionCategory::Ring;
+  return n;
+}
+
+// Replaces the value of the n-th occurrence of key (from the anchor) up to the closing quote.
+std::string setQuoted(std::string s, const std::string& anchor, const std::string& key, const std::string& value) {
+  auto i = s.find(anchor);
+  REQUIRE(i != std::string::npos);
+  i = s.find(key + "\"", i);
+  REQUIRE(i != std::string::npos);
+  i += key.size() + 1;
+  const auto j = s.find('"', i);
+  return s.replace(i, j - i, value);
+}
+
+}  // namespace
+
+TEST_CASE("chem: Gasteiger charges with metal bonds (1ZNF)") {
+  const auto m = zincFinger();
+  for (const auto& a : m.atoms) {
+    CHECK(std::isfinite(a.partialCharge));
+    if (a.atomicNum == 30) CHECK(a.partialCharge == 2.0);
+  }
+  CHECK(sumPartialCharge(m) == doctest::Approx(netFormalCharge(m)).epsilon(1e-6));
+}
+
+TEST_CASE("topology: metal bonds in rings (1ZNF)") {
+  const auto m = zincFinger();
+  auto t = od::analyzeTopology(m, {});
+  CHECK(t.crosslinkBreaks.empty());
+  // Zn bonded to Cys3 SG, Cys6 SG, His19 NE2, His23 NE2: three bonds close rings.
+  REQUIRE(t.metalBreaks.size() == 3);
+  CHECK(t.brokenBonds == t.metalBreaks);
+  CHECK(ringBackbone(t) == 0);
+  CHECK(od::hasMetalRing(m));
+  od::TopologyParams keep;
+  keep.brokenBonds = std::vector<int>{};
+  auto whole = od::analyzeTopology(m, keep);
+  // Residue 3 psi through residue 23 phi lie in rings through Zn.
+  CHECK(ringBackbone(whole) == 40);
+}
+
+TEST_CASE("molconfig: metalBond") {
+  ConfigFixture f;
+  f.mols.push_back(zincFinger());
+  f.topos.push_back(od::analyzeTopology(f.mols.back(), {}));
+  od::assignDssp({&f.mols.back()}, {&f.topos.back()});
+  f.inputs.clear();
+  for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  const std::string zn = "id           = \"mob:1ZNF.cif:A\"";
+  CHECK(text.find("metalBond") != std::string::npos);
+  CHECK(f.errorsOf(text).empty());
+
+  // keep: the auto-metal entries conflict.
+  const std::string keep = setQuoted(text, zn, "metalBond    = ", "keep");
+  auto e = f.errorsOf(keep);
+  CHECK(std::count_if(e.begin(), e.end(), [](const std::string& x) {
+          return x.find("metalBond = \"keep\" does not break metal bonds") != std::string::npos;
+        }) == 3);
+  // keep without the entries: the backbone between the coordinating residues must be fixed.
+  std::string keepOk = keep;
+  for (const char* atom : {"A:6:SG", "A:19:NE2", "A:23:NE2"}) {
+    const auto i = keepOk.find(std::format("  [[molecule.chainBreak]]\n  bond   = [\"{}\"", atom));
+    REQUIRE(i != std::string::npos);
+    keepOk.erase(i, keepOk.find("auto-metal\"\n", i) + 12 - i);
+  }
+  CHECK(hasError(f.errorsOf(keepOk), "residue A:10.phi: category 'ring' is not rotatable"));
+  // Side chains of the coordinating residues are in the rings too.
+  for (int seq : {3, 6, 19, 23}) {
+    const auto anchor = keepOk.find(std::format("resSeq  = {}\n", seq), keepOk.find(zn));
+    const auto next = keepOk.find("[[molecule.residue]]", anchor);
+    for (auto p = keepOk.find("rotatable = true", anchor); p < next; p = keepOk.find("rotatable = true", p))
+      keepOk.replace(p, 16, "rotatable = false");
+  }
+  for (int seq = 3; seq <= 23; ++seq)
+    for (const char* a : {"phi     = true", "psi     = true"}) {
+      const auto anchor = keepOk.find(std::format("resSeq  = {}\n", seq), keepOk.find(zn));
+      const auto next = keepOk.find("[[molecule.residue]]", anchor);
+      const auto i = keepOk.find(a, anchor);
+      if (i < next) keepOk.replace(i, std::string(a).size(), std::string(a).replace(10, 4, "false"));
+    }
+  CHECK(f.errorsOf(keepOk).empty());
+
+  // break with a missing entry: Zn is still in a ring.
+  std::string missing = text;
+  const auto i = missing.find("  [[molecule.chainBreak]]\n  bond   = [\"A:23:NE2\"");
+  missing.erase(i, missing.find("auto-metal\"\n", i) + 12 - i);
+  CHECK(hasError(f.errorsOf(missing), "metal bond [A:3:SG, A:27:ZN] is still in a ring"));
+
+  CHECK(hasError(f.errorsOf(setQuoted(text, zn, "metalBond    = ", "remove")), "metalBond: must be keep or break"));
+  CHECK(hasError(f.errorsOf(setQuoted(text, "bond   = [\"A:6:SG\"", "source = ", "user")),
+                 "source: must be auto-metal for a metal bond"));
+  e = f.errorsOf(replaceAfter(text, zn, "metalBond    = \"break\"", ""));
+  CHECK(hasError(e, "metalBond: missing"));
+  e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
+                              "backboneType = \"none\"\nmetalBond = \"keep\"\n"
+                              "[[molecule.chainBreak]]\nbond = [\"#9\", \"#10\"]\nsource = \"auto-metal\"\n"
+                              "[[molecule.chainBreak]]\nbond = [\"#1\", \"#2\"]\nsource = \"user\""));
+  CHECK(hasError(e, "metalBond: only allowed when a metal bond lies in a ring"));
+  CHECK(hasError(e, "source: auto-metal is only for metal bonds"));
+  CHECK(hasError(e, "split the molecule into 2 parts"));
+  e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
+                              "backboneType = \"none\"\n[[molecule.ringBreak]]\nbond = [\"A:27:ZN\", \"A:3:SG\"]"));
+  CHECK(hasError(e, "residue 'A:27' not found"));
+}
+
+TEST_CASE("rama: embedded Top8000 grids") {
+  const int listed[] = {27151, 29072, 9276, 6510, 17410, 21272};
+  for (int i = 0; i < od::kRamaClassCount; ++i) {
+    const auto& g = od::ramaGrid(static_cast<od::RamaClass>(i));
+    CHECK(g.listed == listed[i]);
+    CHECK(g.value.size() == od::kRamaBins * od::kRamaBins);
+  }
+  const auto& gen = od::ramaGrid(od::RamaClass::General);
+  CHECK(gen.at(-179, -173) == doctest::Approx(0.0027118446100793205));
+  CHECK(gen.at(-180, -174) == gen.at(-179, -173));
+  CHECK(gen.at(180, 186) == gen.at(-179, -173));
+  CHECK(gen.at(-63, -41) > 0.5f);  // alpha-helix region
+  CHECK(od::RamaGrid::bin(-180) == 0);
+  CHECK(od::RamaGrid::bin(180) == 0);
+  CHECK(od::RamaGrid::bin(179.9) == 179);
+
+  CHECK(od::ramaClassOf("GLY", "PRO", false) == od::RamaClass::Gly);
+  CHECK(od::ramaClassOf("PRO", "PRO", true) == od::RamaClass::CisPro);
+  CHECK(od::ramaClassOf("ILE", "PRO", false) == od::RamaClass::PrePro);
+  CHECK(od::ramaClassOf("VAL", "", false) == od::RamaClass::IleVal);
+  CHECK(od::ramaClassOf("ALA", "", false) == od::RamaClass::General);
+  CHECK(od::ramaClassFromTypeName("RAMA_PREPRO") == od::RamaClass::PrePro);
+  CHECK_FALSE(od::ramaClassFromTypeName("RAMA_AUTO"));
+}
+
+TEST_CASE("molconfig: RAMA types must match the residue (1L2Y)") {
+  ConfigFixture f;
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  auto ss = [&](const std::string& base, int seq, const std::string& type) {
+    return setQuoted(base, std::format("resSeq  = {}\n", seq), "ssType  = ", type);
+  };
+  // NLYIQWLKDGGPSSGRPPPS
+  std::string ok = ss(text, 2, "RAMA_GENERAL");
+  ok = ss(ok, 4, "RAMA_ILEVAL");
+  ok = ss(ok, 11, "RAMA_GLY");
+  ok = ss(ok, 12, "RAMA_TRANSPRO");
+  ok = ss(ok, 16, "RAMA_PREPRO");
+  ok = ss(ok, 17, "RAMA_TRANSPRO");
+  ok = ss(ok, 13, "RAMA_AUTO");
+  CHECK(f.errorsOf(ok).empty());
+
+  auto e = f.errorsOf(ss(text, 2, "RAMA_GLY"));
+  CHECK(hasError(e, "residue A:2.ssType: RAMA_GLY is for Gly residues; residue A:2 LEU is general"));
+  CHECK(hasError(f.errorsOf(ss(text, 4, "RAMA_GENERAL")), "use RAMA_ILEVAL or RAMA_AUTO"));
+  CHECK(hasError(f.errorsOf(ss(text, 12, "RAMA_CISPRO")), "residue A:12 PRO is trans-Pro"));
+  CHECK(hasError(f.errorsOf(ss(text, 16, "RAMA_GENERAL")), "use RAMA_PREPRO or RAMA_AUTO"));
+  const std::string cisTrans =
+      replaceAfter(ss(text, 12, "RAMA_TRANSPRO"), "resSeq  = 11\n", "omega   = \"fixed\"", "omega   = \"cisTrans\"");
+  CHECK(hasError(f.errorsOf(cisTrans), "the omega before this Pro is cisTrans; use RAMA_AUTO"));
+  CHECK(f.errorsOf(ss(cisTrans, 12, "RAMA_AUTO")).empty());
+
+  // Chain ends default to R.
+  CHECK(setQuoted(text, "resSeq  = 1\n", "ssType  = ", "X") == ss(text, 1, "X"));
+  const auto r1 = text.find("ssType  = ", text.find("resSeq  = 1\n"));
+  const auto r20 = text.find("ssType  = ", text.find("resSeq  = 20\n"));
+  CHECK(text.substr(r1, 13) == "ssType  = \"R\"");
+  CHECK(text.substr(r20, 13) == "ssType  = \"R\"");
 }

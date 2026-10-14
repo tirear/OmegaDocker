@@ -61,8 +61,12 @@ struct Topology {
   std::vector<BackboneUnit> units;
   std::vector<Torsion> torsions;
   // Crosslinks to break automatically (spec 4.7): bond indices of inter-residue
-  // bonds, other than backbone links and metal bonds, that close a cycle.
+  // bonds, other than backbone links and metal bonds, that close a cycle of
+  // the bond graph without metal bonds.
   std::vector<int> crosslinkBreaks;
+  // Metal bonds to break with metalBond = "break" (spec 4.7): bond indices of
+  // metal bonds that close a cycle once crosslinkBreaks are broken.
+  std::vector<int> metalBreaks;
   // Bonds treated as broken when classifying ring bonds (spec 4.5, 4.8).
   std::vector<int> brokenBonds;
   // DSSP code per residue (spec 4.6; set by assignDssp): H G I P E B T S, '.' for
@@ -80,7 +84,8 @@ struct TopologyParams {
   // residue information, at atoms) within the box extended by staFlexMargin.
   std::optional<Box> box;
   double staFlexMargin = 4.0;
-  // Broken bonds (indices into Molecule::bonds); crosslinkBreaks when not given.
+  // Broken bonds (indices into Molecule::bonds); crosslinkBreaks and metalBreaks
+  // when not given.
   std::optional<std::vector<int>> brokenBonds;
 };
 
@@ -90,8 +95,9 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p);
 // degrees by more than toleranceDeg (spec 4.3).
 std::vector<int> nonPlanarOmegas(const Topology& t, double toleranceDeg);
 
-// Bonds of the whole bond graph that lie in a ring, indexed like Molecule::bonds.
-std::vector<bool> ringBondMask(const Molecule& m);
+// Bonds that lie in a ring once the broken bonds (indices into Molecule::bonds)
+// are removed; broken bonds are not in a ring. Indexed like Molecule::bonds.
+std::vector<bool> ringBondMask(const Molecule& m, const std::vector<int>& broken = {});
 
 double dihedralDeg(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d);
 

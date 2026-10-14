@@ -54,9 +54,17 @@ void perceiveChemistry(Molecule& m) {
     m.bonds[i].aromatic = mol->getBondWithIdx(static_cast<unsigned>(i))->getIsAromatic();
 
   if (m.chargesFromFile) return;
-  RDKit::computeGasteigerCharges(*mol, 12, true);
+  // Metal bonds are removed so that atoms without parameters stay isolated;
+  // metals take their formal charge.
+  for (int i = static_cast<int>(m.bonds.size()) - 1; i >= 0; --i)
+    if (isMetalBond(m, m.bonds[i])) mol->removeBond(static_cast<unsigned>(m.bonds[i].a), static_cast<unsigned>(m.bonds[i].b));
+  RDKit::computeGasteigerCharges(*mol, 12, false);
   int unparameterized = 0;
   for (std::size_t i = 0; i < m.atoms.size(); ++i) {
+    if (isMetal(m.atoms[i].atomicNum)) {
+      m.atoms[i].partialCharge = m.atoms[i].formalCharge;
+      continue;
+    }
     double q = 0;
     mol->getAtomWithIdx(static_cast<unsigned>(i))->getPropIfPresent(RDKit::common_properties::_GasteigerCharge, q);
     if (!std::isfinite(q)) {

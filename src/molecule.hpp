@@ -72,6 +72,8 @@ struct RawStructure {
 const char* elementSymbol(int atomicNum);
 int atomicNumber(const std::string& symbol);  // case-insensitive; 0 if unknown
 bool isMetal(int atomicNum);
+// Metal coordination bond: bond order Metal, or a metal atom at either end.
+bool isMetalBond(const Molecule& m, const Bond& b);
 
 // Splits a structure into connected components, preserving atom order.
 std::vector<Molecule> splitMolecules(const RawStructure& s);

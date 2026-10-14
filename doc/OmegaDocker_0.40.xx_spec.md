@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.4 |
+| 文件版本 | 1.5 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -77,6 +77,11 @@
 - 依原子價需要但檔案中沒有的氫，不會補上，只警告。
 - mol2 的殘基取自每個原子的 `subst_id`、`subst_name`（殘基名稱與序號由 `subst_name` 拆出，例如 `ALA12`），鏈名稱取自 `@<TRIPOS>SUBSTRUCTURE` 的 chain 欄。
 - mol2 標示 `NO_CHARGES` 或缺電荷欄時，改算 Gasteiger 電荷並警告。
+
+**Gasteiger 電荷細則：**
+- 計算前先移除金屬配位鍵；金屬原子的部分電荷等於其形式電荷。
+- 沒有 Gasteiger 參數的其他原子使用形式電荷，並警告。
+- 原因：金屬沒有 Gasteiger 參數；若保留金屬配位鍵，無效數值會沿鍵結擴散到大部分原子（實測 1ZNF：424 個原子中 231 個）。
 
 ### 3.2 分子的劃分與角色指定
 
@@ -160,7 +165,7 @@
 
 - 使用者在分子設定檔的 `ringBreak` 中指定要斷開的鍵。
 - 斷開後，環內鍵依 4.4 重新判斷是否可轉動。
-- `ringBreak` 的鍵必須在環內（以未斷開的鍵結圖判斷），且不可為芳香鍵或金屬配位鍵。
+- `ringBreak` 的鍵必須在環內（以未斷開的鍵結圖判斷），且不可為芳香鍵或金屬配位鍵（金屬配位鍵見 4.7 的 `metalBond`）。
 - 被斷開的鍵（`ringBreak`、`chainBreak`）本身的兩面角由閉合約束決定（4.8），不可設為可轉動。
 - 以距離約束恢復斷鍵，方式見 4.8。每對約束原子：能量 `E = G·d²`、梯度 `2G·d`（`G` 預設 200，`--closureG`）。
 - 源自 OmegaDocker v0.34.0 的 G 原子對做法（`pdbqtAddDistFix.pl`），新版不再需要前處理腳本，並修正兩個已知問題：
@@ -199,10 +204,24 @@
 
 - 交聯鍵（雙硫鍵 S–S 等跨殘基共價鍵）若使扭轉樹形成環，自動在該鍵斷開，並依 4.8 約束閉合。
   - 候選鍵：兩端原子屬於不同殘基、不是主鏈相連鍵（蛋白質 C–N、核酸 O3′–P）、不是金屬配位鍵。
-  - 選取方式：先放入所有非候選鍵，再依鍵的順序放入候選鍵；兩端已相連的候選鍵才斷開。因此分子不會因斷鍵而分成兩段（例如 A、B 兩條鏈之間有兩個雙硫鍵時，只斷開一個）。
+  - 選取方式：不計金屬配位鍵，先放入所有非候選鍵，再依鍵的順序放入候選鍵；兩端已相連的候選鍵才斷開。因此分子不會因斷鍵而分成兩段（例如 A、B 兩條鏈之間有兩個雙硫鍵時，只斷開一個）。
   - 判斷兩面角類別時，已斷開的鍵不算在環內（4.4、4.5）。
   - 沒有殘基資訊的分子（SDF、無 substructure 的 mol2）不偵測交聯鍵；需要時使用 `ringBreak`。
-  - 金屬配位鍵不自動斷開。
+
+#### 金屬配位鍵（`metalBond`）
+- 金屬配位鍵在環內的分子（例如鋅指蛋白中 Zn 與 Cys、His 配位），使用者須在分子設定檔以 `metalBond` 選擇處理方式：
+
+| `metalBond` | 處理 | 結果 |
+|---|---|---|
+| `"break"`（預設檔的值） | 斷開金屬配位鍵，寫成 `[[molecule.chainBreak]]`，`source = "auto-metal"`；以距離約束閉合（4.8） | 金屬仍與一個配位原子相連，隨分子移動；經過金屬的環消失，環內的鍵依 4.4 重新判斷 |
+| `"keep"` | 不斷開 | 經過金屬的環內所有鍵不可轉動（例如 1ZNF 中殘基 3 的 ψ 到殘基 23 的 φ，共 40 個主鏈兩面角，以及配位殘基的側鏈） |
+
+- `"break"` 的斷鍵選取：先放入所有非金屬配位鍵（自動斷開的交聯鍵除外），再依鍵的順序放入金屬配位鍵；兩端已相連者才斷開。例如 1ZNF 的 Zn 有 4 個配位鍵，斷開 3 個。
+- 使用者可改選要斷開的金屬配位鍵，但驗證時（5.3）：
+  - `"break"`：斷鍵後，不可有金屬配位鍵仍在環內；分子不可分成兩段。
+  - `"keep"`：不可有斷開金屬配位鍵的項目。
+  - 不符合時報錯並結束，由使用者重新決定。
+- 金屬配位鍵不在環內的分子不使用 `metalBond`。
 
 #### `staFixedResMovable = true`
 - 錨點為每條鏈最靠近該鏈質心的殘基（無殘基資訊時為最靠近質心的重原子）；轉動兩面角時，遠離錨點的一側移動。
@@ -210,7 +229,7 @@
 
 ### 4.8 斷鍵與閉合
 
-- 斷鍵來源：(1) 使用者在 `ringBreak` 指定；(2) 4.7 自動產生的 loop 斷鍵與交聯斷鍵。
+- 斷鍵來源：(1) 使用者在 `ringBreak` 指定；(2) 4.7 自動產生的 loop 斷鍵、交聯斷鍵與金屬配位斷鍵（`metalBond = "break"`）。
 - 自動產生的斷鍵寫入預設分子設定檔（`[[molecule.chainBreak]]`，見 5.2），並在執行紀錄中列出。
 - 閉合約束方式：程式內部在斷鍵兩端產生虛擬複製原子（不參與其他能量計算，位置取自輸入座標），約束三對原子重合，同時約束鍵長、兩個鍵角與斷鍵兩面角：
 
@@ -220,6 +239,8 @@
 | 核酸 O3′–P | P′、O5′′ | O3′′ | ζ |
 | 雙硫鍵 S–S | S′、CB′ | S′ | χ3 |
 | 使用者指定的斷鍵 | B′、B 的一個重原子鄰居′ | A′ | 斷鍵所在的兩面角 |
+
+- 金屬配位斷鍵（`auto-metal`）：配位角度變化大，**只約束距離**——金屬 M 與配位原子 L 的距離維持輸入值 `r₀`：`E = G·(|M−L| − r₀)²`。閉合失敗篩選以 `||M−L| − r₀| > maxBreakDist` 判斷。
 
 - 閉合失敗篩選：9a 最佳化後，任一約束原子對距離 > `maxBreakDist`（預設 0.5 Å）→ 捨棄該樣本。
 - 可達距離篩選（`csgmBuild = grow` 時）：每建一個殘基，若目前末端到閉合目標的距離 > 剩餘殘基數 × `reachPerRes`（蛋白質預設 3.8 Å；核酸預設 7.0 Å），即依 7.8 的規則重抽或捨棄。
@@ -258,6 +279,8 @@ flowchart TD
 - 其他兩面角：中間鍵第一個原子所在的殘基若有主鏈單元，寫在該殘基的 `[[molecule.residue.torsion]]`；否則寫在 `[[molecule.torsion]]`。
 - `ssType`、`dsspSS`、`csgm1` 只用於蛋白質分子。
 - `[[ssType]]` 列出全部內建類型（`R`、`O` 與 7.5 的 `RAMA_*`）。
+- `ssType` 預設：鏈端殘基（缺 φ 或 ψ）→ `R`；DSSP 為 H / G / I → `O`；其他 → `R`。
+- `metalBond` 只在金屬配位鍵位於環內的分子寫出（4.7），預設檔的值為 `"break"`，並列出對應的 `auto-metal` 斷鍵。檔案開頭的註解說明兩個選項。
 
 分子 `id`：
 - 有殘基與鏈資訊：`<sta|mob>:<檔名>:<鏈名稱，多條以 + 連接>`；同一檔案中有重複時，再加上 `:<第一個殘基名稱><序號><插入碼>`（例如水分子 `sta:r.cif:A:HOH501`）。
@@ -294,10 +317,15 @@ file         = "receptor.cif"
 chain        = "A"
 backboneType = "protein"         # 偵測結果，不可修改
 csgm1        = "1a"              # 僅蛋白質：1a | 1b
+metalBond    = "break"           # 只在金屬配位鍵位於環內時：break | keep（4.7）
 
   [[molecule.chainBreak]]       # 自動產生（4.7）；使用者可刪除或新增
   bond   = ["A:45:C", "A:46:N"]  # 鏈:殘基序號[插入碼]:原子名
-  source = "auto-loop"           # auto-loop | auto-crosslink | user
+  source = "auto-loop"           # auto-loop | auto-crosslink | auto-metal | user
+
+  [[molecule.chainBreak]]
+  bond   = ["A:60:NE2", "A:301:ZN"]
+  source = "auto-metal"
 
   [[molecule.residue]]
   chain    = "A"
@@ -305,7 +333,7 @@ csgm1        = "1a"              # 僅蛋白質：1a | 1b
   resSeq   = 12
   iCode    = ""
   dsspSS   = "."                 # DSSP 結果（參考用）
-  ssType   = "R"                 # 預設：helix(H/G/I) → O；其他 → R
+  ssType   = "R"                 # 預設：鏈端 → R；helix(H/G/I) → O；其他 → R
   phi      = false               # StaM 預設 false；MobM 預設 true
   psi      = false
   omega    = "fixed"             # fixed | cisTrans
@@ -360,9 +388,11 @@ backboneType = "none"
 | 殘基與兩面角 | 必須與偵測結果一一對應，不可增減 |
 | 不可轉動的類別 | 依斷鍵後重新分類的結果（4.5），不可轉動類別者 `rotatable = true` 視為錯誤（主鏈兩面角相同） |
 | 脯胺酸 φ、核酸 δ | 不可設為 `true`（除非該環有 `ringBreak`） |
-| 斷鍵 | `ringBreak` 見 4.5；`chainBreak` 的 `source` 為 `auto-loop`、`auto-crosslink`、`user`；兩者的鍵必須存在、不可為金屬配位鍵、不可重複；被斷開的鍵不可設為可轉動，該處的 ω 不可設為 `cisTrans` |
+| 斷鍵 | `ringBreak` 見 4.5；`chainBreak` 的 `source` 為 `auto-loop`、`auto-crosslink`、`auto-metal`、`user`；鍵必須存在、不可重複；被斷開的鍵不可設為可轉動，該處的 ω 不可設為 `cisTrans`；全部斷鍵不可使分子分成兩段以上 |
+| 金屬配位鍵 | 金屬配位鍵在環內的分子必須有 `metalBond`（`keep` 或 `break`），其他分子不可有；金屬配位鍵只能以 `source = "auto-metal"` 斷開，`auto-metal` 只能用於金屬配位鍵；`keep` 時不可斷開任何金屬配位鍵；`break` 時斷鍵後不可有金屬配位鍵仍在環內（4.7） |
 | `csgm1` | 只有 `backboneType = "protein"` 可設定，值為 `1a` 或 `1b` |
 | `ssType` 名稱 | 必須已定義；必須包含 `R`、`O`；`builtin = true` 只能用於內建名稱，且不可有 `point`；自訂類型不可使用內建名稱 |
+| `RAMA_*` 與殘基 | `RAMA_AUTO` 以外的 `RAMA_*` 必須與殘基類別相符（7.5），否則報錯；Pro 前一個 ω 為 `cisTrans` 時不可用 `RAMA_TRANSPRO`、`RAMA_CISPRO`（改用 `RAMA_AUTO`） |
 | 自訂類型 | 至少一個 `point`；同一類型內 (φ, ψ) 不可重複；`prob` 皆 > 0 且總和 ≤ 1 |
 | 角度範圍 | (−180°, 180°] |
 
@@ -447,10 +477,14 @@ nextL1 = min(nextL1, maxL1BatchNum)
 
 #### csgm1b（序列與結構關係）
 - 只用於 `csgm1 = "1b"` 的蛋白質分子；其他分子仍用 csgm1a。
-- 每個殘基依 `ssType`：
+- **兩面角是否可轉動，一律以分子設定檔的開關為最終標準**（所有分子，不論是否有主鏈）。`ssType` 只決定「可轉動的主鏈 φ、ψ 依什麼機率分佈取值」；不可轉動的兩面角維持輸入角度，與 `ssType` 無關。
+- φ、ψ 都可轉動的殘基，依 `ssType` 同時取 (φ, ψ)：
   - `R`：φ、ψ 依 csgm1a。
-  - `O`：φ、ψ 保持輸入且不轉動。
-  - 自訂類型：以 `prob` 選中某個 `point`；否則（機率 `1 − Σprob`）從其餘所有角度組合中均勻選取。
+  - `O`：φ、ψ 保持輸入且不轉動（與開關的關係待確認，見 17.2）。
+  - 自訂類型：以 `prob` 選中某個 `point`；否則（機率 `1 − Σprob`）從其餘所有角度組合中均勻選取。例如 `A` 類型以 90% 取 α 螺旋的角度，10% 取其他角度。
+  - `RAMA_*`：見下表。
+- 鏈端殘基（缺 φ 或 ψ）：不論 `ssType`，一律依 `R`。
+- 只有 φ、ψ 其中之一可轉動的殘基：待確認（17.2）。
 - 側鏈兩面角與 ω 依 csgm1a。
 - 內建 Ramachandran 類型，資料取自 Richardson Lab 的 Top8000 `rama8000-*.data`（CC BY 4.0，見第 15 節）：
 
@@ -463,6 +497,10 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `RAMA_PREPRO` | `rama8000-prepro-noGP.data` | Pro 前一個殘基（非 Gly/Pro） |
 | `RAMA_ILEVAL` | `rama8000-ileval-nopreP.data` | Ile、Val（非 Pro 前） |
 | `RAMA_AUTO` | — | 依殘基自動選用上列之一 |
+
+- 殘基類別依殘基名稱判定，順序：`GLY` → Gly；`PRO` → trans-Pro 或 cis-Pro；下一個殘基為 `PRO` → pre-Pro；`ILE`、`VAL` → Ile/Val；其他 → general。沒有殘基名稱的主鏈單元視為 general。
+- Pro 的 cis / trans 依其前一個 ω：ω 為 `fixed` 時，輸入角度與 0° 相差 < 90° 為 cis，否則為 trans；ω 為 `cisTrans` 時，先抽 ω 再選分佈（只能用 `RAMA_AUTO`）；沒有前一個 ω（鏈的第一個殘基）視為 trans。
+- 資料檔放在 `third_party/top8000/`（原檔，未修改），建置時以組譯器 `.incbin` 嵌入執行檔，第一次使用時解析。
 
   - 格式：φ、ψ 各 180 格（2° 一格），週期邊界；檔案中未列出的格點值為 0。
   - 檔案數值是 MolProbity 用的**百分位等高值**，不是機率密度，但隨密度單調增加。本版以該值作為抽樣權重（正規化後），格內再均勻取角度。
@@ -592,7 +630,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 3 | 36,864 | 7.5° |
 | 4 | 294,912 | 3.75° |
 
-- 參數 `rotStep`（預設 4°）：選用間距最接近的層，並印出實際間距。
+- 參數 `rotStep`（預設 7.5°，即第 3 層）：選用間距最接近的層，並印出實際間距。
 
 ### 8.4 位置與定向取樣方法
 
@@ -605,7 +643,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 
 #### 8.4.2 posm2：均勻完整取樣
 - 位置：對接範圍內 X、Y、Z 以 `posStep`（預設 1 Å）均勻取點。
-- 定向：Hopf 格點（`rotStep`，預設 4°）。
+- 定向：Hopf 格點（`rotStep`，預設 7.5°）。
 - 樣本數 = 位置數 × 定向數，全部進入篩選與最佳化。
 
 #### 8.4.3 posm2_fft：FFT 均勻完整取樣
@@ -635,7 +673,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
    - 正負號互補：sign(m1) = −sign(s1) 且 sign(m2) = −sign(s2)。
 2. 對齊：MobM 的 m1→m2 軸對齊 s1→s2 軸，兩軸中點重合。
 3. 平移：中點周圍 ±`sepaPosRange`（預設 4 Å），間距 `posStep`（預設 1 Å）均勻取點。
-4. 定向：繞配對軸每 `rotStep`（預設 4°）取一個角度。
+4. 定向：繞配對軸每 `rotStep`（預設 7.5°）取一個角度。
 
 **單點取樣：**
 1. StaM 區域 s 與 MobM 原子 m 符號互補。
@@ -810,7 +848,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--deltaThreshold` | 1×10⁻⁴ kcal/mol | 8.1 |
 | `--posm` | 必填 | 8.4 |
 | `--posStep` | 1 Å | 8.4 |
-| `--rotStep` | 4° | 8.3 |
+| `--rotStep` | 7.5° | 8.3 |
 | `--posm1SampleNum` | 1000 | 8.4.1 |
 | `--fftClamp` | 10 kcal/mol | 8.4.3 |
 | `--fftTopPerRot` | 1 | 8.4.3 |
@@ -849,6 +887,8 @@ nextL1 = min(nextL1, maxL1BatchNum)
 - CPU 與 CUDA 共用的計算函式以 `__host__ __device__` 撰寫一份；需與 OpenCL 共用的部分限用 C 子集。
 - CPU 版以 OpenMP 平行化。
 
+- **GPU 效能最佳化與原子數（之後處理）**：AutoDock-GPU 以 256 個原子為上限，並針對這個規模最佳化（例如資料放入 shared memory／constant memory、每個 block 的執行緒安排）。超過 256 個原子時，最佳的資料結構與 CUDA 資源安排很可能不同。舊版 OmegaDocker 不論原子數都使用同一套演算法。新版不硬性限制原子數，但進行 GPU 效能最佳化時，應依原子數（及兩面角數）分級，各級採用不同的資料結構與 kernel 設定；分級界線與做法待 GPU 版實作時以實測決定。
+
 ### 15.1.1 開發與測試環境
 | 項目 | 內容 |
 |---|---|
@@ -877,11 +917,11 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | SDF / mol2 讀取、芳香性、環、Gasteiger | RDKit 2026.09.1 | 編譯式函式庫 | 原始碼以 GCC 14.3 自行編譯：`~/bin/gcc1430/rdkit202609` | BSD-3-Clause |
 | RDKit 依賴 | Boost 1.90.0 | 編譯式函式庫 | 原始碼以 GCC 14.3 自行編譯：`~/bin/gcc1430/boost1900`（動態＋靜態，含 ICU）；`~/bin/gcc1430/boost1900noicu`（只有靜態，無 ICU，只含 iostreams、serialization、regex、random） | BSL-1.0 |
 | RDKit 依賴 | Eigen 3.4.0 | 純標頭檔 | `~/bin/gcc1430/eigen340` | MPL-2.0 |
-| Ramachandran 資料 | Top8000 | 資料檔 | 放入 `third_party/`，附原 `LICENSE` | CC BY 4.0 |
+| Ramachandran 資料 | Top8000 `rama8000-*.data`（6 個檔） | 資料檔 | `third_party/top8000/`，取自 [rlabduke/reference_data](https://github.com/rlabduke/reference_data) commit `5ee6875`（`Top8000/Top8000_ramachandran_pct_contour_grids/`），附原 `LICENSE`、`README` 與 `README.reference_data.md`（版權與引用說明）；以 `.incbin` 嵌入執行檔 | CC BY 4.0 |
 
 - `third_party/` 中每個套件固定版本（git submodule，同 AutoDock-GPU 1.6 的 `wmma_extension`），並保留其授權檔。
 - DSSP：自行實作（4.6），不連結 DSSP 4 函式庫；mkdssp 僅作開發驗證。行為比照 DSSP 4（BSD-2-Clause），其版權聲明列於 `src/dssp.cpp` 與 README。
-- Top8000 資料檔隨程式散佈時，附上原 `LICENSE` 與出處說明，並在文件中列出引用文獻。
+- Top8000 資料檔隨程式散佈時，附上原 `LICENSE` 與出處說明，並在文件中列出引用文獻：Williams CJ et al. (2018) MolProbity: More and better reference data for improved all-atom structure validation. *Protein Science* 27(1):293–315. https://doi.org/10.1002/pro.3330
 - 未採用 Dunbrack NDRD（同為 CC BY 4.0）：需填表申請下載，且只含 loop 區域（不含 α 螺旋與 β 摺板），不適合作為全部殘基的分佈。
 - CPU FFT 不使用 FFTW：FFTW 為 GPL，與 LGPL 散佈不相容。
 
@@ -999,9 +1039,21 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | 輸出格式 PDB、mmCIF、SDF/MOL、mol2 各自以參數開關；預設只開 PDB（第 10 節） |
 | — | 二級結構改用 DSSP（取代 STRIDE）；設定檔欄位 `dsspSS`（4.6） |
 | — | 核酸殘基的設定檔欄位 `alpha`～`zeta`（δ 不可設為 true，除非斷環）（5.2） |
+| — | 金屬配位鍵在環內時，由使用者以 `metalBond` 選擇 `break`（斷開，距離約束）或 `keep`（保留，環內不可轉動）；設定衝突時報錯結束（4.7、4.8、5.3） |
+| — | Gasteiger 電荷計算前移除金屬配位鍵，金屬使用形式電荷（3.1） |
+| — | 兩面角是否可轉動以設定檔開關為最終標準；`ssType` 只用於 csgm1b 且 φ、ψ 可轉動的殘基（7.5） |
+| — | 鏈端殘基一律依 `R`（7.5） |
+| — | `RAMA_*` 必須與殘基類別相符，否則報錯（5.3、7.5） |
+| — | Top8000 資料檔與授權文件現在加入 `third_party/top8000/`，嵌入執行檔（7.5、15.2） |
+| — | `rotStep` 預設 7.5°（Hopf 第 3 層）（8.3） |
+| — | GPU 效能最佳化依原子數分級，之後處理（15.1） |
 
 ### 17.2 待確認
-（目前無）
+| # | 問題 |
+|---|---|
+| P1 | 內建 `O`（保持輸入角度）與「開關為最終標準」的關係：φ、ψ 可轉動但 `ssType = "O"` 時如何處理（移除 `O`、視為錯誤，或其他）；預設檔目前把螺旋殘基設為 `O` |
+| P2 | 只有 φ、ψ 其中之一可轉動（非鏈端）時，該角度依什麼分佈取值（例如依 `R`，或依 `ssType` 分佈在另一角度固定時的條件分佈） |
+| P3 | 自訂類型的 `point` 目前是單一 (φ, ψ) 值；是否需要角度範圍（例如寬度或上下限） |
 
 ---
 
@@ -1025,3 +1077,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.2 | 2026-10-14 | 實作拓撲分析：補充主鏈辨識細則（4.1）、主鏈兩面角歸屬與角度慣例（4.2）、兩面角列出範圍、原子選取、分類順序與對稱基團判定（4.4） |
 | 1.3 | 2026-10-14 | 二級結構判定由 STRIDE 改為 DSSP（4.6、5.1、15.2）；設定檔欄位 `strideSS` 改名為 `dsspSS`（5.2） |
 | 1.4 | 2026-10-14 | 實作分子設定檔：補充斷環規則（4.5）、交聯鍵選取方式（4.7）、流程細則（5.1）、原子參照與項目位置、核酸 `alpha`～`zeta` 欄位（5.2）、驗證規則（5.3） |
+| 1.5 | 2026-10-14 | 金屬配位鍵 `metalBond`（4.7、4.8、5.2、5.3）；Gasteiger 電荷排除金屬配位鍵（3.1）；交聯鍵選取不計金屬配位鍵（4.7）；csgm1b 與開關的關係、鏈端用 `R`、`RAMA_*` 殘基檢查與類別判定、Top8000 嵌入（5.2、5.3、7.5、15.2）；`rotStep` 預設 7.5°（8.3、8.4、14）；GPU 效能最佳化依原子數分級的註記（15.1）；待確認 P1–P3（17.2） |
