@@ -10,6 +10,7 @@
 
 #include "molecule.hpp"
 #include "topology.hpp"
+#include "torsion_tree.hpp"
 
 namespace od {
 
@@ -17,7 +18,6 @@ namespace od {
 
 inline constexpr int kMolConfigFormatVersion = 1;
 
-enum class TorsionMode : std::uint8_t { Fixed, Free, CisTrans };
 enum class Csgm1 : std::uint8_t { A, B };
 // Metal coordination bonds in rings (spec 4.7): None when the molecule has none.
 enum class MetalBond : std::uint8_t { None, Keep, Break };
@@ -35,6 +35,7 @@ struct SsType {
 struct ChainBreak {
   int bond = -1;       // index into Molecule::bonds
   std::string source;  // auto-loop | auto-crosslink | auto-metal | user
+  int line = 0;        // line in the file; 0 for an auto-loop break added when reading (spec 4.7)
 };
 
 struct MolSettings {
@@ -45,6 +46,7 @@ struct MolSettings {
   MetalBond metalBond = MetalBond::None;
   std::vector<int> ringBreaks;     // indices into Molecule::bonds
   std::vector<ChainBreak> chainBreaks;
+  TorsionTree tree;                // spec 4.7, 4.8
 };
 
 struct MolConfig {

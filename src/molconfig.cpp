@@ -485,7 +485,7 @@ std::vector<int> readBreaks(const toml::table& mt, const Molecule& m, const Atom
     else if (!metalBond(bi) && *source == "auto-metal")
       e.add(lineOf(*t), field + ".source", "auto-metal is only for metal bonds");
     else
-      s.chainBreaks.push_back({bi, *source});
+      s.chainBreaks.push_back({bi, *source, lineOf(*t)});
   }
   std::vector<int> broken(s.ringBreaks);
   for (const auto& c : s.chainBreaks) broken.push_back(c.bond);
@@ -569,12 +569,79 @@ void checkRamaTypes(const Molecule& m, const Layout& l, const std::vector<std::s
   }
 }
 
+// Loop breaks, then the torsion tree (spec 4.7, 4.8).
+void planTree(const Molecule& m, const AtomRefs& refs, const std::string& where, int molLine, bool staFixedResMovable,
+              MolSettings& s, Errors& e) {
+  const std::size_t errorsBefore = e.count();
+  Topology& t = s.topology;
+  auto unitRef = [&](int u) {
+    const int r = t.units[u].residue;
+    return r >= 0 ? residueKey(m.residues[r].info) : std::format("unit {}", u + 1);
+  };
+  auto bondRef = [&](int bi) {
+    return std::format("[{}, {}]", refs.ref(m.bonds[bi].a, -1), refs.ref(m.bonds[bi].b, -1));
+  };
+  std::vector<int> torsionOfBond(m.bonds.size(), -1);
+  for (std::size_t i = 0; i < t.torsions.size(); ++i) torsionOfBond[t.torsions[i].bond] = static_cast<int>(i);
+
+  const auto loops = findLoops(m, t, s.mode, staFixedResMovable);
+  std::set<int> links;  // backbone links of loops between fixed residues
+  for (const Loop& l : loops) {
+    if (l.before < 0 || l.after < 0) continue;
+    std::vector<int> seq{l.before};
+    seq.insert(seq.end(), l.units.begin(), l.units.end());
+    seq.push_back(l.after);
+    for (std::size_t k = 0; k + 1 < seq.size(); ++k)
+      if (const int bi = backboneLink(m, t, seq[k], seq[k + 1]); bi >= 0) links.insert(bi);
+    if (l.breakBond >= 0) continue;
+    const int bi = backboneLink(m, t, l.units.back(), l.after);
+    const std::string loopName = std::format("loop {}-{}", unitRef(l.units.front()), unitRef(l.units.back()));
+    if (bi < 0) {
+      e.add(molLine, where, std::format("{} has no backbone bond to {} to break", loopName, unitRef(l.after)));
+      continue;
+    }
+    if (const int ti = torsionOfBond[bi]; ti >= 0 && s.mode[ti] != TorsionMode::Fixed) {
+      e.add(molLine, where,
+            std::format("{} needs a break; the default break {} has a rotatable {}; set it fixed or add a "
+                        "[[molecule.chainBreak]] on another backbone bond of the loop",
+                        loopName, bondRef(bi), backboneAngleName(t.torsions[ti].backbone)));
+      continue;
+    }
+    s.chainBreaks.push_back({bi, "auto-loop", 0});
+    t.brokenBonds.insert(std::upper_bound(t.brokenBonds.begin(), t.brokenBonds.end(), bi), bi);
+    if (const int ti = torsionOfBond[bi]; ti >= 0) t.torsions[ti].broken = true;
+  }
+  for (const ChainBreak& c : s.chainBreaks)
+    if (c.source == "auto-loop" && c.line > 0 && !links.contains(c.bond))
+      e.add(c.line, where + ".chainBreak.source",
+            "auto-loop is only for a backbone bond of a loop between fixed residues; use user or remove the entry");
+  if (e.count() > errorsBefore) return;
+
+  std::vector<TreeProblem> problems;
+  s.tree = buildTorsionTree(m, t, s.mode, staFixedResMovable, problems);
+  for (const TreeProblem& p : problems) {
+    if (p.kind == TreeProblem::Kind::BothSidesFixed) {
+      const auto& a = t.torsions[p.torsion].atoms;
+      e.add(molLine, where,
+            std::format("torsion [{}, {}, {}, {}] cannot rotate: fixed atoms on both sides; set it not rotatable or "
+                        "break a bond between them ([[molecule.chainBreak]] source = \"user\")",
+                        refs.ref(a[0], -1), refs.ref(a[1], -1), refs.ref(a[2], -1), refs.ref(a[3], -1)));
+    } else {
+      e.add(molLine, where,
+            std::format("the broken bonds leave a part without fixed atoms (containing {}); only bonds in rings or "
+                        "backbone bonds of loops between fixed residues can be broken",
+                        refs.ref(p.atom, -1)));
+    }
+  }
+}
+
 MolSettings readMolecule(const toml::table& mt, const MolInput& in, const TopologyParams& base,
                          const std::set<std::string>& ssNames, Errors& e) {
   const Molecule& m = *in.mol;
   const std::string where = std::format("molecule '{}'", m.id);
   const BackboneType bt = in.topo->backboneType;
   const bool protein = bt == BackboneType::Protein;
+  const std::size_t errorsBefore = e.count();
   MolSettings s;
 
   checkKeys(mt, {"id", "role", "file", "chain", "backboneType", "csgm1", "metalBond", "residue", "torsion", "ringBreak",
@@ -609,7 +676,9 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
   const AtomRefs refs(m);
   TopologyParams p = base;
   p.brokenBonds = readBreaks(mt, m, refs, where, s.metalBond, s, e);
-  if (const int parts = componentCount(m, *p.brokenBonds) - componentCount(m, {}); parts > 0)
+  // StaM with fixed residues may be split at loop breaks; checked with the tree.
+  const bool singleAnchor = m.role == Role::MobM || base.staFixedResMovable || bt == BackboneType::None;
+  if (const int parts = componentCount(m, *p.brokenBonds) - componentCount(m, {}); singleAnchor && parts > 0)
     e.add(lineOf(mt), where, std::format("the broken bonds (ringBreak / chainBreak) split the molecule into {} parts; "
                                          "only bonds in rings can be broken",
                                          parts + 1));
@@ -733,6 +802,7 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
       if (!seen.contains(static_cast<int>(k))) e.add(lineOf(mt), where + ".residue", std::format("residue {} is missing", keyOf[k]));
   if (protein) checkRamaTypes(m, l, keyOf, ssLine, where, s, e);
   readTorsions(mt, "torsion", l.molTorsions, refs, -1, where, s, e);
+  if (e.count() == errorsBefore) planTree(m, refs, where, lineOf(mt), base.staFixedResMovable, s, e);
   return s;
 }
 

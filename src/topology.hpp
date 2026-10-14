@@ -84,6 +84,9 @@ struct TopologyParams {
   // residue information, at atoms) within the box extended by staFlexMargin.
   std::optional<Box> box;
   double staFlexMargin = 4.0;
+  // StaM (spec 4.7): false keeps the backbone of fixed residues in place; with
+  // false, torsions with backbone atoms on both sides are not rotatable by default.
+  bool staFixedResMovable = false;
   // Broken bonds (indices into Molecule::bonds); crosslinkBreaks when not given
   // (metal bonds are kept by default, spec 4.7).
   std::optional<std::vector<int>> brokenBonds;

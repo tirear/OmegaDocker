@@ -84,6 +84,13 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string&) { o.acceptNonPlanarOmega = true; }},
       {"staFlexMargin", Kind::Value, "<dist>", "4", "StaM torsions are rotatable by default within the box extended by this margin (Å)",
        [](Options& o, const std::string& v) { o.staFlexMargin = parseDouble("staFlexMargin", v); }},
+      {"staFixedResMovable", Kind::Value, "true|false", "false",
+       "StaM: false keeps the backbone of fixed residues in place; true lets the whole chain move by torsions",
+       [](Options& o, const std::string& v) { o.staFixedResMovable = parseBool("staFixedResMovable", v); }},
+      {"maxBreakDist", Kind::Value, "<dist>", "0.5", "Largest closure deviation of a broken bond kept after 9a (Å)",
+       [](Options& o, const std::string& v) { o.maxBreakDist = parseDouble("maxBreakDist", v); }},
+      {"closureG", Kind::Value, "<k>", "200", "Closure constraint stiffness G (kcal/mol/Å²)",
+       [](Options& o, const std::string& v) { o.closureG = parseDouble("closureG", v); }},
       {"help", Kind::Flag, "", "", "Show this help", [](Options& o, const std::string&) { o.showHelp = true; }},
       {"version", Kind::Flag, "", "", "Show version", [](Options& o, const std::string&) { o.showVersion = true; }},
   };
@@ -131,6 +138,8 @@ void validateOptions(const Options& o) {
   if (o.outPrefix.empty()) fail("--outPrefix is required");
   if (!(o.omegaTolerance >= 0 && o.omegaTolerance <= 90)) fail("--omegaTolerance must be within [0, 90]");
   if (!(o.staFlexMargin >= 0)) fail("--staFlexMargin must be >= 0");
+  if (!(o.maxBreakDist > 0)) fail("--maxBreakDist must be > 0");
+  if (!(o.closureG > 0)) fail("--closureG must be > 0");
   if (!o.outPdb && !o.outCif && !o.outSdf && !o.outMol2)
     fail("All output formats are disabled (--outPdb, --outCif, --outSdf, --outMol2)");
 }

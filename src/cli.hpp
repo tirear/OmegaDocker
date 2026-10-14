@@ -28,6 +28,9 @@ struct Options {
   double omegaTolerance = 30.0;
   bool acceptNonPlanarOmega = false;
   double staFlexMargin = 4.0;
+  bool staFixedResMovable = false;
+  double maxBreakDist = 0.5;
+  double closureG = 200.0;
 
   bool showHelp = false;
   bool showVersion = false;

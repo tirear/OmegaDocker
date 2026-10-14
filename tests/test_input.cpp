@@ -21,6 +21,7 @@
 #include "rama.hpp"
 #include "read_input.hpp"
 #include "topology.hpp"
+#include "torsion_tree.hpp"
 
 namespace {
 
@@ -720,4 +721,261 @@ TEST_CASE("molconfig: ssHalfWidth and ssOriginalProb") {
   CHECK(hasError(f.errorsOf(replaceAfter(text, "ssHalfWidth", "15.0", "91")), "ssHalfWidth: must be > 0 and <= 90"));
   CHECK(hasError(f.errorsOf(replaceAfter(text, "ssOriginalProb", "0.9", "1.5")), "ssOriginalProb: must be > 0 and <= 1"));
   CHECK(hasError(f.errorsOf(replaceAfter(text, "ssOriginalProb", "0.9", "\"x\"")), "line 17: ssOriginalProb: must be a number"));
+}
+
+namespace {
+
+double wrapDeg(double x) {
+  x = std::fmod(x + 180.0, 360.0);
+  if (x < 0) x += 360.0;
+  return x - 180.0;
+}
+
+double distance(const od::Vec3& a, const od::Vec3& b) {
+  return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+std::vector<double> inputAngles(const od::TorsionTree& tree) {
+  std::vector<double> v;
+  for (const auto& tt : tree.torsions) v.push_back(tt.inputAngle);
+  return v;
+}
+
+// One StaM (2KJJ, chains A+B) and one MobM (1L2Y).
+struct StaFixture {
+  std::vector<od::Molecule> mols;
+  std::vector<od::Topology> topos;
+  std::vector<od::MolInput> inputs;
+  od::TopologyParams params;
+  std::string path;
+  std::string text;
+
+  explicit StaFixture(bool staFixedResMovable = false) {
+    params.staFixedResMovable = staFixedResMovable;
+    mols.push_back(od::loadMolecules(kData + "/2KJJ.cif", od::Role::StaM, ccd()).front());
+    mols.push_back(od::loadMolecules(kData + "/1L2Y.cif", od::Role::MobM, ccd()).front());
+    for (auto& m : mols) {
+      topos.push_back(od::analyzeTopology(m, params));
+      od::assignDssp({&m}, {&topos.back()});
+    }
+    for (std::size_t i = 0; i < mols.size(); ++i) inputs.push_back({&mols[i], &topos[i]});
+    path = (std::filesystem::temp_directory_path() / std::format("od_test_tree_{}.toml", ::getpid())).string();
+    text = od::defaultMolConfigText(inputs);
+  }
+  ~StaFixture() { std::filesystem::remove(path); }
+
+  std::optional<od::MolConfig> read(const std::string& s, std::vector<std::string>& errors) {
+    std::ofstream(path) << s;
+    errors.clear();
+    return od::readMolConfig(path, inputs, params, errors);
+  }
+  od::MolConfig ok(const std::string& s) {
+    std::vector<std::string> errors;
+    auto cfg = read(s, errors);
+    for (const auto& x : errors) MESSAGE(x);
+    REQUIRE(cfg);
+    return *cfg;
+  }
+  std::vector<std::string> errorsOf(const std::string& s) {
+    std::vector<std::string> errors;
+    CHECK_FALSE(read(s, errors));
+    return errors;
+  }
+};
+
+// Sets phi and psi of StaM residues chain:first..last to rotatable.
+std::string freeResidues(std::string s, const std::string& chain, int first, int last) {
+  const auto start = s.find("id           = \"sta:");
+  for (int seq = first; seq <= last; ++seq) {
+    auto i = s.find(std::format("chain   = \"{}\"\n  resName", chain), start);
+    i = s.find(std::format("resSeq  = {}\n", seq), i);
+    REQUIRE(i != std::string::npos);
+    const auto j = s.find("[[molecule.residue]]", i);
+    for (const char* a : {"phi     = false", "psi     = false"})
+      if (auto p = s.find(a, i); p < j) s.replace(p, 15, std::string(a).replace(10, 5, "true"));
+  }
+  return s;
+}
+
+std::string addBreak(std::string s, const std::string& a, const std::string& b, const std::string& source) {
+  const auto i = s.find("csgm1        = \"1a\"\n", s.find("id           = \"sta:"));
+  REQUIRE(i != std::string::npos);
+  return s.insert(i + 20, std::format("\n  [[molecule.chainBreak]]\n  bond   = [\"{}\", \"{}\"]\n  source = \"{}\"\n", a, b,
+                                      source));
+}
+
+}  // namespace
+
+TEST_CASE("torsion tree: MobM coordinates (1L2Y)") {
+  ConfigFixture f;
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  std::ofstream(f.path) << text;
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  const od::Molecule& m = f.mols[0];
+  const od::MolSettings& s = cfg->molecules[0];
+  const od::TorsionTree& tree = s.tree;
+  CHECK(tree.torsions.size() == static_cast<std::size_t>(std::count(s.mode.begin(), s.mode.end(), od::TorsionMode::Free)));
+  REQUIRE(tree.anchors.size() == 1);
+  CHECK(tree.loops.empty());
+  CHECK(tree.virtuals.empty());
+  for (std::size_t i = 0; i < tree.torsions.size(); ++i) {
+    const auto& tt = tree.torsions[i];
+    CHECK(!std::binary_search(tt.moving.begin(), tt.moving.end(), tree.anchors.front()));
+    if (tt.parent >= 0) {
+      CHECK(static_cast<std::size_t>(tt.parent) < i);
+      const auto& pm = tree.torsions[tt.parent].moving;
+      CHECK(std::includes(pm.begin(), pm.end(), tt.moving.begin(), tt.moving.end()));
+    }
+  }
+
+  // Input angles reproduce the input coordinates.
+  auto xyz = od::buildCoordinates(m, tree, inputAngles(tree));
+  double maxShift = 0;
+  for (std::size_t a = 0; a < m.atoms.size(); ++a) maxShift = std::max(maxShift, distance(xyz[a], m.atoms[a].xyz));
+  CHECK(maxShift < 1e-9);
+
+  // Arbitrary angles: every tree torsion takes its value; bonds and the anchor are unchanged.
+  std::vector<double> angles;
+  for (std::size_t i = 0; i < tree.torsions.size(); ++i) angles.push_back(wrapDeg(-170.0 + 37.0 * i));
+  xyz = od::buildCoordinates(m, tree, angles);
+  for (std::size_t i = 0; i < tree.torsions.size(); ++i) {
+    const auto& x = s.topology.torsions[tree.torsions[i].torsion].atoms;
+    CHECK(wrapDeg(od::dihedralDeg(xyz[x[0]], xyz[x[1]], xyz[x[2]], xyz[x[3]]) - angles[i]) == doctest::Approx(0).epsilon(1e-6));
+  }
+  double bondErr = 0;
+  for (const auto& b : m.bonds)
+    bondErr = std::max(bondErr, std::abs(distance(xyz[b.a], xyz[b.b]) - distance(m.atoms[b.a].xyz, m.atoms[b.b].xyz)));
+  CHECK(bondErr < 1e-9);
+  CHECK(distance(xyz[tree.anchors.front()], m.atoms[tree.anchors.front()].xyz) < 1e-12);
+  // Fixed torsions keep their input values.
+  for (std::size_t ti = 0; ti < s.topology.torsions.size(); ++ti) {
+    if (s.mode[ti] != od::TorsionMode::Fixed) continue;
+    const auto& tor = s.topology.torsions[ti];
+    const auto& x = tor.atoms;
+    CHECK(wrapDeg(od::dihedralDeg(xyz[x[0]], xyz[x[1]], xyz[x[2]], xyz[x[3]]) - tor.angle) == doctest::Approx(0).epsilon(1e-6));
+  }
+}
+
+TEST_CASE("torsion tree: StaM defaults (2KJJ)") {
+  StaFixture f;
+  const auto cfg = f.ok(f.text);
+  const od::MolSettings& s = cfg.molecules[0];
+  // Every backbone residue is fixed: anchors are all backbone atoms, no loops.
+  CHECK(s.tree.loops.empty());
+  CHECK(s.tree.anchors.size() == 4 * s.topology.units.size());
+  // Two disulfides are broken (A6-A11 and one of the two inter-chain ones): 3 pairs each.
+  CHECK(s.topology.crosslinkBreaks.size() == 2);
+  CHECK(s.tree.virtuals.size() == 6);
+  auto xyz = od::buildCoordinates(f.mols[0], s.tree, inputAngles(s.tree));
+  const auto c = od::evaluateClosure(s.tree, xyz, 200);
+  CHECK(c.energy < 1e-12);
+  CHECK(c.maxDeviation < 1e-9);
+  // The kept inter-chain disulfide: its torsions have backbone atoms on both sides and are not rotatable by default.
+  int restricted = -1;
+  for (std::size_t i = 0; i < s.topology.torsions.size(); ++i) {
+    const auto& tor = s.topology.torsions[i];
+    if (tor.backbone == od::BackboneAngle::None && tor.category == od::TorsionCategory::Single && !tor.rotatable &&
+        f.mols[0].atoms[tor.atoms[1]].atomicNum == 16 && f.mols[0].atoms[tor.atoms[2]].atomicNum == 16)
+      restricted = static_cast<int>(i);
+  }
+  REQUIRE(restricted >= 0);
+  // A7 chi2 (kept disulfide A7 SG - B7 SG).
+  const std::string chi2 = "atoms     = [\"CA\", \"CB\", \"SG\", \"B:7:SG\"]\n    rotatable = false";
+  const auto p = f.text.find(chi2);
+  REQUIRE(p != std::string::npos);
+  std::string edited = f.text;
+  edited.replace(p + chi2.size() - 5, 5, "true");
+  CHECK(hasError(f.errorsOf(edited), "cannot rotate: fixed atoms on both sides"));
+}
+
+TEST_CASE("torsion tree: StaM loops (2KJJ)") {
+  StaFixture f;
+  const od::Molecule& m = f.mols[0];
+  // A10-A14 between fixed residues: the break is added at A14 C - A15 N.
+  const std::string loop = freeResidues(f.text, "A", 10, 14);
+  auto cfg = f.ok(loop);
+  const od::MolSettings& s = cfg.molecules[0];
+  REQUIRE(s.tree.loops.size() == 1);
+  const od::Loop& l = s.tree.loops.front();
+  CHECK(l.units.size() == 5);
+  CHECK(l.before >= 0);
+  CHECK(l.after >= 0);
+  REQUIRE(l.breakBond >= 0);
+  CHECK(m.atoms[m.bonds[l.breakBond].a].name + m.atoms[m.bonds[l.breakBond].b].name == "CN");
+  CHECK(m.residues[m.atoms[m.bonds[l.breakBond].a].residue].info.seq == 14);
+  REQUIRE(s.chainBreaks.size() == 3);
+  CHECK(s.chainBreaks.back().source == "auto-loop");
+  CHECK(s.chainBreaks.back().line == 0);
+  CHECK(s.tree.virtuals.size() == 9);
+
+  // Rotating loop torsions moves loop atoms only; the fixed backbone stays; the closure opens.
+  std::vector<double> angles = inputAngles(s.tree);
+  for (std::size_t i = 0; i < angles.size(); ++i)
+    if (s.topology.torsions[s.tree.torsions[i].torsion].backbone != od::BackboneAngle::None) angles[i] += 20;
+  auto xyz = od::buildCoordinates(m, s.tree, angles);
+  for (int a : s.tree.anchors) CHECK(distance(xyz[a], m.atoms[a].xyz) < 1e-12);
+  const auto c = od::evaluateClosure(s.tree, xyz, 200);
+  CHECK(c.maxDeviation > 0.5);
+  CHECK(c.energy >= 200 * c.maxDeviation * c.maxDeviation);
+
+  // A user break elsewhere in the loop replaces the default.
+  cfg = f.ok(addBreak(loop, "A:11:C", "A:12:N", "user"));
+  CHECK(cfg.molecules[0].chainBreaks.size() == 3);
+  CHECK(cfg.molecules[0].tree.loops.front().breakBond == cfg.molecules[0].chainBreaks.front().bond);
+  CHECK(cfg.molecules[0].chainBreaks.front().source == "user");
+  // The added break written into the file is accepted.
+  cfg = f.ok(addBreak(loop, "A:14:C", "A:15:N", "auto-loop"));
+  CHECK(cfg.molecules[0].chainBreaks.size() == 3);
+  CHECK(cfg.molecules[0].chainBreaks.front().line > 0);
+  // Two breaks in one loop leave a free part.
+  CHECK(hasError(f.errorsOf(addBreak(addBreak(loop, "A:11:C", "A:12:N", "user"), "A:12:C", "A:13:N", "user")),
+                 "leave a part without fixed atoms"));
+  // auto-loop outside a loop.
+  CHECK(hasError(f.errorsOf(addBreak(loop, "A:3:C", "A:4:N", "auto-loop")), "auto-loop is only for a backbone bond"));
+  // A cisTrans omega at the default break.
+  CHECK(hasError(f.errorsOf(replaceAfter(loop, "resSeq  = 14\n", "omega   = \"fixed\"", "omega   = \"cisTrans\"")),
+                 "the default break [A:14:C, A:15:N] has a rotatable omega"));
+
+  // N-terminal loop: free end, no break.
+  cfg = f.ok(freeResidues(f.text, "A", 1, 3));
+  REQUIRE(cfg.molecules[0].tree.loops.size() == 1);
+  CHECK(cfg.molecules[0].tree.loops.front().before < 0);
+  CHECK(cfg.molecules[0].tree.loops.front().breakBond < 0);
+  CHECK(cfg.molecules[0].chainBreaks.size() == 2);
+}
+
+TEST_CASE("torsion tree: staFixedResMovable (2KJJ)") {
+  StaFixture f(true);
+  const auto cfg = f.ok(freeResidues(f.text, "A", 10, 14));
+  const od::MolSettings& s = cfg.molecules[0];
+  CHECK(s.tree.loops.empty());
+  REQUIRE(s.tree.anchors.size() == 1);
+  CHECK(f.mols[0].atoms[s.tree.anchors.front()].name == "CA");
+  CHECK(s.chainBreaks.size() == 2);
+}
+
+TEST_CASE("torsion tree: metal restraints (1ZNF)") {
+  ConfigFixture f;
+  f.mols.push_back(zincFinger());
+  f.topos.push_back(od::analyzeTopology(f.mols.back(), {}));
+  od::assignDssp({&f.mols.back()}, {&f.topos.back()});
+  f.inputs.clear();
+  for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
+  const std::string text = od::defaultMolConfigText(f.inputs);
+  const std::string brk = setQuoted(uncommentMetal(text), "id           = \"mob:1ZNF.cif:A\"", "metalBond    = ", "break");
+  std::ofstream(f.path) << phi10(brk);
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  const auto& s = cfg->molecules.back();
+  REQUIRE(s.tree.restraints.size() == 3);
+  CHECK(s.tree.virtuals.empty());
+  auto angles = inputAngles(s.tree);
+  auto xyz = od::buildCoordinates(f.mols.back(), s.tree, angles);
+  CHECK(od::evaluateClosure(s.tree, xyz, 200).maxDeviation < 1e-9);
+  for (double& a : angles) a += 15;
+  xyz = od::buildCoordinates(f.mols.back(), s.tree, angles);
+  CHECK(od::evaluateClosure(s.tree, xyz, 200).maxDeviation > 0.5);
 }

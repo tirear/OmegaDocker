@@ -35,6 +35,7 @@ od::TopologyParams topologyParams(const od::Options& opt) {
   od::TopologyParams p;
   p.box = od::Box{*opt.boxCenter, *opt.boxSize};
   p.staFlexMargin = opt.staFlexMargin;
+  p.staFixedResMovable = opt.staFixedResMovable;
   return p;
 }
 
@@ -69,6 +70,49 @@ void checkOmegas(const od::Molecule& m, const od::MolSettings& s, const od::Opti
              "(--acceptNonPlanarOmega continues):{}",
              m.id, bad.size(), opt.omegaTolerance, list);
   od::logWarn(std::format("{}: {} non-planar fixed omega angle(s):{}", m.id, bad.size(), list));
+}
+
+// Torsion tree, loops and added loop breaks (spec 4.7, 4.8).
+void printTree(const od::Molecule& m, const od::MolSettings& s) {
+  const od::Topology& t = s.topology;
+  const od::TorsionTree& tree = s.tree;
+  auto atomRef = [&](int a) {
+    const od::Atom& x = m.atoms[a];
+    if (x.residue < 0 || x.name.empty()) return std::format("#{}", x.fileSerial);
+    const auto& r = m.residues[x.residue].info;
+    return std::format("{}:{}{}:{}", r.chain, r.seq, r.iCode, x.name);
+  };
+  auto unitRef = [&](int u) {
+    const int r = t.units[u].residue;
+    return r >= 0 ? std::format("{}:{}{}", m.residues[r].info.chain, m.residues[r].info.seq, m.residues[r].info.iCode)
+                  : std::format("unit {}", u + 1);
+  };
+  int depth = 0;
+  std::vector<int> level(tree.torsions.size(), 0);
+  for (std::size_t i = 0; i < tree.torsions.size(); ++i) {
+    if (tree.torsions[i].parent >= 0) level[i] = level[tree.torsions[i].parent] + 1;
+    depth = std::max(depth, level[i] + 1);
+  }
+  od::logInfo(std::format("    torsion tree: {} torsions, depth {}, anchor {}, closure pairs {}, distance restraints {}",
+                          tree.torsions.size(), depth,
+                          tree.anchors.size() == 1 ? atomRef(tree.anchors.front())
+                                                   : std::format("{} fixed backbone atoms", tree.anchors.size()),
+                          tree.virtuals.size(), tree.restraints.size()));
+  for (const od::Loop& l : tree.loops) {
+    std::string where = l.before >= 0 && l.after >= 0 ? "between fixed residues"
+                        : l.before >= 0               ? "C-terminal, free end"
+                        : l.after >= 0                ? "N-terminal, free end"
+                                                      : "no fixed residue in the chain";
+    std::string brk;
+    if (l.breakBond >= 0)
+      brk = std::format(", break [{}, {}]", atomRef(m.bonds[l.breakBond].a), atomRef(m.bonds[l.breakBond].b));
+    od::logInfo(std::format("    loop {}-{} ({} residues, {}{})", unitRef(l.units.front()), unitRef(l.units.back()),
+                            l.units.size(), where, brk));
+  }
+  for (const auto& c : s.chainBreaks)
+    if (c.line == 0)
+      od::logInfo(std::format("    added chainBreak [{}, {}] source = \"auto-loop\"", atomRef(m.bonds[c.bond].a),
+                              atomRef(m.bonds[c.bond].b)));
 }
 
 // DSSP residue counts, e.g. "H 12  E 10  . 5".
@@ -156,6 +200,7 @@ int run(int argc, char** argv) {
     const auto cisTrans = std::count(s.mode.begin(), s.mode.end(), od::TorsionMode::CisTrans);
     od::logInfo(std::format("  {:<40} rotatable {:>5}  cisTrans omega {:>4}  ringBreak {:>3}  chainBreak {:>3}",
                             inputs[i].mol->id, free, cisTrans, s.ringBreaks.size(), s.chainBreaks.size()));
+    printTree(*inputs[i].mol, s);
   }
   return 0;
 }

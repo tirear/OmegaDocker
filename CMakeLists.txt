@@ -82,6 +82,7 @@ add_library(od_core STATIC
   src/dssp.cpp
   src/molconfig.cpp
   src/rama.cpp
+  src/torsion_tree.cpp
   ${OD_CCD_EMBED}
   ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)

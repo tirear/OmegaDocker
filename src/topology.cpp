@@ -448,6 +448,37 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
       tor.rotatable = tor.category == TorsionCategory::Single && tor.inFlexRange;
     t.torsions.push_back(tor);
   }
+
+  // StaM with staFixedResMovable = false: by default every backbone residue is
+  // fixed, so a torsion with backbone atoms on both sides (e.g. through an
+  // inter-chain disulfide) cannot rotate without a break (spec 4.7).
+  if (m.role == Role::StaM && !p.staFixedResMovable && !t.units.empty()) {
+    std::vector<bool> fixedAtom(m.atoms.size(), false);
+    for (const auto& u : t.units)
+      for (int a : u.atoms)
+        if (a >= 0) fixedAtom[a] = true;
+    std::vector<int> queue;
+    std::vector<int> mark(m.atoms.size(), -1);
+    int stamp = 0;
+    auto reaches = [&](int start, int bond) {
+      ++stamp;
+      queue.assign(1, start);
+      mark[start] = stamp;
+      for (std::size_t i = 0; i < queue.size(); ++i) {
+        if (fixedAtom[queue[i]]) return true;
+        for (const Edge& e : g.adj[queue[i]])
+          if (e.bond != bond && !broken[e.bond] && mark[e.to] != stamp) {
+            mark[e.to] = stamp;
+            queue.push_back(e.to);
+          }
+      }
+      return false;
+    };
+    for (auto& tor : t.torsions)
+      if (tor.rotatable && tor.backbone == BackboneAngle::None && reaches(tor.atoms[2], tor.bond) &&
+          reaches(tor.atoms[1], tor.bond))
+        tor.rotatable = false;
+  }
   return t;
 }
 
