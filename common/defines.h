@@ -41,6 +41,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 	#define NUM_OF_THREADS_PER_BLOCK 128
 #elif defined (N256WI)
 	#define NUM_OF_THREADS_PER_BLOCK 256
+#elif defined (N512WI)
+	#define NUM_OF_THREADS_PER_BLOCK 512
+#elif defined (N1024WI)
+	#define NUM_OF_THREADS_PER_BLOCK 1024
 #else
 	#define NUM_OF_THREADS_PER_BLOCK 16
 #endif
@@ -63,24 +67,49 @@ enum {C=0,N=1,O=2,H=3,XX=4,P=5,S=6};  // see "bond_index" in the "AD4.1_bound.da
 // Indexes of atomic types used in
 // host/src/processligand.cpp/get_VWpars(),
 // and kernel energy & gradient calculation.
-#define ATYPE_NUM                  33 // 22 (initial + Si + B) + 2 (CG & G0 for handling flexrings) + W (waters) + CX + NX + OX + HG + NG + OG
+// #define ATYPE_NUM                  30 // 22 (initial + Si + B) + 2 (CG & G0 for handling flexrings) + W (waters) + CX + NX + OX // sans dna/rna
+#define ATYPE_NUM                  33 // 22 (initial + Si + B) + 2 (CG & G0 for handling flexrings) + W (waters) + CX + NX + OX + HG + NG + OG // sans dna/rna
 
-
+/* sans
 #define ATYPE_CG_IDX               24
 #define ATYPE_G0_IDX               25
 #define ATYPE_W_IDX                26
 #define ATYPE_CX_IDX               27
 #define ATYPE_NX_IDX               28
 #define ATYPE_OX_IDX               29
+sans */
+// sans dna/rna ==>
+#define ATYPE_W_IDX                24
+#define ATYPE_CX_IDX               25
+#define ATYPE_NX_IDX               26
+#define ATYPE_OX_IDX               27
+
+#define ATYPE_G0_IDX               28
+#define ATYPE_CG_IDX               29
 #define ATYPE_HG_IDX               30
 #define ATYPE_NG_IDX               31
 #define ATYPE_OG_IDX               32
+// <== sans dna/rna
 
 // Indexes of atomic types used in
 // host/src/processligand.cpp/get_bonds().
 // Added definition to support flexrings.
-#define ATYPE_GETBONDS             25 // + CX [ Nx / Ox already accounted for ] + Si + B + HG + NG + OG
-#define MAX_NUM_GRIDPOINTS         1024
+// #define ATYPE_GETBONDS             22 // + CX [ Nx / Ox already accounted for ] + Si + B // sans dna/rna
+#define ATYPE_GETBONDS             25 // + CX [ Nx / Ox already accounted for ] + Si + B + HG + NG + OG// sans dna/rna
+
+// #define MAX_NUM_OF_ATOMS           256  // sans 256 2048, myligand->num_of_atoms, cData.dockpars.num_of_atoms
+// #define MAX_NUM_OF_ATYPES          32
+// 57+6 (+1 for eventual angle in axisangle representation) = 63 or 64
+// #define MAX_NUM_OF_ROTBONDS        58   // sans 512 - 7, 57 505, myligand->num_of_rotbonds, cData.dockpars.num_of_genes
+// #define MAX_INTRAE_CONTRIBUTORS    (MAX_NUM_OF_ATOMS * MAX_NUM_OF_ATOMS)
+// #define MAX_NUM_OF_ROTATIONS       (MAX_NUM_OF_ATOMS * MAX_NUM_OF_ROTBONDS)
+// #define MAX_POPSIZE                2048 // sans 2048, mypars->pop_size
+// #define MAX_NUM_OF_RUNS            1000 // sans 1000 100, mypars->num_of_runs
+#define MAX_NUM_GRIDPOINTS         1024 // sans 256
+
+// Must be larger than or equal to MAX_NUM_OF_ROTBONDS+6
+// #define GENOTYPE_LENGTH_IN_GLOBMEM 64 // sans 64 512
+// #define ACTUAL_GENOTYPE_LENGTH     (MAX_NUM_OF_ROTBONDS+6)
 
 #define LS_EXP_FACTOR              2.0f
 #define LS_CONT_FACTOR             0.5f

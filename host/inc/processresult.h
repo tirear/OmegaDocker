@@ -32,28 +32,39 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include "getparameters.h"
 #include "simulation_state.hpp"
 
+// sans ==>
 #include <gmp.h>
+// <== sans
 
 #define PRINT1000(file, x) fprintf(file,  ((fabs((x)) >= 0.0) && ((fabs(x)) <= 1000.)) ? "%+7.2f kcal/mol (%+7.2f kj/mol)\n" : "%+11.2e kcal/mol (%+11.2e kj/mol)\n", (x), (KCAL_TO_KJ * x));
 
 typedef struct
 {
   float*                    genotype; // a pointer here is sufficient and saves lots of memory copies
+//   double                    atom_idxyzq         [MAX_NUM_OF_ATOMS][5]; // type id .. 0, x .. 1, y .. 2, z .. 3, q ... 4 // sans
+  // sans ==>
   double                  **atom_idxyzq;
-  float                   **shakingGridE;  // shakingGridE[atomNum][shakingGridNum]
-  float                   **shakingGridEL; // shakingGridE[atomNum][shakingGridNum] for ligand solo only
+  float                   **shakingGridE;  //sans shakingGridE[atomNum][shakingGridNum]
+  float                   **shakingGridEL; //sans shakingGridE[atomNum][shakingGridNum] for ligand solo only
   double                    nts;  // -TS
   double                    ntsL; // -TS for ligand solo
   float                     complexG;
   float                     complexG_H;
   float                     complexG_nts;
+  // <== sans
   float                     interE;
   float                     interflexE;
   float                     interE_elec;
   float                     intraE;
   float                     intraflexE;
+  /* sans
+  float                     peratom_vdw         [MAX_NUM_OF_ATOMS];
+  float                     peratom_elec        [MAX_NUM_OF_ATOMS];
+  sans */
+  // sans ==>
   float                    *peratom_vdw;
   float                    *peratom_elec;
+  // <== sans
   float                     rmsd_from_ref;
   float                     rmsd_from_cluscent;
   int                       clus_id;
@@ -66,7 +77,7 @@ typedef struct
 void arrange_result(
                           float* final_population,
                           float* energies,
-                    Liganddata *myligand_init,
+                    Liganddata *myligand_init, // sans
                     const int    pop_size
                    );
 
@@ -129,11 +140,18 @@ void generate_output(
                      const int*          argc,
                            char**        argv,
                      const double        docking_avg_runtime,
+                           /* sans
+                           unsigned long generations_used,
+                           unsigned long evals_performed,
+                           sans */
+                           // sans ==>
                            mpz_t         generations_used,
                            mpz_t         evals_performed,
+                           // <== sans
                            double        exec_time,
                            double        idle_time
                     );
+// sans ==>
 int qsortCompFloatInc(const float *a, const float *b);
 
 void calcEntropy
@@ -143,6 +161,7 @@ void calcEntropy
   const Dockpars   *mypars,
   const Liganddata *lig
 );
+// <== sans
 
 void process_result(
                     const Gridinfo*        mygrid,

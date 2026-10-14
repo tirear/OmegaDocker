@@ -83,19 +83,38 @@ typedef struct
 
 typedef struct
 {
+  /* sans
+  float    atom_charges_const   [MAX_NUM_OF_ATOMS];
+  uint32_t atom_types_const     [MAX_NUM_OF_ATOMS];
+  uint32_t atom_types_map_const [MAX_NUM_OF_ATOMS];
+  char     ignore_inter_const   [MAX_NUM_OF_ATOMS];
+  sans */
+  // sans ==>
   float    *atom_charges_const;
   uint32_t *atom_types_const;
   uint32_t *atom_types_map_const;
   char     *ignore_inter_const;
+  // <== sans
 } kernelconstant_interintra;
 
 typedef struct
 {
-  uint32_t *intraE_contributors_const;
+//   uint32_t  intraE_contributors_const[2*MAX_INTRAE_CONTRIBUTORS]; // sans
+  uint32_t *intraE_contributors_const; // sans
 } kernelconstant_intracontrib;
 
 typedef struct
 {
+  /* sans
+  unsigned int       atom_types_reqm_const [MAX_NUM_OF_ATYPES];
+  unsigned short int VWpars_exp_const      [MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES];
+  float              reqm_AB_const         [MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES];
+  float              VWpars_AC_const       [MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES];
+  float              VWpars_BD_const       [MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES];
+  float              dspars_S_const        [MAX_NUM_OF_ATYPES];
+  float              dspars_V_const        [MAX_NUM_OF_ATYPES];
+  sans */
+  // sans ==>
   unsigned int       *atom_types_reqm_const;
   unsigned short int *VWpars_exp_const;
   float              *reqm_AB_const;
@@ -103,17 +122,27 @@ typedef struct
   float              *VWpars_BD_const;
   float              *dspars_S_const;
   float              *dspars_V_const;
+  // <== sans
 } kernelconstant_intra;
 
 typedef struct
 {
-  int *rotlist_const;
+//   int rotlist_const[MAX_NUM_OF_ROTATIONS]; // sans
+  int *rotlist_const; // sans
+  // sans ==>
   int  *rotlist_atomId;
   int  *rotlist_rotatableBondId;
+  // <== sans
 } kernelconstant_rotlist;
 
 typedef struct
 {
+  /* sans
+  float ref_coords_const              [3*MAX_NUM_OF_ATOMS];
+  float rotbonds_moving_vectors_const [3*MAX_NUM_OF_ROTBONDS];
+  float rotbonds_unit_vectors_const   [3*MAX_NUM_OF_ROTBONDS];
+} kernelconstant_conform;
+  sans */
   float *ref_coords_const;
   float *rotbonds_moving_vectors_const;
   float *rotbonds_unit_vectors_const;
@@ -124,14 +153,21 @@ typedef struct
   // Added for calculating torsion-related gradients.
   // Passing list of rotbond-atoms ids to the GPU.
   // Contains the same information as processligand.h/Liganddata->rotbonds 
+//   int rotbonds                       [2*MAX_NUM_OF_ROTBONDS]; // sans
 
   // Contains the same information as processligand.h/Liganddata->atom_rotbonds
   // "atom_rotbonds": array that contains the rotatable bonds - atoms assignment.
   // If the element atom_rotbonds[atom index][rotatable bond index] is equal to 1,
   // it means,that the atom must be rotated if the bond rotates. A 0 means the opposite.
+  /* sans
+  int rotbonds_atoms                 [MAX_NUM_OF_ATOMS * MAX_NUM_OF_ROTBONDS];
+  int num_rotating_atoms_per_rotbond [MAX_NUM_OF_ROTBONDS];
+  sans */
+  // sans ==>
   int *rotbonds;
   int *rotbonds_atoms;
   int *num_rotating_atoms_per_rotbond;
+  // <== sans
 } kernelconstant_grads;
 
 int prepare_const_fields_for_gpu(
@@ -146,16 +182,25 @@ int prepare_const_fields_for_gpu(
                                 );
 
 void make_reqrot_ordering(
+                          /* sans
+                          int number_of_req_rotations[MAX_NUM_OF_ATOMS],
+                          int atom_id_of_numrots[MAX_NUM_OF_ATOMS],
+                          sans */
+                          // sans ==>
                           int *number_of_req_rotations,
                           int *atom_id_of_numrots,
+                          // <== sans
                           int num_of_atoms
                          );
 
 int gen_rotlist(
                 Liganddata* myligand,
-                int * rotlist,
+//                 int         rotlist[MAX_NUM_OF_ROTATIONS] // sans
+                int * rotlist, // sans
+                                // sans ==>
                 int   *rotlist_atomId,
                 int   *rotlist_rotatableBondId
+                // <== sans
                );
 
 #endif /* CALCENERGY_H_ */

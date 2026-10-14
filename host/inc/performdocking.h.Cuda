@@ -43,7 +43,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include "simulation_state.hpp"
 #include "GpuData.h"
 
-#include <gmp.h>
+#include <gmp.h> // sans
 
 #define ELAPSEDSECS(stop,start) ((float) stop-start)/((float) CLOCKS_PER_SEC)
 
@@ -66,14 +66,16 @@ std::vector<int> get_gpu_pool();
 void setup_gpu_for_docking(
                            GpuData&     cData,
                            GpuTempData& tData,
+                           // sans ==>
                            Liganddata *myligand_init,
                            Dockpars   *mypars
+                           // <== sans
                           );
 
 void finish_gpu_from_docking(
                              GpuData&     cData,
                              GpuTempData& tData,
-                             Dockpars   *mypars
+                             Dockpars   *mypars // sans
                             );
 
 int docking_with_gpu(
@@ -92,11 +94,19 @@ int docking_with_gpu(
 
 double check_progress(
                       int* evals_of_runs,
+                      /* sans
+                      int generation_cnt,
+                      int max_num_of_evals,
+                      int max_num_of_gens,
+                      sans */
+                      // sans ==>
                     mpz_t generation_cnt,
                     mpz_t max_num_of_evals,
                     mpz_t max_num_of_gens,
+                      // <== sans
                       int num_of_runs,
-                   mpz_t &total_evals
+//                       unsigned long& total_evals // sans
+                   mpz_t &total_evals // sans
                      );
 
 #endif /* PERFORMDOCKING_H_ */

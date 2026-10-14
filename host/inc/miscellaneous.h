@@ -58,14 +58,26 @@ inline unsigned int processid() { return getpid(); }
 typedef struct
 {
   int  nr;            // this number starts at 1 and will be used to extend the base atom type nr
+  /* sans
+  char deriv_name[4]; // name of derivative atom type (3 chars max + 1 for \0)
+  char base_name[4];  // name of base type
+  sans */
+  // sans ==>
   char deriv_name[7]; // name of derivative atom type (6 chars max + 1 for \0)
   char base_name[7];  // name of base type
+  // <== sans
 } deriv_atype;
 
 typedef struct
 {
+  /* sans
+  char   A[4];          // name of one interaction atom type (order is arbitrary)
+  char   B[4];          // name of the other interaction atom type
+  sans */
+  // sans ==>
   char   A[7];          // name of one interaction atom type (order is arbitrary)
   char   B[7];          // name of the other interaction atom type
+  // <== sans
   int    nr_parameters; // number of parameters (the order is unique)
   float* parameters;    // parameter array ([0] = r, [1] = eps, [2] = rep. LJ exponent, [3] = attr. LJ exponent)
 } pair_mod;

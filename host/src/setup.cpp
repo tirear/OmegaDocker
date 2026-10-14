@@ -67,6 +67,7 @@ int setup(
          )
 {
   // Filling the filename and coeffs fields of mypars according to command line arguments
+//   printf("sans setup1\n");fflush(stdout);
   if (get_filenames_and_ADcoeffs(&argc, argv, mypars, filelist.used) != 0){
     printf("\nError in get_filenames_and_ADcoeffs, stopped job.\n");
     return 1;
@@ -269,6 +270,7 @@ int setup(
       }
     }
   }
+// printf("sans setup2\n");fflush(stdout);
   //------------------------------------------------------------
   // Processing receptor and ligand files
   //------------------------------------------------------------
@@ -279,6 +281,7 @@ int setup(
     printf("\nError in get_gridinfo, stopped job.\n");
     return 1;
   }
+// printf("sans setup2-1\n");fflush(stdout);
   // Filling the atom types field of myligand according to the grid types
   if (init_liganddata(mypars->ligandfile,
                       mypars->flexresfile,
@@ -290,6 +293,7 @@ int setup(
     printf("\nError in init_liganddata, stopped job.\n");
     return 1;
   }
+// printf("sans setup2-2\n");fflush(stdout);
 
   // Filling myligand according to the pdbqt file
   if (parse_liganddata(&myligand_init,
@@ -304,6 +308,13 @@ int setup(
     printf("\nError in parse_liganddata, stopped job.\n");
     return 1;
   }
+  // // sans check12 ==>
+  // for(int i = 0; i < myligand_init.num_of_atoms; i++)
+  // {
+  //   printf("sans check12 %d %f %f %f\n", i, myligand_init.atom_idxyzq[i][1], myligand_init.atom_idxyzq[i][2], myligand_init.atom_idxyzq[i][3]);
+  // }
+  // // <== sans check12
+// printf("sans setup2-3\n");fflush(stdout);
   if (mypars->contact_analysis){
     // read receptor in case contact analysis is requested and we haven't done so already
     if(!filelist.preload_maps){
@@ -323,6 +334,7 @@ int setup(
       }
     }
   }
+// printf("sans setup2-4\n");fflush(stdout);
   // Reading the grid files and storing values if not already done
   int grid_status;
 #ifdef USE_PIPELINE
@@ -334,6 +346,7 @@ int setup(
     printf("\nError in get_gridvalues, stopped job.\n");
     return 1;
   }
+// printf("sans setup3\n");fflush(stdout);
   //------------------------------------------------------------
   // Capturing algorithm parameters (command line args)
   //------------------------------------------------------------
@@ -366,6 +379,7 @@ int setup(
     }
   }
   free(orig_resname);
+//   printf("sans setup3\n");fflush(stdout);
   struct stat res_stat;
   int res_int = stat(get_filepath(mypars->resname).c_str(), &res_stat);
   if ((res_int != 0) || !(res_stat.st_mode & S_IFDIR)){
@@ -403,11 +417,15 @@ int setup(
       return 1;
     }
   }
+// printf("sans setup4\n");fflush(stdout);
   //------------------------------------------------------------
   // Calculating energies of reference ligand if required
   //------------------------------------------------------------
   if (mypars->reflig_en_required) {
-    IntraTables *tables= new IntraTables(&myligand_init, mypars->coeffs.scaled_AD4_coeff_elec, mypars->coeffs.AD4_coeff_desolv, mypars->qasp, mypars->nr_mod_atype_pairs, mypars->mod_atype_pairs);
+//     printf("sans setup4-1\n");fflush(stdout);
+//     IntraTables tables(&myligand_init, mypars->coeffs.scaled_AD4_coeff_elec, mypars->coeffs.AD4_coeff_desolv, mypars->qasp, mypars->nr_mod_atype_pairs, mypars->mod_atype_pairs); // sans
+    IntraTables *tables= new IntraTables(&myligand_init, mypars->coeffs.scaled_AD4_coeff_elec, mypars->coeffs.AD4_coeff_desolv, mypars->qasp, mypars->nr_mod_atype_pairs, mypars->mod_atype_pairs); // sans
+//     printf("sans setup4-2\n");fflush(stdout);
     printf("\n");
     if(mypars->given_xrayligandfile)
       printf("Reference");
@@ -421,7 +439,7 @@ int setup(
     if (mypars->given_xrayligandfile)
       ligand_calc_output(stdout,
                          "",
-                         tables,
+                         /*&*/tables, // sans
                          &myxrayligand,
                          mypars,
                          mygrid,
@@ -434,7 +452,7 @@ int setup(
     else
       ligand_calc_output(stdout,
                          "",
-                         tables,
+                         /*&*/tables, // sans
                          &myligand_init,
                          mypars,
                          mygrid,
@@ -446,6 +464,7 @@ int setup(
                          true);
     delete tables;
   }
+// printf("sans setupL\n");fflush(stdout);
   return 0;
 }
 

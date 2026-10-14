@@ -36,7 +36,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include "calcenergy_basic.h"
 #include "filelist.hpp"
 
-#include <gmp.h>
+#include <gmp.h> // sans
 
 #define LS_METHOD_STRING_LEN 8
 
@@ -68,11 +68,14 @@ typedef struct _Dockpars
   std::vector<int>          dev_pool;
   int                       dev_pool_nr                     = -1; // number in pool of many devices (-1 means none set, grab first)
   uint32_t                  seed[3]                         = {(uint32_t)time(NULL),(uint32_t)processid(),0};
-  mpz_t                     num_of_energy_evals;
-  mpz_t                     num_of_generations;
+//   unsigned long             num_of_energy_evals             = 2500000; // sans
+  mpz_t                     num_of_energy_evals; // sans
+//   unsigned long             num_of_generations              = 42000; // sans
+  mpz_t                     num_of_generations; // sans
   bool                      nev_provided                    = false;
   bool                      use_heuristics                  = true; // Flag if we want to use Diogo's heuristics
-  mpz_t                     heuristics_max;
+//   unsigned long             heuristics_max                  = 12000000; // Maximum number of evaluations under the heuristics (12M max evaluates to 80% of 3M evals calculated by heuristics -> 2.4M) // sans
+  mpz_t                     heuristics_max; // sans
   float                     abs_max_dmov;                   // depends on grid spacing
   float                     abs_max_dang                    = 90; // +/- 90°
   float                     mutation_rate                   = 2;  // 2%
@@ -89,7 +92,8 @@ typedef struct _Dockpars
                                                                     // "fire": FIRE, https://www.math.uni-bielefeld.de/~gaehler/papers/fire.pdf
                                                                     // "ad": ADADELTA, https://arxiv.org/abs/1212.5701
                                                                     // "adam": ADAM (currently only on Cuda)
-  mpz_t                     initial_sw_generations;
+//   int                       initial_sw_generations          = 0; // sans
+  mpz_t                     initial_sw_generations; // sans
   float                     rho_lower_bound                 = 0.01; // 0.01;
   float                     base_dmov_mul_sqrt3;            // depends on grid spacing
   float                     base_dang_mul_sqrt3             = 75.0*sqrt(3.0); // 75°
@@ -129,16 +133,18 @@ typedef struct _Dockpars
   float                     elec_min_distance               = 0.01;
   bool                      handle_symmetry                 = true;
   bool                      gen_finalpop                    = false;
+//   bool                      gen_best                        = false; // sans
+  // sans ==>
   int   gen_best       = 0;     // Number of output pdbqt files of the best pose of each run (up to the number of run)
   bool  savetime       = false; // Do not re-calculate final energy with CPU as the the number of run is more than one.
   float inputConfRatio = 0.2;   // The ratio of the population that the conformation genes are initialized as file input.
   bool  miniCoorOut    = false; // The coordinates in the minimization stage will be written to standard output if the value is not zero. If this value is not equal to 0, then the following is set: --psize 2 --nrun 1 --heurmax 10.
-  
+
   float ligaStepSize   = 0.1;   // The step size for ligand minimization stage
   float compStepSize   = 0.1;   // The step size for complex minimization stage
-  int   ligaRhoLimit   = 100;   // The maximal rho value for ligand minimization. Larger rho, more steps for ligand minimization.
-  int   compRhoLimit   = 1000;  // The maximal rho value for complex minimization. Larger rho, more steps for complex minimization.
-  int   collRhoLimit   = 5;     // The maximal rho value for collision-eliminating minimization. Larger rho, more steps for collision-eliminating minimization.
+  int   ligaRhoLimit   = 0;     // The maximal rho value for ligand minimization. Larger rho, more steps for ligand minimization. If this is less or equal to zero, no ligand minimization is going to perform.
+  int   compRhoLimit   = 10;    // The maximal rho value for complex minimization. Larger rho, more steps for complex minimization.
+  int   collRhoLimit   = 1;     // The maximal rho value for collision-eliminating minimization. Larger rho, more steps for collision-eliminating minimization.
   float collDistance   = 1.3;   // The distance at which non-bonded atoms are considered to have collided (exclude H-H).
   float rebornRatio    = 0.2;   // The ratio of population that is treated as bad samples and will be regenerated.
   bool  miniOnly       = 0;     // Do minimization only. If this value is not equal to 0, then the following is set: --miniCoorOut true.
@@ -159,6 +165,7 @@ typedef struct _Dockpars
   bool  cautionOn            = false; // Show the caution information.
   bool  warningOn            = false; // Show the warning information.
   bool  ligandOnly           = false; // Find the lowest energy conformation of ligand alone.
+  // <== sans
   float                     qasp                            = 0.01097f;
   float                     rmsd_tolerance                  = 2.0; // 2 Angstroem
   float                     adam_beta1                      = 0.9f;
@@ -177,7 +184,8 @@ inline int add_deriv_atype(
                           )
 {
   // name is too long
-  if(length>=7) return 0;
+//   if(length>=4) return 0; // sans
+  if(length>=7) return 0; // sans
   // make sure name hasn't already been used
   for(int i=0; i<mypars->nr_deriv_atypes; i++){
     if (strncmp(mypars->deriv_atypes[i].deriv_name, name, length) == 0){
@@ -263,18 +271,21 @@ void read_xml_filenames(
                         uint32_t seed[3]
                        );
 
-float **           read_xml_genomes(
+// std::vector<float> read_xml_genomes( // sans
+// std::vector<float> *read_xml_genomes( // sans for std::vector<float> *read_xml_genomes()
+float **           read_xml_genomes( // sans
                                     char* xml_filename,
                                     float grid_spacing,
                                     int &nrot,
-                                    Liganddata *myligand_init,
-                                    long unsigned int *runNum=0,
+                                    Liganddata *myligand_init, // sans
+                                    long unsigned int *runNum=0, // sans
                                     bool store_axisangle=false
                                    );
 
 void gen_initpop_and_reflig(
                                   Dockpars*   mypars,
-                                  float     **init_populations,
+//                                   float*      init_populations, // sans
+                                  float     **init_populations, // sans
                                   Liganddata* myligand,
                             const Gridinfo*   mygrid
                            );

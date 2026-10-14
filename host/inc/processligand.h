@@ -46,7 +46,8 @@ typedef struct _Liganddata
   int            true_ligand_atoms;
 // ignore_inter           Array to specify if moving atoms will interact with receptor
 //                        This is used to prevent flexres atoms to interact unfavorably
-  bool          *ignore_inter;
+//   bool           ignore_inter          [MAX_NUM_OF_ATOMS]; // sans
+  bool          *ignore_inter; // sans
 // num_of_atypes:         Number of different atom types in the ligand/flexres.
   int            num_of_atypes;
 // num_of_rotbonds:       Number of rotatable bonds in the ligand/flexres.
@@ -54,71 +55,103 @@ typedef struct _Liganddata
 // true_ligand_rotbonds:  Number of rotatable bonds in the ligand only.
   int            true_ligand_rotbonds;
 // atom_names:            Each row (first index) contain the ligand atom name
-  char         **atom_names;
+//   char           atom_names            [MAX_NUM_OF_ATOMS][5]; // sans
+  char         **atom_names; // sans
 // atom_types:            Each row (first index) contain an atom type (as two characters),
 //                        the row index is equal to the atom type code.
-  char         **atom_types;
+//   char           atom_types            [MAX_NUM_OF_ATOMS][4]; // there can be at most as many types (base+derived) as there are atoms // sans why????
+//   char           atom_types            [MAX_NUM_OF_ATYPES][4]; // sans
+  char         **atom_types; // sans
 // base_atom_types:       Each row (first index) contain an atom base type (for derived types it'll be different from atom_types),
 //                        the row index is equal to the atom type code.
+//   char           base_atom_types       [MAX_NUM_OF_ATOMS][4]; // sans why????
+//   char           base_atom_types       [MAX_NUM_OF_ATYPES][4]; // sans
   char         **base_atom_types;
 // atom_map_to_fgrids:    Maps each moving atom to a (pre-loaded) map id
-  int           *atom_map_to_fgrids;
+//   int            atom_map_to_fgrids    [MAX_NUM_OF_ATOMS]; // sans
+  int           *atom_map_to_fgrids; // sans
 // ligand grid types
-  char         **ligand_grid_types;
+//   char           ligand_grid_types     [MAX_NUM_OF_ATYPES+2][4]; // The additional two are the electrostatic and the desolvation types // sans
+  char         **ligand_grid_types; // sans
 // atom_idxyzq:           Each row describes one atom of the ligand.
 //                        The columns (second index) contain the atom type code, x, y and z coordinate
 //                        (in Angstroms) and electrical charge  of the atom.
 //                        The row index is equal to the index of the current atom.
-  double       **atom_idxyzq;
+//   double         atom_idxyzq           [MAX_NUM_OF_ATOMS][5]; // sans
+  double       **atom_idxyzq; // sans
 // rotbonds:              Each row corresponds to one rotatable bond of the ligand.
 //                        The rotatable bond is described with the indexes of the
 //                        two atoms which are connected to each other by the bond.
 //                        The row index is equal to the index of the rotatable bond.
-  int          **rotbonds;
+//   int            rotbonds              [MAX_NUM_OF_ROTBONDS][2]; // sans
+  int          **rotbonds; // sans
 // atom_rotbonds:         The array contains the rotatable bonds - atoms assignment.
 //                        If the element atom_rotbonds[atom index][rotatable bond index] is equal to 1,
 //                        it means,that the atom must be rotated if the bond rotates.
 //                        A 0 means the opposite.
-  char         **atom_rotbonds;
+//   char           atom_rotbonds         [MAX_NUM_OF_ATOMS][MAX_NUM_OF_ROTBONDS]; // sans
+  char         **atom_rotbonds; // sans
 // atom_rigid_structures: The array contains the ridig structure ID of the atoms.
 //                        If the atom_rigid_structures[atom1 index] = atom_rigid_structures[atom2 index],
 //                        it means, that the atoms are in the same rigid molecule fragment.
 //                        Rigid structures are seperated by branches in the pdbqt file.
-  int           *atom_rigid_structures;
+//   int            atom_rigid_structures [MAX_NUM_OF_ATOMS]; // sans
+  int           *atom_rigid_structures; // sans
 // bonds:                 If the element bonds[atom index][atom index] is equal to 1,
 //                        a bond exists between the atoms.
-  char         **bonds;
+//   char           bonds                 [MAX_NUM_OF_ATOMS][MAX_NUM_OF_ATOMS]; // sans
+  char         **bonds; // sans
 // intraE_contributors:   If the element [atom index][atom index] is equal to 1,
 //                        the energy contribution of the two atoms must be included in
 //                        intramolecular energy calculation,
 //                        which requires that there is at least one rotatable bond between the atoms and
 //                        their interaction type is not 1-2, 1-3 or 1-4
-  char         **intraE_contributors;
+//   char           intraE_contributors   [MAX_NUM_OF_ATOMS][MAX_NUM_OF_ATOMS]; // sans
+  char         **intraE_contributors; // sans
 // base_type_idx:         Base type idx for each atom (is used for derived types)
+//   int            base_type_idx         [MAX_NUM_OF_ATOMS]; // sans N_A ==> N_AT
+//   int            base_type_idx         [MAX_NUM_OF_ATYPES]; // sans N_A ==> N_AT
   int           *base_type_idx;
 // atom_types_reqm:       Translates system atom types (including derived types) into base atom type indices
 //                        This is needed as base atom type indices are static (for example: CG is always #22)
 //                        while system type indices dynamic (i.e. in order of appearance in the pdbqt)
-  unsigned int  *atom_types_reqm;
+//   unsigned int   atom_types_reqm       [MAX_NUM_OF_ATYPES]; // sans
+  unsigned int  *atom_types_reqm; // sans
 // reqm_AB:               equilibrium distance (r_eqm) for each pair of system atom types
-  double       **reqm_AB;
+//   double         reqm_AB               [MAX_NUM_OF_ATYPES][MAX_NUM_OF_ATYPES]; // sans
+  double       **reqm_AB; // sans
 // VWpars_[A,B,C,D]:      The matrices contain the A, B, C and D Van der Waals parameters for the ligand atom types.
 //                        The VWpars_A [atom type code of atom 1][atom type code of atom 2] element is equal
 //                        to the A parameter for these types, the VWpars_B contains the B parameters in the
 //                        same manner etc. (C and D are used for hydrogen bonds)
+  /* sans
+  double         VWpars_A              [MAX_NUM_OF_ATYPES][MAX_NUM_OF_ATYPES];
+  double         VWpars_B              [MAX_NUM_OF_ATYPES][MAX_NUM_OF_ATYPES];
+  double         VWpars_C              [MAX_NUM_OF_ATYPES][MAX_NUM_OF_ATYPES];
+  double         VWpars_D              [MAX_NUM_OF_ATYPES][MAX_NUM_OF_ATYPES];
+  sans */
+  // sans ==>
   double       **VWpars_A;
   double       **VWpars_B;
   double       **VWpars_C;
   double       **VWpars_D;
+  // <== sans
 // VWpars_exp:            Contains the exponents of the vdW potential A/r^m - B/r^n in one
 //                        2-byte unsigned integer, the upper byte is m and the lower one n
 //                        m = (exp & 0xFF00)>>8
 //                        n = (exp & 0xFF)
-  unsigned short **VWpars_exp;
+//   unsigned short VWpars_exp            [MAX_NUM_OF_ATYPES][MAX_NUM_OF_ATYPES]; // sans
+  unsigned short **VWpars_exp; // sans
 // volume, solpar:        these fields are similar to VWpars_x-s,
 //                        they contain the atoms' volume and solvation parameter.
+  /* sans
+  double         volume                [MAX_NUM_OF_ATYPES];
+  double         solpar                [MAX_NUM_OF_ATYPES];
+  sans */
+  // sans ==>
   double        *volume;
   double        *solpar;
+  // <== sans
   int            num_of_rotations_required;
   int            num_of_intraE_contributors;
   int            num_of_rotcyc;
@@ -135,14 +168,25 @@ typedef struct _Liganddata
 //                                 the orientation of the molecule will be changed, and these
 //                                 vectors will be invalid, so they must be calculated again if
 //                                 it is necessary.
+  /* sans
+  double         rotbonds_moving_vectors [MAX_NUM_OF_ROTBONDS][3];
+  double         rotbonds_unit_vectors   [MAX_NUM_OF_ROTBONDS][3];
+  sans */
+  // sans ==>
   double       **rotbonds_moving_vectors;
   double       **rotbonds_unit_vectors;
-
+  // <== sans
 // acceptor, donor indicates if a given atom is a Hydrogen acceptor or donor
+  /* sans
+  bool           acceptor                [MAX_NUM_OF_ATOMS];
+  bool           donor                   [MAX_NUM_OF_ATOMS];
+  bool           reactive                [MAX_NUM_OF_ATOMS]; // atoms with 1,4,7 numbered atom types
+  sans */
+  // sans ==>
   bool          *acceptor;
   bool          *donor;
   bool          *reactive; // atoms with 1,4,7 numbered atom types
-
+  // <== sans
 // store the ligand file content so it only gets read once (not upto 4 times ...)
 //   std::vector<std::string> file_content;
   char       **fileData;
@@ -160,7 +204,8 @@ typedef struct
   char         chain_id[2];  // "A"
   unsigned int res_id;       // 1
   float        x,y,z;        // -2.367, 4.481, -16.909
-  char         atom_type[7]; // "N"
+//   char         atom_type[4]; // "N" // sans
+  char         atom_type[7]; // "N" // sans
   bool         acceptor;
   bool         donor;
 } ReceptorAtom;
@@ -238,8 +283,14 @@ void move_ligand(Liganddata*, const double [], const double []);
 void scale_ligand(Liganddata*, const double);
 
 double calc_rmsd(
+                 /* sans
+                 const double       atom_idxyzq_ref [MAX_NUM_OF_ATOMS][5],
+                 const double       atom_idxyzq     [MAX_NUM_OF_ATOMS][5],
+                 sans */
+                 // sans ==>
                  double     **atom_idxyzq_ref,
                  double     **atom_idxyzq,
+                 // <== sans
                        unsigned int num_atoms,
                  const bool         handle_symmetry
                 );
@@ -269,7 +320,8 @@ void calc_distdep_tables_f(
 void calc_q_tables_f(
                      const Liganddata* myligand,
                            float       qasp,
-                           float     **q1q2,
+//                            float       q1q2 [][MAX_NUM_OF_ATOMS], // sans
+                           float     **q1q2, // sans
                            float       qasp_mul_absq []
                     );
 
@@ -303,10 +355,12 @@ std::vector<AnalysisData> analyze_ligand_receptor(
 float calc_interE_f(
                     const Gridinfo*   mygrid,
                     const Liganddata* myligand,
+                          // // sans ==>
                           bool        ligandOnly,
                           bool        cautionOn,
                           float       shakingRadius,
                           float     **shakingGridE,
+                          // // <== sans
                           float       outofgrid_tolerance,
                           int         debug,
                           float&      intraflexE,
@@ -327,12 +381,17 @@ struct IntraTables{
   //The following arrays will contain the q1*q2 and qasp*abs(q) values for the ligand which is the input parameter when this
   //function is called first time (it is supposed that the energy must always be calculated for this ligand only, that is, there
   //is only one ligand during the run of the program...)
-
+//   float q1q2          [MAX_NUM_OF_ATOMS][MAX_NUM_OF_ATOMS]; // sans
+//   float qasp_mul_absq [MAX_NUM_OF_ATOMS]; // sans
+//   bool is_HB          [MAX_NUM_OF_ATYPES] [MAX_NUM_OF_ATYPES]; // sans
+//   pair_mod* mod_pair  [MAX_NUM_OF_ATYPES] [MAX_NUM_OF_ATYPES]; // sans
   
+  // sans ==>
   float     **q1q2;
   float      *qasp_mul_absq;
   bool      **is_HB;
   pair_mod ***mod_pair;
+  // <== sans
 
   // Fill intraE tables
   IntraTables(
@@ -344,6 +403,7 @@ struct IntraTables{
                     pair_mod*   mod_atype_pairs
              )
   {
+    // sans ==>
     q1q2 = (float **) malloc(myligand->num_of_atoms * sizeof(float *));
     if(q1q2 == NULL)
     {
@@ -398,6 +458,7 @@ struct IntraTables{
         exit(1);
       }
     }
+    // <== sans
     calc_distdep_tables_f(r_6_table, r_10_table, r_12_table, r_epsr_table, desolv_table, scaled_AD4_coeff_elec, AD4_coeff_desolv);
     calc_q_tables_f(myligand, qasp, q1q2, qasp_mul_absq);
     for (int type_id1=0; type_id1<myligand->num_of_atypes; type_id1++){
@@ -415,10 +476,12 @@ struct IntraTables{
 
 float calc_intraE_f(
                     const Liganddata*               myligand,
+                          // sans ==>
                     const Gridinfo*                 mygrid,
                           float                     shakingRadius,
                           float                   **shakingGridE,
                           float                   **shakingGridEL,
+                          // <== sans
                           float                     dcutoff,
                           float                     smooth,
                           bool                      ignore_desolv,

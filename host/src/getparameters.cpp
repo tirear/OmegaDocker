@@ -149,21 +149,26 @@ int parse_dpf(
     float tempfloat;
     int line_count = 0;
     int ltype_nr = 0;
-    int ltype_li = -1; 
+    int ltype_li = -1; // sans
     int mtype_nr = 0;
     // use a 4-times longer runway for atom types definable in one dpf
     // - this is to allow more reactive types and to enable the strategy
     //   to define all possible atom types for a set of ligands once for
     //   performance reasons (as they can be read once)
     // - each ligand is still going to be limited to MAX_NUM_OF_ATYPES
+//     char ltypes[4*MAX_NUM_OF_ATYPES][4];
+//     memset(ltypes,0,16*MAX_NUM_OF_ATYPES*sizeof(char));
+    // sans ==>
     char **ltypes     = NULL;
     char **tmp_ltypes = NULL;
+    // <== sans
     std::string map_fn;
     int idx;
     pair_mod* curr_pair;
     float paramA, paramB;
     int m, n;
-    char typeA[7], typeB[7];
+//     char typeA[4], typeB[4]; // sans
+    char typeA[7], typeB[7]; // sans
     bool new_device = false; // indicate if current mypars has a new device requested
     unsigned int run_cnt=0;
     while(std::getline(file, line)) {
@@ -176,9 +181,17 @@ int parse_dpf(
         int comment_loc = line.find("#");
         if(comment_loc>0) line.erase(comment_loc,line.size()-comment_loc);
       }
-      char tempNumStr[1024];
+      char tempNumStr[1024]; // sans
       switch(token_id){
         case DPF_MOVE: // movable ligand file name
+            /* sans
+            if(!mypars->xml2dlg){
+              sscanf(line.c_str(),"%*s %255s",argstr);
+              if(mypars->ligandfile) free(mypars->ligandfile);
+              mypars->ligandfile = strdup(argstr);
+            }
+            sans */
+            // sans ==>
             if(!mypars->xml2dlg)
             {
               if(line.at(0) == 'l')
@@ -205,6 +218,7 @@ int parse_dpf(
               if(mypars->ligandfile) free(mypars->ligandfile);
               mypars->ligandfile = strdup(line.c_str());
             }
+            // <== sans
             break;
         case DPF_FLEXRES: // flexibe residue file name
             if(!mypars->xml2dlg){
@@ -236,7 +250,7 @@ int parse_dpf(
                 if(len<0){ // new type starts
                   len=i;
                   ltype_nr++;
-                  ltype_li++;
+                  ltype_li++; // sans
                   tmp_ltypes = (char **) realloc(ltypes, ltype_nr * sizeof(char *));
                   if(tmp_ltypes == NULL)
                   {
@@ -249,13 +263,30 @@ int parse_dpf(
                   }
                   tmp_ltypes = NULL;
                   ltypes[ltype_li] = (char *) calloc(7, 1);
+                  /* sans
+                  if(ltype_nr>4*MAX_NUM_OF_ATYPES){
+                    printf("\nError: Too many atoms types (>%d)defined in the <%s> parameter at %s:%u.\n",4*MAX_NUM_OF_ATYPES,tempstr,mypars->dpffile,line_count);
+                    return 1;
+                  }
+                  sans */
                 }
+                /* sans
+                if(i-len<3){
+                  ltypes[ltype_nr-1][i-len] = line[i];
+                  ltypes[ltype_nr-1][i-len+1] = '\0'; // make extra sure we terminate the string
+                } else{
+                  printf("\nError: Atom types are limited to 3 characters in <%s> parameter at %s:%u.\n",tempstr,mypars->dpffile,line_count);
+                  return 1;
+                }
+                sans */
+                // sans ==>
                 if(i-len<6){
                   ltypes[ltype_li][i-len] = line[i];
                 } else{
                   printf("\nError: Atom types are limited to 6 characters in <%s> parameter at %s:%u.\n",tempstr,mypars->dpffile,line_count);
                   return 1;
                 }
+                // <== sans
               }
             }
             mtype_nr=0;
@@ -272,7 +303,8 @@ int parse_dpf(
               return 1;
             }
             n=-1;
-            for(long unsigned int m=mygrid->grid_mapping.size()/2; m<mygrid->grid_mapping.size(); m++)
+//             for(m=mygrid->grid_mapping.size()/2; m<mygrid->grid_mapping.size(); m++) // sans
+            for(long unsigned int m=mygrid->grid_mapping.size()/2; m<mygrid->grid_mapping.size(); m++) // sans
               if(map_fn.find(mygrid->grid_mapping[m])!=std::string::npos){
                 n=m-mygrid->grid_mapping.size()/2;
                 break;
@@ -292,7 +324,8 @@ int parse_dpf(
               }
               idx = add_deriv_atype(mypars,ltypes[mtype_nr],strlen(ltypes[mtype_nr]),true);
               if(idx == 0){
-                printf("Error: Derivative (ligand type %s) names can only be upto 6 characters long.\n",ltypes[mtype_nr]);
+//                 printf("Error: Derivative (ligand type %s) names can only be upto 3 characters long.\n",ltypes[mtype_nr]); // sans
+                printf("Error: Derivative (ligand type %s) names can only be upto 6 characters long.\n",ltypes[mtype_nr]); // sans
                 return 1;
               }
               if(idx>0){
@@ -371,6 +404,15 @@ int parse_dpf(
         case DPF_GALS: // actually run a search (only if xml2dlg isn't specified)
             if(!mypars->xml2dlg){
               sscanf(line.c_str(),"%*s %d",&tempint);
+              /* sans
+              if ((tempint >= 1) && (tempint <= MAX_NUM_OF_RUNS)){
+                mypars->num_of_runs = (int) tempint;
+              } else{
+                printf("Error: Value of <%s> at %s:%u must be an integer between 1 and %d.\n",tempstr,mypars->dpffile,line_count,MAX_NUM_OF_RUNS);
+                return 1;
+              }
+              sans */
+              // sans ==>
               if (tempint >= 1)
               {
                 mypars->num_of_runs = (int) tempint;
@@ -380,6 +422,7 @@ int parse_dpf(
                 printf("Error: Value of <%s> at %s:%u must be an integer larger than 0.\n",tempstr,mypars->dpffile,line_count);
                 return -1;
               }
+              // <== sans
               if(token_id!=DPF_RUNS){
                 // Add the fld file to use
                 if (!mypars->fldfile){
@@ -471,6 +514,15 @@ int parse_dpf(
             break;
         case GA_pop_size: // population size
             sscanf(line.c_str(),"%*s %d",&tempint);
+            /* sans
+            if ((tempint >= 2) && (tempint <= MAX_POPSIZE)){
+              mypars->pop_size = (unsigned long) (tempint);
+            } else{
+              printf("Error: Value of <%s> at %s:%u must be an integer between 2 and %d.\n",tempstr,mypars->dpffile,line_count,MAX_POPSIZE);
+              return 1;
+            }
+            sans */
+            // sans ==>
             if (tempint >= 2)
             {
               mypars->pop_size = (unsigned long) (tempint);
@@ -480,8 +532,19 @@ int parse_dpf(
               printf("Error: Value of <%s> at %s:%u must be an integer larger than 1.\n",tempstr,mypars->dpffile,line_count);
               return 1;
             }
+            // <== sans
             break;
         case GA_num_generations: // number of generations
+            /* sans
+            sscanf(line.c_str(),"%*s %d",&tempint);
+            if ((tempint > 0) && (tempint < 16250000)){
+              mypars->num_of_generations = (unsigned long) tempint;
+            } else{
+              printf("Error: Value of <%s> at %s:%u must be between 0 and 16250000.\n",tempstr,mypars->dpffile,line_count);
+              return 1;
+            }
+            sans */
+             // sans ==>
             sscanf(line.c_str(),"%*s %s", tempNumStr);
             mpz_set_str(mypars->num_of_generations, tempNumStr, 10);
             if(mpz_cmp_si(mypars->num_of_generations, 0) <= 0)
@@ -491,13 +554,21 @@ int parse_dpf(
             }
             break;
         case GA_num_evals: // number of evals
+            /* sans
+            sscanf(line.c_str(),"%*s %d",&tempint);
+            if ((tempint > 0) && (tempint < 0x7FFFFFFF)){
+              mypars->num_of_energy_evals = (unsigned long) tempint;
+            sans */
+            // sans ==>
             sscanf(line.c_str(),"%*s %s", tempNumStr);
             mpz_set_str(mypars->num_of_energy_evals, tempNumStr, 10);
             if(mpz_cmp_si(mypars->num_of_energy_evals, 0) > 0)
             {
+            // <== sans
               mypars->nev_provided = true;
             } else{
-              printf("Error: Value of <%s> at %s:%u must be larger than 0.\n",tempNumStr, mypars->dpffile,line_count);
+//               printf("Error: Value of <%s> at %s:%u must be between 0 and 2^31-1.\n",tempstr,mypars->dpffile,line_count); // sans
+              printf("Error: Value of <%s> at %s:%u must be larger than 0.\n",tempNumStr, mypars->dpffile,line_count); // sans
               return 1;
             }
             break;
@@ -577,7 +648,8 @@ int parse_dpf(
               // count GPUs in case we set a different one
               if(argcmp("devnum",tempstr,'D')){
                 new_device=true;
-                for(long unsigned int i=0; i<mypars->dev_pool.size(); i++){
+//                 for(i=0; i<mypars->dev_pool.size(); i++){ // sans
+                for(long unsigned int i=0; i<mypars->dev_pool.size(); i++){ // sans
                   if(mypars->devnum==mypars->dev_pool[i]){
                     new_device=false;
                     mypars->dev_pool_nr=i;
@@ -615,10 +687,12 @@ int initial_commandpars(
   bool output_multiple_warning = true;
   std::vector<std::string> xml_files;
   bool read_more_xml_files = false;
+  // sans ==>
   mpz_init_set_ui(mypars->num_of_energy_evals, 2500000);
   mpz_init_set_ui(mypars->num_of_generations, 42000);
   mpz_init_set_ui(mypars->heuristics_max, 12000000);
   mpz_init(mypars->initial_sw_generations);
+  // <== sans
 #ifdef TOOLMODE
   mypars->xml2dlg = true;
   read_more_xml_files = true;
@@ -725,6 +799,7 @@ int initial_commandpars(
         }
       }
       // make sure to NOT free the previous ones as otherwise the strings of other mypars will be gone too ...
+//       char* prev_fld_file=mypars->fldfile; // sans useless
       if(!specified_dpf){
         *mypars = orig_pars;
         mypars->dpffile=NULL;
@@ -908,9 +983,11 @@ int get_filelist(
     }
     std::string line;
     bool prev_line_was_fld=false;
-    int prev_fld_line = 0;
+//     int prev_fld_line; // sans useless?
+    int prev_fld_line = 0; // sans useless?
     unsigned int initial_res_count = filelist.resnames.size();
     int len;
+//     int last_fld_idx=0; // sans useless
     int line_count=0;
     while(std::getline(file, line)) {
       line_count++;
@@ -983,6 +1060,7 @@ int get_filelist(
         // Add the parameter block
         filelist.mypars.push_back(*mypars);
         // Keep track of fld lines actually used
+//         last_fld_idx = filelist.fld_files.size(); // sans useless
         prev_line_was_fld=false;
       } else if (len>0) {
         // Anything else in the file is assumed to be the resname
@@ -1134,7 +1212,9 @@ void print_options(
   printf("--xraylfile         -R | reference ligand file for RMSD analysis               | ligand file\n");
   printf("\nCONVERSION\n");
   printf("--xml2dlg           -X | One (or many) AD-GPU xml file(s) to convert to dlg(s) | no default\n");
+  // sans ==>
   printf("--stateFileInName      | Name for the input docking state file.                | stateIn.bin\n");
+  // <== sans
 #endif
   printf("\nOUTPUT\n");
   printf("--resnam            -N | Prefix for docking output                             | ligand basename\n");
@@ -1145,6 +1225,8 @@ void print_options(
   printf("--rlige                | Print reference ligand energies                       | 0 (no)\n");
   printf("--gfpop                | Output all poses from all populations of each LGA run | 0 (no)\n");
   printf("--npdb                 | # pose pdbqt files from populations of each LGA run   | 0\n");
+  // printf("--gbest                | Output single best pose as pdbqt file                 | 0 (no)\n"); // sans
+  // sans ==>
   printf("--gbest                | Number of output pdbqt files of the best pose of each | 0\n");
   printf("                       | run (up to the number of run)                         |\n");
   printf("--miniCoorOut          | The coordinates in the minimization stage will be     | 0 (no)\n");
@@ -1157,6 +1239,7 @@ void print_options(
   printf("                       | showed.                                               |\n");
   printf("--cautionOn            | Show the caution information.                         | 0 (no)\n");
   printf("--warningOn            | Show the warning information.                         | 0 (no)\n");
+  // <== sans
   printf("--clustering           | Output clustering analysis in dlg and/or xml file     | 1 (yes)\n");
   printf("--hsym                 | Handle symmetry in RMSD calc.                         | 1 (yes)\n");
   printf("--rmstol               | RMSD clustering tolerance                             | 2 (Å)\n");
@@ -1176,8 +1259,10 @@ void print_options(
   printf("--lsmet             -l | Local-search method                                   | ad (ADADELTA)\n");
   printf("--lsit              -i | # Local-search iterations (max.)                      | 300\n");
   printf("--psize             -p | Population size                                       | 150\n");
+  // sans ==>
   printf("--inputConfRatio       | The ratio of the population that the conformation     | 0.2\n");
   printf("                       | genes are initialized as file input.                  |\n");
+  // <== sans
   printf("--mrat                 | Mutation rate                                         | 2   (%%)\n");
   printf("--crat                 | Crossover rate                                        | 80  (%%)\n");
   printf("--lsrat                | Local-search rate                                     | 100 (%%)\n");
@@ -1190,13 +1275,14 @@ void print_options(
   printf("--cslim                | Solis-Wets cons. success/failure limit to adjust rho  | 4\n");
   printf("--stopstd              | AutoStop energy standard deviation tolerance          | 0.15 (kcal/mol)\n");
   printf("--initswgens           | Initial # generations of Solis-Wets instead of -lsmet | 0 (no)\n");
+  // sans ==>
   printf("--ligaStepSize         | The step size for ligand only minimization.           | 0.1\n");
   printf("--compStepSize         | The step size for complex minimization.               | 0.1\n");
-  printf("--ligaRhoLimit         | The maximal rho value for ligand minimization. Larger | 100\n");
+  printf("--ligaRhoLimit         | The maximal rho value for ligand minimization. Larger | 0\n");
   printf("                       | rho, more steps for ligand minimization.              |\n");
-  printf("--compRhoLimit         | The maximal rho value for complex minimization.       | 1000\n");
+  printf("--compRhoLimit         | The maximal rho value for complex minimization.       | 10\n");
   printf("                       | Larger rho, more steps for complex minimization.      |\n");
-  printf("--collRhoLimit         | The maximal rho value for collision-eliminating       | 5\n");
+  printf("--collRhoLimit         | The maximal rho value for collision-eliminating       | 1\n");
   printf("                       | minimization. Larger rho, more steps for              |\n");
   printf("                       | collision-eliminating minimization.                   |\n");
   printf("--collDistance         | The distance at which non-bonded atoms are considered | 1.3\n");
@@ -1212,6 +1298,7 @@ void print_options(
   printf("--convergedThre        | The threshold of energy difference to define the      | 0.01\n");
   printf("                       | convergence of the energy used for comparison.        |\n");
   printf("--ligandOnly           | Find the lowest energy conformation of ligand alone.  | 0 (no)\n");
+  // <== sans
 #endif
   printf("\nSCORING\n");
   printf("--derivtype         -T | Derivative atom types (e.g. C1,C2,C3=C/S4=S/H5=HD)    | no default\n");
@@ -1220,6 +1307,7 @@ void print_options(
   printf("--smooth               | Smoothing parameter for vdW interactions              | 0.5 (Å)\n");
   printf("--elecmindist          | Min. electrostatic potential distance (w/ dpf: 0.5 Å) | 0.01 (Å)\n");
   printf("--modqp                | Use modified QASP from VirtualDrug or AD4 original    | 0 (no, use AD4)\n");
+  // sans ==>
   printf("--savetime             | Do not re-calculate final energy with CPU as the the  | 0 (no)\n");
   printf("                       | number of run is more than one. (0/1)                 |\n");
   printf("--topN4rescore         | The number of top individuals of that the energy be   | 1\n");
@@ -1230,6 +1318,7 @@ void print_options(
   printf("                       | Å).                                                   |\n");
   printf("--wellDepth            | The depth of a energy landscape for calculating       | 0.35\n");
   printf("                       | entropy (in kcal/mol).                                |\n");
+  // <== sans
 #ifndef TOOLMODE
   printf("\nOmegaDocker requires a ligand and a set of grid maps to perform a docking calculation. Optionally,\n");
   printf("one or multiple flexible residues may be provided. These inputs could be specified directly (--lfile,\n");
@@ -1339,6 +1428,12 @@ int get_commandpars(
     if (argcmp("nev", argv[i], 'e'))
     {
       arg_recognized = 1;
+      /* sans
+      sscanf(argv[i+1], "%d", &tempint);
+      if ((tempint > 0) && (tempint < 0x7FFFFFFF)){
+        mypars->num_of_energy_evals = (unsigned long) tempint;
+      sans */
+      // sans ==>
 //       long tempLong;
 //       sscanf(argv[i+1], "%ld", &tempLong);
 //       if ((tempLong > 0) && (tempLong < 0x7FFFFFFFFFFFFFFF)){
@@ -1348,9 +1443,11 @@ int get_commandpars(
       mpz_set_str(mypars->num_of_energy_evals, tempNumStr, 10);
       if(mpz_cmp_si(mypars->num_of_energy_evals, 0) > 0)
       {
+      // <== sans
         mypars->nev_provided = true;
       } else{
-        printf("Error: Value of --nev (-e) argument must be between 0 and 2^63-1.\n");
+//         printf("Error: Value of --nev (-e) argument must be between 0 and 2^31-1.\n"); // sans
+        printf("Error: Value of --nev (-e) argument must be between 0 and 2^63-1.\n"); // sans
         return -1;
       }
     }
@@ -1366,6 +1463,17 @@ int get_commandpars(
     if (argcmp("ngen", argv[i], 'g'))
     {
       arg_recognized = 1;
+      /* sans
+      sscanf(argv[i+1], "%d", &tempint);
+
+      if ((tempint > 0) && (tempint < 16250000)){
+        mypars->num_of_generations = (unsigned long) tempint;
+      } else{
+        printf("Error: Value of --ngen (-g) argument must be between 0 and 16250000.\n");
+        return -1;
+      }
+      sans */
+      // sans ==>
       char tempNumStr[1024];
       sscanf(argv[i+1], "%s", tempNumStr);
       mpz_set_str(mypars->num_of_generations, tempNumStr, 10);
@@ -1374,12 +1482,24 @@ int get_commandpars(
         printf("Error: Value of --ngen (-g) argument must be larger then 0.\n");
         return -1;
       }
+      // <== sans
     }
 
     // Argument: initial sw number of generations. Must be a positive integer.
     if (argcmp("initswgens", argv[i]))
     {
       arg_recognized = 1;
+      /* sans
+      sscanf(argv[i+1], "%d", &tempint);
+
+      if ((tempint >= 0) && (tempint <= 16250000)){
+        mypars->initial_sw_generations = (unsigned long) tempint;
+      } else{
+        printf("Error: Value of --initswgens argument must be between 0 and 16250000.\n");
+        return -1;
+      }
+      sans */
+      // sans ==>
       char tempNumStr[1024];
       sscanf(argv[i+1], "%s", tempNumStr);
       mpz_set_str(mypars->initial_sw_generations, tempNumStr, 10);
@@ -1388,6 +1508,7 @@ int get_commandpars(
         printf("Error: Value of --initswgens argument must be larger then 0.\n");
         return -1;
       }
+      // <== sans
     }
 
     // ----------------------------------
@@ -1408,6 +1529,10 @@ int get_commandpars(
     if (argcmp("heurmax", argv[i], 'E'))
     {
       arg_recognized = 1;
+      // sans ==>
+//       unsigned long templong;
+//       sscanf(argv[i+1], "%lu", &templong);
+//       mypars->heuristics_max = templong;
       char tempNumStr[1024];
       sscanf(argv[i+1], "%s", tempNumStr);
       mpz_set_str(mypars->heuristics_max, tempNumStr, 10);
@@ -1420,6 +1545,17 @@ int get_commandpars(
       {
         mpz_set_ui(mypars->heuristics_max, 10);
       }
+      // <== sans
+      /* sans
+      sscanf(argv[i+1], "%d", &tempint);
+
+      if ((tempint > 0) && (tempint <= 1625000000)){
+        mypars->heuristics_max = (unsigned long) tempint;
+      } else{
+        printf("Error: Value of --heurmax (-E) argument must be between 1 and 1625000000.\n");
+        return -1;
+      }
+      sans */
     }
 
     // Argument: maximal delta movement during mutation. Must be an integer between 1 and 16.
@@ -1653,6 +1789,15 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%d", &tempint);
 
+      /* sans
+      if ((tempint >= 2) && (tempint <= MAX_POPSIZE)){
+        mypars->pop_size = (unsigned long) (tempint);
+      } else{
+        printf("Error: Value of --psize (-p) argument must be an integer between 2 and %d.\n", MAX_POPSIZE);
+        return -1;
+      }
+      sans */
+      // sans ==>
       if (tempint >= 2)
       {
         if(mypars->miniCoorOut || mypars->miniOnly)
@@ -1669,6 +1814,7 @@ int get_commandpars(
         printf("Error: Value of --psize (-p) argument must be an integer larger than 1.\n");
         return -1;
       }
+      // <== sans
       break;
     }
 
@@ -1705,6 +1851,13 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%d", &tempint);
 
+      /* sans
+      if ((tempint < 0) || (tempint > MAX_POPSIZE)){
+        printf("Error: Value of --npdb argument must be an integer between 0 and %d.\n", MAX_POPSIZE);
+        return -1;
+      } else mypars->gen_pdbs = tempint;
+      sans */
+      // sans ==>
       if (tempint < 0)
       {
         printf("Error: Value of --npdb argument must be an integer larger than 0.\n");
@@ -1714,6 +1867,7 @@ int get_commandpars(
       {
         mypars->gen_pdbs = tempint;
       }
+      // <== sans
     }
 
     // ---------------------------------
@@ -1876,6 +2030,15 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%d", &tempint);
 
+      /* sans
+      if ((tempint >= 1) && (tempint <= MAX_NUM_OF_RUNS)){
+        mypars->num_of_runs = (int) tempint;
+      } else{
+        printf("Error: Value of --nrun (-n) argument must be an integer between 1 and %d.\n", MAX_NUM_OF_RUNS);
+        return -1;
+      }
+      sans */
+      // sans ==>
       if (tempint >= 1)
       {
         if(mypars->miniCoorOut || mypars->miniOnly)
@@ -1892,6 +2055,7 @@ int get_commandpars(
         printf("Error: Value of --nrun (-n) argument must be an integer larger than 0.\n");
         return -1;
       }
+      // <== sans
     }
 
     // Argument: energies of reference ligand required.
@@ -1950,6 +2114,13 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%d", &tempint);
 
+      /* sans
+      if (tempint == 0)
+        mypars->gen_best = false;
+      else
+        mypars->gen_best = true;
+      sans */
+      // sans ==>
       if(tempint <= 0)
       {
         mypars->gen_best = 0;
@@ -1958,8 +2129,10 @@ int get_commandpars(
       {
         mypars->gen_best = tempint;
       }
+      // <== sans
     }
 
+    // sans ==>
     // Argument: skip time consuming result processing without change coordinates of the best one
     // If the value is equal to or less than zero, no result processing will be skipped.
     if (argcmp("savetime", argv [i]))
@@ -2048,15 +2221,15 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%d", &tempint);
 
-      if (tempint > 0)
-      {
-        mypars->ligaRhoLimit = tempint;
-      }
-      else
-      {
-        printf("Error: Value of --ligaRhoLimit argument must be larger than 0.\n");
-        return -1;
-      }
+      // if (tempint > 0)
+      // {
+      //   mypars->ligaRhoLimit = tempint;
+      // }
+      // else
+      // {
+      //   printf("Error: Value of --ligaRhoLimit argument must be larger than 0.\n");
+      //   return -1;
+      // }
     }
 
     if (argcmp("compRhoLimit", argv [i]))
@@ -2064,15 +2237,15 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%d", &tempint);
 
-      if (tempint > 0)
-      {
-        mypars->compRhoLimit = tempint;
-      }
-      else
-      {
-        printf("Error: Value of --compRhoLimit argument must be larger than 0.\n");
-        return -1;
-      }
+      // if (tempint > 0)
+      // {
+      //   mypars->compRhoLimit = tempint;
+      // }
+      // else
+      // {
+      //   printf("Error: Value of --compRhoLimit argument must be larger than 0.\n");
+      //   return -1;
+      // }
     }
 
     if (argcmp("collRhoLimit", argv [i]))
@@ -2169,7 +2342,7 @@ int get_commandpars(
       arg_recognized = 1;
       sscanf(argv [i+1], "%f", &tempfloat);
 
-      if (tempfloat >= 0.0f && tempfloat <= 0.9f)
+      if (tempfloat >= 0.0f && tempfloat <= 1.0f)
       {
         mypars->lowEngNumRatio = tempfloat;
 
@@ -2181,7 +2354,7 @@ int get_commandpars(
       }
       else
       {
-        printf("Error: Value of --lowEngNumRatio argument must be larger than or equal to 0 and less than or equal to 0.9.\n");
+        printf("Error: Value of --lowEngNumRatio argument must be larger than or equal to 0 and less than or equal to 1.0.\n");
         return -1;
       }
     }
@@ -2247,7 +2420,7 @@ int get_commandpars(
         mypars->showTopIdvNum = tempint;
       }
     }
-    
+
     if (argcmp("topN4rescore", argv [i]))
     {
       arg_recognized = 1;
@@ -2262,7 +2435,7 @@ int get_commandpars(
         mypars->topN4rescore = tempint;
       }
     }
-    
+
     if (argcmp("enthalpyScaling", argv [i]))
     {
       arg_recognized = 1;
@@ -2278,7 +2451,7 @@ int get_commandpars(
         return -1;
       }
     }
-    
+
     if (argcmp("entropyScaling", argv [i]))
     {
       arg_recognized = 1;
@@ -2294,7 +2467,7 @@ int get_commandpars(
         return -1;
       }
     }
-    
+
     if (argcmp("shakingRadius", argv [i]))
     {
       arg_recognized = 1;
@@ -2310,7 +2483,7 @@ int get_commandpars(
         return -1;
       }
     }
-    
+
     if (argcmp("wellDepth", argv [i]))
     {
       arg_recognized = 1;
@@ -2326,7 +2499,7 @@ int get_commandpars(
         return -1;
       }
     }
-    
+
     if (argcmp("cautionOn", argv [i]))
     {
       arg_recognized = 1;
@@ -2341,7 +2514,7 @@ int get_commandpars(
         mypars->cautionOn = true;
       }
     }
-    
+
     if (argcmp("warningOn", argv [i]))
     {
       arg_recognized = 1;
@@ -2356,7 +2529,7 @@ int get_commandpars(
         mypars->warningOn = true;
       }
     }
-    
+
     if (argcmp("ligandOnly", argv [i]))
     {
       arg_recognized = 1;
@@ -2371,6 +2544,7 @@ int get_commandpars(
         mypars->ligandOnly = true;
       }
     }
+    // <== sans
 
     // Argument: name of result files.
     if (argcmp("resnam", argv [i], 'N'))
@@ -2721,17 +2895,22 @@ void read_xml_filenames(
   }
 }
 
-float **           read_xml_genomes(
+// std::vector<float> read_xml_genomes( // sans
+// std::vector<float> *read_xml_genomes( // sans for std::vector<float> *read_xml_genomes()
+float **           read_xml_genomes( // sans
                                     char* xml_filename,
                                     float grid_spacing,
                                     int &nrot,
-                                    Liganddata *myligand_init,
-                                    long unsigned int *runNum,
+                                    Liganddata *myligand_init, // sans
+                                    long unsigned int *runNum, // sans
                                     bool store_axisangle
                                    )
 {
-  float **result    = NULL;
-  float **resultTmp = NULL;
+//   std::vector<float> result; // sans
+//   std::vector<float> *result    = NULL; // sans for std::vector<float> *read_xml_genomes()
+//   std::vector<float> *resultTmp = NULL; // sans for std::vector<float> *read_xml_genomes()
+  float **result    = NULL; // sans
+  float **resultTmp = NULL; // sans
   std::ifstream file(xml_filename);
   if(file.fail()){
     printf("\nError: Could not open xml file %s. Check path and permissions.\n", xml_filename);
@@ -2747,7 +2926,7 @@ float **           read_xml_genomes(
   size_t found_genome=0;
   float *gene, theta, phi, genrot;
   size_t line_nr=0;
-  int genotype_length_in_globmem = myligand_init->num_of_rotbonds + 7;
+  int genotype_length_in_globmem = myligand_init->num_of_rotbonds + 7; // sans
   while(std::getline(file, line)) {
     line_nr++;
     trim(line); // Remove leading and trailing whitespace
@@ -2761,6 +2940,7 @@ float **           read_xml_genomes(
         break;
       }
       if(run_nr>count){
+        // sans ==>
         resultTmp = (float **) realloc(result, run_nr * sizeof(float *));
         if(resultTmp == NULL)
         {
@@ -2774,9 +2954,29 @@ float **           read_xml_genomes(
         resultTmp = NULL;
         for(int i = count; i < run_nr; i++)
         {
-          result[i] = (float *) malloc(genotype_length_in_globmem * sizeof(float));
+//           result[i] = (float *) malloc(GENOTYPE_LENGTH_IN_GLOBMEM * sizeof(float)); // sans
+          result[i] = (float *) malloc(genotype_length_in_globmem * sizeof(float)); // sans
         }
+        // <== sans
+//         // sans for std::vector<float> *read_xml_genomes() ==>
+//         resultTmp = (std::vector<float> *) realloc(result, run_nr * sizeof(std::vector<float>));
+//         if(resultTmp == NULL)
+//         {
+//           printf("ERROR: Cannot allocate memory for parsing xml file information.\n");
+//           exit(1);
+//         }
+//         if(resultTmp != result)
+//         {
+//           result = resultTmp;
+//         }
+//         resultTmp = NULL;
+//         for(int i = count; i < run_nr; i++)
+//         {
+//           result[i].resize(GENOTYPE_LENGTH_IN_GLOBMEM);
+//         }
+//         // <== sans for std::vector<float> *read_xml_genomes()
         count=run_nr;
+//         result.resize(GENOTYPE_LENGTH_IN_GLOBMEM*count); // sans
       }
     }
     if(line.find("</run>")==0){
@@ -2810,7 +3010,9 @@ float **           read_xml_genomes(
     }
     if(line.find("<tran0>")==0){
       if(run_nr>0){
-        gene = result[run_nr-1];
+//         gene = result.data() + (run_nr-1)*GENOTYPE_LENGTH_IN_GLOBMEM; // sans
+//         gene = result[run_nr-1].data(); // sans for std::vector<float> *read_xml_genomes()
+        gene = result[run_nr-1]; // sans
         found=sscanf(line.c_str(),"<tran0>%f %f %f</tran0>",gene,gene+1,gene+2);
         if(found!=3){
           error=7;
@@ -2827,7 +3029,9 @@ float **           read_xml_genomes(
     }
     if(line.find("<axisangle0>")==0){
       if(run_nr>0){
-        gene = result[run_nr-1] + 3;
+//         gene = result.data() + (run_nr-1)*GENOTYPE_LENGTH_IN_GLOBMEM + 3; // sans
+//         gene = result[run_nr-1].data() + 3; // sans for std::vector<float> *read_xml_genomes()
+        gene = result[run_nr-1] + 3; // sans
         found=sscanf(line.c_str(),"<axisangle0>%f %f %f %f</axisangle0>",gene,gene+1,gene+2,&genrot);
         if(found!=4){
           error=9;
@@ -2839,7 +3043,9 @@ float **           read_xml_genomes(
           *gene = phi / DEG_TO_RAD;
           *(gene+1) = theta / DEG_TO_RAD;
           *(gene+2) = genrot;
-        } else result[run_nr-1][genotype_length_in_globmem-1] = genrot;
+//         } else result[run_nr*GENOTYPE_LENGTH_IN_GLOBMEM-1] = genrot; // sans
+//         } else result[run_nr-1][GENOTYPE_LENGTH_IN_GLOBMEM-1] = genrot; // sans for std::vector<float> *read_xml_genomes()
+        } else result[run_nr-1][genotype_length_in_globmem-1] = genrot; // sans
         found_genome++;
       } else{
         error=10;
@@ -2849,7 +3055,9 @@ float **           read_xml_genomes(
     if(line.find("<dihe0>")==0){
       if((run_nr>0) && (curr_nrot>=0)){
         if(curr_nrot>0){
-          gene = result[run_nr-1] + 6;
+//           gene = result.data() + (run_nr-1)*GENOTYPE_LENGTH_IN_GLOBMEM + 6; // sans
+//           gene = result[run_nr-1].data() + 6; // sans for std::vector<float> *read_xml_genomes()
+          gene = result[run_nr-1] + 6; // sans
           items=line.substr(7);
           for(int gene_id=0; gene_id<curr_nrot; gene_id++){
             found=sscanf(items.c_str(),"%f",gene+gene_id);
@@ -2877,14 +3085,17 @@ float **           read_xml_genomes(
 
 void gen_initpop_and_reflig(
                                   Dockpars*   mypars,
-                                  float     **init_populations,
+//                                   float*      init_populations, // sans
+                                  float     **init_populations, // sans
                                   Liganddata* myligand,
                             const Gridinfo*   mygrid
                            )
 // The function generates a random initial population
 // Each contiguous GENOTYPE_LENGTH_IN_GLOBMEM pieces of floats in init_population corresponds to a genotype
 {
-  unsigned int gene_id;
+//   printf("sans gen_initpop_and_reflig1\n");fflush(stdout);
+//   unsigned int entity_id, gene_id; // sans useless
+  unsigned int gene_id; // sans
   double movvec_to_origo[3];
 
   int pop_size = mypars->pop_size;
@@ -2894,16 +3105,18 @@ void gen_initpop_and_reflig(
   float x, y, z, s; // convert quaternion to angles
   float phi, theta, rotangle;
 
-  int genotype_length_in_globmem = myligand->num_of_rotbonds + 7;
-  char *tempNumStr;
+  int genotype_length_in_globmem = myligand->num_of_rotbonds + 7; // sans
+  char *tempNumStr; // sans
 
   // Local random numbers for thread safety/reproducibility
   LocalRNG r(mypars->seed);
 
   // Generating initial population
-  long unsigned int read_run_num = 0;
+  long unsigned int read_run_num = 0; // sans
+//   unsigned int nr_genomes_loaded=0; // sans
+  // sans ==>
   printf("    Name for the input docking state file  : %s\n", mypars->stateFileInName);
-  
+
   printf("    Prefix for the docking output          : %s\n", mypars->resname);
   if(mypars->contact_analysis)
   {
@@ -2999,7 +3212,7 @@ void gen_initpop_and_reflig(
     printf("    (No) Do not Handle symmetry in RMSD calculation.\n");
   }
   printf("    RMSD clustering tolerance                            : %f Å\n", mypars->rmsd_tolerance);
-  
+
   // printf("    Cuda device number (counting starts at 1): %d\n", mypars->devnum + 1);
   if(mypars->load_xml)
   {
@@ -3010,7 +3223,7 @@ void gen_initpop_and_reflig(
     printf("    Do not load initial population from xml results file.\n");
   }
   printf("    Random number seeds (up to three comma-sep. integers): %d, %d, %d\n", mypars->seed[0], mypars->seed[1], mypars->seed[2]);
-  
+
   if(mypars->use_heuristics)
   {
     printf("    (Yes) Use heuristics\n");
@@ -3062,7 +3275,7 @@ void gen_initpop_and_reflig(
   int maxReservedIdvNum = (int) (mypars->lowEngNumRatio * mypars->pop_size);
   printf("    (maxReservedIdvNum) Number of the low energy number in the population                         : %d\n", maxReservedIdvNum);
   printf("    The threshold of energy difference to define the convergence of the energy used for comparison: %f kcal/mol\n", mypars->convergedThre);
-  
+
   if(mypars->savetime)
   {
     printf("    (Yes) Re-calculate part of final energies with CPU.\n");
@@ -3083,15 +3296,24 @@ void gen_initpop_and_reflig(
   printf("    The value for entropy scaling                          : %f\n", mypars->entropyScaling);
   printf("    The radius of atom shaking for calculate entropy       : %f Å\n", mypars->shakingRadius);
   printf("    The depth of a energy landscape for calculating entropy: %f kcal/mol\n", mypars->wellDepth);
-  
-  
+
+
+  // <== sans
   if(mypars->load_xml){ // read population data from previously output xml file
     int nrot;
-    float **genome = read_xml_genomes(mypars->load_xml, mygrid->spacing, nrot, myligand, &read_run_num);
+//     std::vector<float> *genome = read_xml_genomes(mypars->load_xml, mygrid->spacing, nrot, &read_run_num); // sans for std::vector<float> *
+    float **genome = read_xml_genomes(mypars->load_xml, mygrid->spacing, nrot, myligand, &read_run_num); // sans
     if(nrot!=myligand->num_of_rotbonds){
       printf("Error: XML genome contains %d rotatable bonds but current ligand has %d.\n",nrot,myligand->num_of_rotbonds);
       exit(2);
     }
+    /* sans
+    nr_genomes_loaded = std::min(genome.size()/GENOTYPE_LENGTH_IN_GLOBMEM, mypars->num_of_runs);
+    if(nr_genomes_loaded < mypars->num_of_runs){
+      printf("Note: XML contains %d genomes but %lu runs are requested, randomizing other runs.\n",nr_genomes_loaded, mypars->num_of_runs);
+    }
+    sans */
+    // sans ==>
     if(read_run_num < mypars->num_of_runs)
     {
       printf("Note: XML contains %ld genomes but %lu runs are requested, randomizing other runs.\n",read_run_num, mypars->num_of_runs);
@@ -3101,6 +3323,20 @@ void gen_initpop_and_reflig(
       printf("Note: XML contains %ld genomes but %lu runs are requested, use only %lu runs.\n",read_run_num, mypars->num_of_runs, mypars->num_of_runs);
       read_run_num = mypars->num_of_runs;
     }
+    // <== sans
+    // copy to rest of population
+    /* sans
+    float *src = genome.data();
+    printf("Initializing %d runs from specified xml file.\n",nr_genomes_loaded);
+    nr_genomes_loaded *= pop_size;
+    for (entity_id=0; entity_id<nr_genomes_loaded; entity_id++){
+      if(entity_id % pop_size == 0) src = genome.data() + (entity_id/pop_size)*GENOTYPE_LENGTH_IN_GLOBMEM;
+      memcpy(&(init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM]),src,sizeof(float)*GENOTYPE_LENGTH_IN_GLOBMEM);
+
+      memcpy(&(init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM]),src,sizeof(float)*GENOTYPE_LENGTH_IN_GLOBMEM);
+    }
+    sans */
+    // sans ==>
     for (long unsigned int run_id = 0; run_id < read_run_num; run_id++)
     {
       memcpy(init_populations[run_id], genome[run_id], sizeof(float) * genotype_length_in_globmem);
@@ -3110,12 +3346,16 @@ void gen_initpop_and_reflig(
         for(gene_id = 0; gene_id < 3; gene_id++)
         {
           init_populations[run_id][pop_id * genotype_length_in_globmem + gene_id] = r.random_float() * (mygrid->size_xyz_angstr[gene_id]) / mygrid->spacing;
+//           init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 0.4 * (mygrid->size_xyz_angstr[gene_id])/mygrid->spacing; // sans check
         }
 
         // generate random quaternion
         u1 = r.random_float();
         u2 = r.random_float();
         u3 = r.random_float();
+//         u1 = 0.1; // sans check
+//         u2 = 0.2; // sans check
+//         u3 = 0.6; // sans check
         qw = sqrt(1.0 - u1) * sin(PI_TIMES_2 * u2);
         qx = sqrt(1.0 - u1) * cos(PI_TIMES_2 * u2);
         qy = sqrt(      u1) * sin(PI_TIMES_2 * u3);
@@ -3142,25 +3382,44 @@ void gen_initpop_and_reflig(
         init_populations[run_id][pop_id*genotype_length_in_globmem + 5] = rotangle / DEG_TO_RAD;
         for(int gene_id = 6; gene_id < myligand->num_of_rotbonds + 6; gene_id++)
         {
-          init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = r.random_float() * 360;
+          init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = r.random_float() * 360.0f;
+//           init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 30; // sans check
         }
       }
     }
+    // <== sans
   }
+//   printf("sans gen_initpop_and_reflig2\n");fflush(stdout);
+  // sans ==>
   for(long unsigned int run_id = read_run_num; run_id < mypars->num_of_runs; run_id++)
   {
-    for(int pop_id = 0; pop_id < inputConformationNum; pop_id++)
+    // printf("sans gen_initpop_and_reflig r.random_float(), (mygrid->size_xyz_angstr[gene_id]), mygrid->spacing: %f %f %f origoXYZ %f %f %f\n", r.random_float(), (mygrid->size_xyz_angstr[gene_id]), mygrid->spacing, mygrid->origo_real_xyz[0], mygrid->origo_real_xyz[1], mygrid->origo_real_xyz[2]);
+    int pop_id = 0;
+    get_movvec_to_origo(myligand, movvec_to_origo);
+    init_populations[run_id][0] = (-movvec_to_origo[0] - mygrid->origo_real_xyz[0]) / mygrid->spacing;
+    init_populations[run_id][1] = (-movvec_to_origo[1] - mygrid->origo_real_xyz[1]) / mygrid->spacing;
+    init_populations[run_id][2] = (-movvec_to_origo[2] - mygrid->origo_real_xyz[2]) / mygrid->spacing;
+    for(gene_id = 3; gene_id < myligand->num_of_rotbonds + 6; gene_id++)
+    {
+      init_populations[run_id][gene_id] = 0.0f;
+      // init_populations[run_id][pop_id * genotype_length_in_globmem + gene_id] = 0.0f;
+    }
+    for(pop_id = 1; pop_id < inputConformationNum; pop_id++)
     {
       // randomize location and convert to grid coordinates
       for(gene_id = 0; gene_id < 3; gene_id++)
       {
         init_populations[run_id][pop_id * genotype_length_in_globmem + gene_id] = r.random_float() * (mygrid->size_xyz_angstr[gene_id]) / mygrid->spacing;
+//         init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 0.4 * (mygrid->size_xyz_angstr[gene_id])/mygrid->spacing; // sans check
       }
 
       // generate random quaternion
       u1 = r.random_float();
       u2 = r.random_float();
       u3 = r.random_float();
+//       u1 = 0.1; // sans check
+//       u2 = 0.2; // sans check
+//       u3 = 0.6; // sans check
       qw = sqrt(1.0 - u1) * sin(PI_TIMES_2 * u2);
       qx = sqrt(1.0 - u1) * cos(PI_TIMES_2 * u2);
       qy = sqrt(      u1) * sin(PI_TIMES_2 * u3);
@@ -3186,21 +3445,25 @@ void gen_initpop_and_reflig(
       init_populations[run_id][pop_id*genotype_length_in_globmem + 5] = rotangle / DEG_TO_RAD;
       for(int gene_id = 6; gene_id < myligand->num_of_rotbonds + 6; gene_id++)
       {
-        init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 0;
+        init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 0.0f;
       }
     }
-    for(int pop_id = inputConformationNum; pop_id < pop_size; pop_id++)
+    for(pop_id = inputConformationNum; pop_id < pop_size; pop_id++)
     {
       // randomize location and convert to grid coordinates
       for(gene_id = 0; gene_id < 3; gene_id++)
       {
         init_populations[run_id][pop_id * genotype_length_in_globmem + gene_id] = r.random_float() * (mygrid->size_xyz_angstr[gene_id]) / mygrid->spacing;
+//         init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 0.4 * (mygrid->size_xyz_angstr[gene_id])/mygrid->spacing; // sans check
       }
 
       // generate random quaternion
       u1 = r.random_float();
       u2 = r.random_float();
       u3 = r.random_float();
+//       u1 = 0.1; // sans check
+//       u2 = 0.2; // sans check
+//       u3 = 0.6; // sans check
       qw = sqrt(1.0 - u1) * sin(PI_TIMES_2 * u2);
       qx = sqrt(1.0 - u1) * cos(PI_TIMES_2 * u2);
       qy = sqrt(      u1) * sin(PI_TIMES_2 * u3);
@@ -3227,15 +3490,60 @@ void gen_initpop_and_reflig(
       init_populations[run_id][pop_id*genotype_length_in_globmem + 5] = rotangle / DEG_TO_RAD;
       for(int gene_id = 6; gene_id < myligand->num_of_rotbonds + 6; gene_id++)
       {
-        init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = r.random_float() * 360;
+        init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = r.random_float() * 360.0f;
+//         init_populations[run_id][pop_id*genotype_length_in_globmem + gene_id] = 30; // sans check
       }
     }
   }
+  // <== sans
+  /* sans
+  for (entity_id=nr_genomes_loaded; entity_id<pop_size*mypars->num_of_runs; entity_id++)
+  {
+    // randomize location and convert to grid coordinates
+    for (gene_id=0; gene_id<3; gene_id++)
+      init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM+gene_id] = r.random_float()*(mygrid->size_xyz_angstr[gene_id])/mygrid->spacing;
+
+    // generate random quaternion
+    u1 = r.random_float();
+    u2 = r.random_float();
+    u3 = r.random_float();
+    qw = sqrt(1.0 - u1) * sin(PI_TIMES_2 * u2);
+    qx = sqrt(1.0 - u1) * cos(PI_TIMES_2 * u2);
+    qy = sqrt(      u1) * sin(PI_TIMES_2 * u3);
+    qz = sqrt(      u1) * cos(PI_TIMES_2 * u3);
+
+    // convert to angle representation
+    rotangle = 2.0 * acos(qw);
+    s = sqrt(1.0 - (qw * qw));
+    if (s < 0.001){ // rotangle too small
+      x = qx;
+      y = qy;
+      z = qz;
+    } else {
+      x = qx / s;
+      y = qy / s;
+      z = qz / s;
+    }
+    theta = acos(z);
+    phi = atan2(y, x);
+
+    init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM+3] = phi / DEG_TO_RAD;
+    init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM+4] = theta / DEG_TO_RAD;
+    init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM+5] = rotangle / DEG_TO_RAD;
+    for (gene_id=6; gene_id<MAX_NUM_OF_ROTBONDS+6; gene_id++) {
+      init_populations[entity_id*GENOTYPE_LENGTH_IN_GLOBMEM+gene_id] = r.random_float()*360;
+    }
+  }
+  sans */
+//   printf("sans gen_initpop_and_reflig3\n");fflush(stdout);
   get_movvec_to_origo(myligand, movvec_to_origo);
   double flex_vec[3];
   for (unsigned int i=0; i<3; i++)
     flex_vec [i] = -mygrid->origo_real_xyz [i];
+  // printf("mygrid->origo_real_xyz %f %f %f mygrid->spacing %f\n", mygrid->origo_real_xyz[0], mygrid->origo_real_xyz[1], mygrid->origo_real_xyz[2], mygrid->spacing); // sans check12
+  // printf("movvec_to_origo %f %f %f\n", movvec_to_origo[0], movvec_to_origo[1], movvec_to_origo[2]); // sans check12
   move_ligand(myligand, movvec_to_origo, flex_vec);
   scale_ligand(myligand, 1.0/mygrid->spacing);
   get_moving_and_unit_vectors(myligand);
+//   printf("sans gen_initpop_and_refligL\n");fflush(stdout);
 }

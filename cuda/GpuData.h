@@ -104,6 +104,7 @@ typedef struct
   float           adam_beta1;
   float           adam_beta2;
   float           adam_epsilon;
+  // sans ==>
   unsigned long num_of_runs;
   bool  miniCoorOut;
   float negaLigaStepSize;
@@ -118,6 +119,7 @@ typedef struct
   int   maxReservedIdvNum;
   float convergedThre;
   unsigned int topN4rescore;
+  // <== sans
 } GpuDockparameters;
 
 struct GpuData {
@@ -127,6 +129,12 @@ struct GpuData {
   GpuDockparameters               dockpars;
 
   // Consolidated constants and memory pointers to reduce kernel launch overhead
+  /* sans
+  kernelconstant_interintra*      pKerconst_interintra;
+  kernelconstant_intracontrib*    pKerconst_intracontrib;
+  kernelconstant_intra*           pKerconst_intra;
+  sans */
+  // sans ==>
   float    *pKerconst_interintra_atom_charges_const;
   uint32_t *pKerconst_interintra_atom_types_const;
   uint32_t *pKerconst_interintra_atom_types_map_const;
@@ -141,6 +149,13 @@ struct GpuData {
   float              *pKerconst_intra_VWpars_BD_const;
   float              *pKerconst_intra_dspars_S_const;
   float              *pKerconst_intra_dspars_V_const;
+  // <== sans
+  /* sans
+  kernelconstant_rotlist*         pKerconst_rotlist;
+  kernelconstant_conform*         pKerconst_conform;
+  kernelconstant_grads*           pKerconst_grads;
+  sans */
+  // sans ==>
   int  *pKerconst_rotlist_rotlist_const;
   int  *pKerconst_rotlist_rotlist_atomId_const;
   int  *pKerconst_rotlist_rotlist_rotatableBondId_const;
@@ -152,11 +167,16 @@ struct GpuData {
   int *pKerconst_grads_rotbonds;
   int *pKerconst_grads_rotbonds_atoms;
   int *pKerconst_grads_num_rotating_atoms_per_rotbond;
+  // <== sans
   float*                          pMem_fgrids;
-  int                           **pMem_evals_of_new_entities; // [run_num][ndv_num] individual (ndv)
-  int                            *pMem_reservedIdvNum;        // [run_num]
+//   int*                            pMem_evals_of_new_entities; // sans
+  int                           **pMem_evals_of_new_entities; // sans [run_num][ndv_num] individual (ndv)
+  int                            *pMem_reservedIdvNum;        // sans [run_num]
   int*                            pMem_gpu_evals_of_runs;
   uint32_t*                       pMem_prng_states;
+//   int*                            pMem_rotbonds_const; // sans
+//   int*                            pMem_rotbonds_atoms_const; // sans
+//   int*                            pMem_num_rotating_atoms_per_rotbond_const; // sans
   float*                          pMem_angle_const;
   float*                          pMem_dependence_on_theta_const;
   float*                          pMem_dependence_on_rotangle_const;
@@ -168,17 +188,27 @@ struct GpuData {
 
 struct GpuTempData {
   float*      pMem_fgrids;
+  /* sans
+  float*      pMem_conformations1;
+  float*      pMem_conformations2;
+  float*      pMem_energies1;
+  float*      pMem_energies2;
+  int*        pMem_evals_of_new_entities;
+  sans */
+  // sans ==>
   float     **pMem_conformations1;
   float     **pMem_conformations2;
   float     **pMem_energies1;
   float     **pMem_energies2;
-  int       **pMem_energyToConforIndex;   // [run_num][ndv_num] individual (ndv)
-  int       **pMem_evals_of_new_entities; // [run_num][ndv_num] individual (ndv)
-  int        *pMem_reservedIdvNum;        // [run_num]
+  int       **pMem_energyToConforIndex;   // sans [run_num][ndv_num] individual (ndv)
+  int       **pMem_evals_of_new_entities; // sans [run_num][ndv_num] individual (ndv)
+  int        *pMem_reservedIdvNum;        // sans [run_num]
+  // <== sans
   int*        pMem_gpu_evals_of_runs;
   uint32_t*   pMem_prng_states;
   char*       device_name;
   bool        device_busy;
-  float*   gFloatBuff;
+  float*   gFloatBuff; // sans
 };
 #endif
+

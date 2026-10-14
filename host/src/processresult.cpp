@@ -24,6 +24,57 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include <errno.h>
 #include "processresult.h"
 
+// sans ==>
+// void arrange_result(
+//                           float* final_population,
+//                           float* energies,
+//                      Liganddata *myligand_init, // sans
+//                     const int    pop_size
+//                    )
+// // The function arranges the rows of the input array (first array index is considered to be the row
+// // index) according to the sum of [] [38] and [][39] elements, which can be used for arranging the
+// // genotypes of the final population according to the sum of energy values. Genotypes with lower
+// // energies will be placed at lower row indexes. The second parameter must be equal to the size of
+// // the population, the arrangement will be performed only on the first pop_size part of final_population.
+// {
+//   int i,j;
+// //   float temp_genotype[GENOTYPE_LENGTH_IN_GLOBMEM]; // sans
+//   // sans ==>
+//   int genotype_length_in_globmem = myligand_init->num_of_rotbonds + 7;
+//   float *temp_genotype;
+//   temp_genotype = (float *) malloc(genotype_length_in_globmem * sizeof(float));
+//   if(temp_genotype == NULL)
+//   {
+//     printf("ERROR: Cannot allocate memory for temp_genotype of arrange_result() on main memory.\n");
+//     exit(1);
+//   }
+//   // <== sans
+//   float temp_energy;
+// 
+//   for (j=0; j<pop_size-1; j++)
+//     for (i=pop_size-2; i>=j; i--) // arrange according to sum of inter- and intramolecular energies
+//       if (energies[i] > energies[i+1])
+//       {
+//         /* sans
+//         memcpy(temp_genotype, final_population+i*GENOTYPE_LENGTH_IN_GLOBMEM, GENOTYPE_LENGTH_IN_GLOBMEM*sizeof(float));
+//         memcpy(final_population+i*GENOTYPE_LENGTH_IN_GLOBMEM, final_population+(i+1)*GENOTYPE_LENGTH_IN_GLOBMEM, GENOTYPE_LENGTH_IN_GLOBMEM*sizeof(float));
+//         memcpy(final_population+(i+1)*GENOTYPE_LENGTH_IN_GLOBMEM, temp_genotype, GENOTYPE_LENGTH_IN_GLOBMEM*sizeof(float));
+//         sans */
+//         // sans ==>
+//         memcpy(temp_genotype, final_population+i*genotype_length_in_globmem, genotype_length_in_globmem*sizeof(float));
+//         memcpy(final_population+i*genotype_length_in_globmem, final_population+(i+1)*genotype_length_in_globmem, genotype_length_in_globmem*sizeof(float));
+//         memcpy(final_population+(i+1)*genotype_length_in_globmem, temp_genotype, genotype_length_in_globmem*sizeof(float));
+//         // <== sans
+// 
+//         temp_energy = energies[i];
+//         energies[i] = energies[i+1];
+//         energies[i+1] = temp_energy;
+//       }
+// 
+//   free(temp_genotype); // sans
+// }
+// <== sans
+
 
 void write_basic_info(
                             FILE*       fp,
@@ -302,7 +353,8 @@ void make_resfiles(
                    const Liganddata*   ligand_xray,
                    const Dockpars*     mypars,
                          int           evals_performed,
-                         mpz_t         generations_used,
+//                          int           generations_used, // sans
+                         mpz_t         generations_used, // sans
                    const Gridinfo*     mygrid,
                    const int*          argc,
                          char**        argv,
@@ -320,19 +372,28 @@ void make_resfiles(
 // be moved and rotated according to the genotype values). The function returns some information about the best result wich
 // was found with the best_result parameter.
 {
+// printf("sans make_resfiles S\n");fflush(stdout);
   FILE* fp = stdout; // takes care of compile warning down below (and serves as a visual bug tracker in case fp is written to accidentally)
   int i,j;
   double entity_rmsds;
+  /* sans
+  double init_atom_idxyzq[MAX_NUM_OF_ATOMS][5]; // type id .. 0, x .. 1, y .. 2, z .. 3, q ... 4
+  memcpy(init_atom_idxyzq, ligand_ref->atom_idxyzq, sizeof(ligand_ref->atom_idxyzq));
+  sans */
+  // sans ==>
   char    *mpz_str;
   double **init_atom_idxyzq;
-  init_atom_idxyzq = (double **) malloc(ligand_ref->num_of_atoms * sizeof(double *));
+//   init_atom_idxyzq = (double **) malloc(MAX_NUM_OF_ATOMS * sizeof(double *)); // sans
+  init_atom_idxyzq = (double **) malloc(ligand_ref->num_of_atoms * sizeof(double *)); // sans
   if(init_atom_idxyzq == NULL)
   {
     printf("ERROR: Cannot allocate memory for init_atom_idxyzq of make_resfiles() on main memory.\n");
     exit(1);
   }
   size_t idxyzq_size = 5 * sizeof(double);
-  for(i = 0; i < ligand_ref->num_of_atoms; i++)
+// printf("sans make_resfiles 1\n");fflush(stdout);
+//   for(i = 0; i < MAX_NUM_OF_ATOMS; i++) // sans
+  for(i = 0; i < ligand_ref->num_of_atoms; i++) // sans
   {
     init_atom_idxyzq[i] = (double *) malloc(idxyzq_size);
     if(init_atom_idxyzq[i] == NULL)
@@ -342,6 +403,7 @@ void make_resfiles(
     }
     memcpy(init_atom_idxyzq[i], ligand_ref->atom_idxyzq[i], idxyzq_size);
   }
+  // <== sans
   int len = strlen(mypars->ligandfile) - 6 + 24 + 10 + 10; // length with added bits for things below (numbers below 11 digits should be a safe enough threshold)
   char* temp_filename = (char*)malloc((len+1)*sizeof(char)); // +\0 at the end
   char* name_ext_start;
@@ -350,6 +412,9 @@ void make_resfiles(
   float accurate_intraE;
   float accurate_interflexE;
 
+// printf("sans make_resfiles 2\n");fflush(stdout);
+  // int pop_size = mypars->pop_size; // sans
+  // sans ==>
   int rescorePopSize;
   if(mypars->num_of_runs > 1)
   {
@@ -368,6 +433,7 @@ void make_resfiles(
 
   sprintf(temp_filename, "final_population_run%d.txt", run_cnt+1);
   
+// printf("sans make_resfiles 3\n");fflush(stdout);
   if (mypars->gen_finalpop) // if final population files are not required, no file will be opened.
   {
     fp = fopen(temp_filename, "w");
@@ -381,9 +447,12 @@ void make_resfiles(
     fprintf(fp, "           COUNTER STATES           \n");
     fprintf(fp, "===================================\n\n");
     fprintf(fp, "Number of energy evaluations performed:    %d\n", evals_performed);
+//     fprintf(fp, "Number of generations used:                %d\n", generations_used); // sans
+    // sans ==>
     mpz_str = mpz_get_str(NULL, 10, generations_used);
     fprintf(fp, "Number of generations used:                %s\n", mpz_str);
     free(mpz_str);
+    // <== sans
     fprintf(fp, "\n\n");
     fprintf(fp, "     STATE OF FINAL POPULATION     \n");
     fprintf(fp, "===================================\n\n");
@@ -404,6 +473,7 @@ void make_resfiles(
   strcpy(temp_filename, mypars->ligandfile);
   name_ext_start = temp_filename + strlen(mypars->ligandfile) - 6; // without .pdbqt
   
+// printf("sans make_resfiles 4\n");fflush(stdout);
   bool rmsd_valid = true;
   if (mypars->given_xrayligandfile == true) {
     if(!((ligand_xray->num_of_atoms == ligand_ref->num_of_atoms) || (ligand_xray->num_of_atoms == ligand_ref->true_ligand_atoms))){
@@ -418,22 +488,33 @@ void make_resfiles(
     }
   }
 
-  int actual_genotype_length = ligand_ref->num_of_rotbonds + 6;
-  int genotype_length_in_globmem = actual_genotype_length + 1;
-  printf("  Pose serial:");
-  for(i = 0; i < rescorePopSize; i++)
+// printf("sans make_resfiles 5\n");fflush(stdout);
+  int actual_genotype_length = ligand_ref->num_of_rotbonds + 6; // sans
+  int genotype_length_in_globmem = actual_genotype_length + 1;      // sans
+  printf("  Pose serial:"); // sans
+  // for (i=0; i<pop_size; i++) // sans
+  for(i = 0; i < rescorePopSize; i++) // sans
   {
+// printf("sans make_resfiles 5-1\n");fflush(stdout);
     printf(" [%d]", i+1);fflush(stdout);
     // start from original coordinates
-    
-    for(int atomI = 0; atomI < ligand_ref->num_of_atoms; atomI++)
+//     memcpy(ligand_ref->atom_idxyzq, init_atom_idxyzq, sizeof(ligand_ref->atom_idxyzq)); // sans
+
+// printf("sans make_resfiles 5-2\n");fflush(stdout);
+//     for(int i = 0; i < MAX_NUM_OF_ATOMS; i++) // sans
+    // sans ==>
+    for(int atomI = 0; atomI < ligand_ref->num_of_atoms; atomI++) // sans
     {
       memcpy(ligand_ref->atom_idxyzq[atomI], init_atom_idxyzq[atomI], idxyzq_size);
     }
+    // <== sans
 
-    if(mypars->xml2dlg)
-    {
+// printf("sans make_resfiles 5-3\n");fflush(stdout);
+    if(mypars->xml2dlg){
+// printf("sans make_resfiles 5-3-1-1\n");fflush(stdout);
       double axisangle[4];
+//       double genotype [GENOTYPE_LENGTH_IN_GLOBMEM]; // sans
+      // sans ==>
       double *genotype;
       genotype = (double *) malloc(genotype_length_in_globmem * sizeof(double));
       if(genotype == NULL)
@@ -441,40 +522,60 @@ void make_resfiles(
         printf("ERROR: Cannot allocate memory for genotype of make_resfiles() on main memory.\n");
         exit(1);
       }
+      // <== sans
       
-      for (int j=0; j<actual_genotype_length; j++)
+// printf("sans make_resfiles 5-3-1-2\n");fflush(stdout);
+//       for (unsigned int j=0; j<actual_genotype_length; j++)
+      for (int j=0; j<actual_genotype_length; j++) // sans
       {
-        genotype [j] = (final_population+i*genotype_length_in_globmem)[j];
+//         genotype [j] = (final_population+i*GENOTYPE_LENGTH_IN_GLOBMEM)[j]; // sans
+        genotype [j] = (final_population+i*genotype_length_in_globmem)[j]; // sans
       }
-      genotype[genotype_length_in_globmem-1] = (final_population+i*genotype_length_in_globmem)[genotype_length_in_globmem-1];
+// printf("sans make_resfiles 5-3-1-3\n");fflush(stdout);
+//       genotype[GENOTYPE_LENGTH_IN_GLOBMEM-1] = (final_population+i*GENOTYPE_LENGTH_IN_GLOBMEM)[GENOTYPE_LENGTH_IN_GLOBMEM-1]; // sans
+      genotype[genotype_length_in_globmem-1] = (final_population+i*genotype_length_in_globmem)[genotype_length_in_globmem-1]; // sans
       axisangle[0] = genotype[3];
       axisangle[1] = genotype[4];
       axisangle[2] = genotype[5];
-      axisangle[3] = genotype[genotype_length_in_globmem-1];
+//       axisangle[3] = genotype[GENOTYPE_LENGTH_IN_GLOBMEM-1]; // sans
+      axisangle[3] = genotype[genotype_length_in_globmem-1]; // sans
       change_conform(ligand_ref, mygrid, genotype, axisangle, debug);
       free(genotype);
-    }
-    else
-    {
-      change_conform_f(ligand_ref, mygrid, final_population+i*genotype_length_in_globmem, debug);
+// printf("sans make_resfiles 5-3-1-4\n");fflush(stdout);
+    } else{ 
+// printf("sans make_resfiles 5-3-2-1\n");fflush(stdout);
+//       change_conform_f(ligand_ref, mygrid, final_population+i*GENOTYPE_LENGTH_IN_GLOBMEM, debug); // sans
+      change_conform_f(ligand_ref, mygrid, final_population+i*genotype_length_in_globmem, debug); // sans
     }
     
-    if(mypars->num_of_runs > 1)
+// printf("sans make_resfiles 5-4\n");fflush(stdout);
+    if(mypars->num_of_runs > 1) // sans
     {
       // the map interaction of flex res atoms is stored in accurate_intraflexE
       if (i == 0)
       {
+// printf("sans make_resfiles 5-4-1-1\n");fflush(stdout);
+// printf("debug :%d\n",debug);fflush(stdout);
+// printf("accurate_intraflexE :%f\n",accurate_intraflexE);fflush(stdout);
+// printf("best_result->interE_elec :%f\n",best_result->interE_elec);fflush(stdout);
+// printf("best_result->peratom_vdw[0] :%f\n",best_result->peratom_vdw[0]);fflush(stdout);
+// printf("best_result->peratom_elec[0] :%f\n",best_result->peratom_elec[0]);fflush(stdout);
         accurate_interE = calc_interE_f(mygrid, ligand_ref, mypars->ligandOnly, mypars->cautionOn, mypars->shakingRadius, best_result->shakingGridE, 0.0005, debug, accurate_intraflexE, &(best_result->interE_elec), best_result->peratom_vdw, best_result->peratom_elec); // calculate intermolecular and per atom energies
+// printf("sans make_resfiles 5-4-1-2\n");fflush(stdout);
       }
       else
       {
-        accurate_interE = calc_interE_f(mygrid, ligand_ref, mypars->ligandOnly, mypars->cautionOn, mypars->shakingRadius, best_result->shakingGridE, 0.0005, debug, accurate_intraflexE); // calculating the intermolecular energy
+        // printf("sans make_resfiles 5-4-2-1\n");fflush(stdout);
+        accurate_interE = calc_interE_f(mygrid, ligand_ref, mypars->ligandOnly, mypars->cautionOn, mypars->shakingRadius, best_result->shakingGridE, 0.0005, debug, accurate_intraflexE); // calculating the intermolecular energy 
+        // printf("sans make_resfiles 5-4-2-2\n");fflush(stdout);
       }
       
+// printf("sans make_resfiles 5-5\n");fflush(stdout);
       if (mypars->contact_analysis && (i==0)){
         best_result->analysis = analyze_ligand_receptor(mygrid, ligand_ref, mypars->receptor_atoms.data(), mypars->receptor_map, mypars->receptor_map_list, 0.0005, debug, mypars->H_cutoff, mypars->V_cutoff);
       }
     }
+    // sans ==>
     else if(mypars->num_of_runs == 1)
     {
       accurate_interE = calc_interE_f(mygrid, ligand_ref, mypars->ligandOnly, mypars->cautionOn, mypars->shakingRadius, best_result[i].shakingGridE, 0.0005, debug, accurate_intraflexE, &(best_result[i].interE_elec), best_result[i].peratom_vdw, best_result[i].peratom_elec); // calculate intermolecular and per atom energies
@@ -488,10 +589,12 @@ void make_resfiles(
       printf("ERROR: Bug? mypars->num_of_runs (%d) is not larger than zero!?\n", mypars->num_of_runs);
       exit(1);
     }
+    // <== sans
 
     scale_ligand(ligand_ref, mygrid->spacing);
 
-    if(mypars->num_of_runs > 1)
+// printf("sans make_resfiles 5-6\n");fflush(stdout);
+    if(mypars->num_of_runs > 1) // sans
     {
       // the interaction between flex res and ligand is stored in accurate_interflexE
       if(mypars->contact_analysis && (i==0))
@@ -517,16 +620,19 @@ void make_resfiles(
       // copying best result to output parameter
       if (i == 0) // assuming this is the best one (final_population is arranged), however, the
       {           // arrangement was made according to the inaccurate values calculated by FPGA
-        best_result->genotype = final_population+i*genotype_length_in_globmem;
+        best_result->genotype = final_population+i*genotype_length_in_globmem; // sans
         best_result->interE = accurate_interE;
         best_result->interflexE = accurate_interflexE;
         best_result->intraE = accurate_intraE;
         best_result->intraflexE = accurate_intraflexE;
-        calcEntropy(best_result, mygrid, mypars, ligand_ref);
+        calcEntropy(best_result, mygrid, mypars, ligand_ref); // sans
+//         memcpy(best_result->atom_idxyzq, ligand_ref->atom_idxyzq, sizeof(ligand_ref->atom_idxyzq)); // sans
+        // sans ==>
         for(int i = 0; i < ligand_ref->num_of_atoms; i++)
         {
           memcpy(best_result->atom_idxyzq[i], ligand_ref->atom_idxyzq[i], 5 * sizeof(double));
         }
+        // <== sans
         best_result->rmsd_from_ref = entity_rmsds;
         best_result->run_number = run_cnt+1;
         if(mypars->contact_analysis){
@@ -538,6 +644,7 @@ void make_resfiles(
         }
       }
     }
+    // sans ==>
     else if(mypars->num_of_runs == 1)
     {
       if(mypars->contact_analysis)
@@ -563,15 +670,17 @@ void make_resfiles(
       best_result[i].interflexE = accurate_interflexE;
       best_result[i].intraE = accurate_intraE;
       best_result[i].intraflexE = accurate_intraflexE;
-      calcEntropy(best_result + i, mygrid, mypars, ligand_ref);
+      calcEntropy(best_result + i, mygrid, mypars, ligand_ref); // sans
+      // sans ==>
       for(int j = 0; j < ligand_ref->num_of_atoms; j++)
       {
         memcpy(best_result[i].atom_idxyzq[j], ligand_ref->atom_idxyzq[j], 5 * sizeof(double));
       }
+      // <== sans
       best_result[i].rmsd_from_ref = entity_rmsds;
       best_result[i].run_number = run_cnt+1;
       if(mypars->contact_analysis){
-        // sort by analysis type
+        // sort by analysis type // sans this should be unesserary
         for(unsigned int j=0; j<best_result[i].analysis.size(); j++)
           for(unsigned int k=0; k<best_result[i].analysis.size()-j-1; k++)
             if(best_result[i].analysis[k].type>best_result[i].analysis[k+1].type) // percolate larger types numbers up
@@ -583,23 +692,106 @@ void make_resfiles(
       printf("ERROR: Bug? mypars->num_of_runs (%d) is not larger than zero!?\n", mypars->num_of_runs);
       exit(1);
     }
-    
+    // <== sans
+// printf("sans make_resfiles 5-7\n");fflush(stdout);
+
+// printf("sans make_resfiles 5-8\n");fflush(stdout);
+//     if(mypars->num_of_runs > 1) // sans
+//     {
+//       // copying best result to output parameter
+//       if (i == 0) // assuming this is the best one (final_population is arranged), however, the
+//       {           // arrangement was made according to the inaccurate values calculated by FPGA
+//         best_result->genotype = final_population+i*genotype_length_in_globmem; // sans
+//         best_result->interE = accurate_interE;
+//         best_result->interflexE = accurate_interflexE;
+//         best_result->intraE = accurate_intraE;
+//         best_result->intraflexE = accurate_intraflexE;
+//         calcEntropy(best_result, mygrid, mypars, ligand_ref); // sans
+// //         memcpy(best_result->atom_idxyzq, ligand_ref->atom_idxyzq, sizeof(ligand_ref->atom_idxyzq)); // sans
+//         // sans ==>
+//         for(int i = 0; i < ligand_ref->num_of_atoms; i++)
+//         {
+//           memcpy(best_result->atom_idxyzq[i], ligand_ref->atom_idxyzq[i], 5 * sizeof(double));
+//         }
+//         // <== sans
+//         best_result->rmsd_from_ref = entity_rmsds;
+//         best_result->run_number = run_cnt+1;
+//         if(mypars->contact_analysis){
+//           // sort by analysis type
+//           for(unsigned int j=0; j<best_result->analysis.size(); j++)
+//             for(unsigned int k=0; k<best_result->analysis.size()-j-1; k++)
+//               if(best_result->analysis[k].type>best_result->analysis[k+1].type) // percolate larger types numbers up
+//                 std::swap(best_result->analysis[k], best_result->analysis[k+1]);
+//         }
+//       }
+//     }
+//     // sans ==>
+//     else if(mypars->num_of_runs == 1)
+//     {
+//       // if (i == 0) // assuming this is the best one (final_population is arranged), however, the
+//       // {           // arrangement was made according to the inaccurate values calculated by FPGA
+//         best_result[i].genotype = final_population+i*genotype_length_in_globmem;
+//         best_result[i].interE = accurate_interE;
+//         best_result[i].interflexE = accurate_interflexE;
+//         best_result[i].intraE = accurate_intraE;
+//         best_result[i].intraflexE = accurate_intraflexE;
+//         calcEntropy(best_result + i, mygrid, mypars, ligand_ref); // sans
+//         // sans ==>
+//         for(int j = 0; j < ligand_ref->num_of_atoms; j++)
+//         {
+//           memcpy(best_result[i].atom_idxyzq[j], ligand_ref->atom_idxyzq[j], 5 * sizeof(double));
+//         }
+//         // <== sans
+//         best_result[i].rmsd_from_ref = entity_rmsds;
+//         best_result[i].run_number = run_cnt+1;
+//         if(mypars->contact_analysis){
+//           // sort by analysis type // sans this should be unesserary
+//           for(unsigned int j=0; j<best_result[i].analysis.size(); j++)
+//             for(unsigned int k=0; k<best_result[i].analysis.size()-j-1; k++)
+//               if(best_result[i].analysis[k].type>best_result[i].analysis[k+1].type) // percolate larger types numbers up
+//                 std::swap(best_result[i].analysis[k], best_result[i].analysis[k+1]);
+//         }
+//       // }
+//     }
+//     else
+//     {
+//       printf("ERROR: Bug? mypars->num_of_runs (%d) is not larger than zero!?\n", mypars->num_of_runs);
+//       exit(1);
+//     }
+//     // <== sans
+
+// printf("sans make_resfiles 5-9\n");fflush(stdout);
+    // generating best.pdbqt
+    /* sans
+    if (i == 0)
+      if (best_energy_of_all > accurate_interE + accurate_intraE)
+      {
+        best_energy_of_all = accurate_interE + accurate_intraE;
+
+        if (mypars->gen_best)
+          gen_new_pdbfile(mypars->ligandfile, "best.pdbqt", ligand_ref);
+      }
+    sans */
+
     if (i < mypars->gen_pdbs) //if it is necessary, making new pdbqts for best entities
     {
       sprintf(name_ext_start, "_docked_run%d_entity%d.pdbqt", run_cnt+1, i+1); //name will be <original pdb filename>_docked_<number starting from 1>.pdb
       gen_new_pdbfile(mypars->ligandfile, temp_filename, ligand_ref);
     }
+// printf("sans make_resfiles 5-10\n");fflush(stdout);
     if (mypars->gen_finalpop)
     {
       fprintf(fp, "  %3d   |", i+1);
 
       for (j=0; j<3; j++)
       {
-        fprintf(fp, "    %10.3f    |", final_population [i*genotype_length_in_globmem+j]*(mygrid->spacing));
+//         fprintf(fp, "    %10.3f    |", final_population [i*GENOTYPE_LENGTH_IN_GLOBMEM+j]*(mygrid->spacing)); // sans
+        fprintf(fp, "    %10.3f    |", final_population [i*genotype_length_in_globmem+j]*(mygrid->spacing)); // sans
       }
       for (j=3; j<6+ligand_from_pdb->num_of_rotbonds; j++)
       {
-        fprintf(fp, "    %10.3f    |", final_population [i*genotype_length_in_globmem+j]);
+//         fprintf(fp, "    %10.3f    |", final_population [i*GENOTYPE_LENGTH_IN_GLOBMEM+j]); // sans
+        fprintf(fp, "    %10.3f    |", final_population [i*genotype_length_in_globmem+j]); // sans
       }
 
       fprintf(fp, " %21.3f |", accurate_intraE);
@@ -608,21 +800,31 @@ void make_resfiles(
 
       fprintf(fp, " %8.3lf | \n", entity_rmsds);
     }
+// printf("sans make_resfiles 5-11\n");fflush(stdout);
     if(mypars->num_of_runs > 1 && mypars->savetime) break;
   }
-  printf("\n\n");fflush(stdout);
+  printf("\n\n");fflush(stdout); // sans
   
+// printf("sans make_resfiles 6\n");fflush(stdout);
+  // need to restore ligand_ref to original coordinates before we leave
+//   memcpy(ligand_ref->atom_idxyzq, init_atom_idxyzq, sizeof(ligand_ref->atom_idxyzq)); // sans
+  // sans ==>
   for(i = 0; i < ligand_ref->num_of_atoms; i++)
   {
     memcpy(ligand_ref->atom_idxyzq[i], init_atom_idxyzq[i], idxyzq_size);
   }
+  // <== sans
+// printf("sans make_resfiles 7\n");fflush(stdout);
   if (mypars->gen_finalpop) fclose(fp);
   free(temp_filename);
+  // sans ==>
   for(i = 0; i < ligand_ref->num_of_atoms; i++)
   {
     free(init_atom_idxyzq[i]);
   }
   free(init_atom_idxyzq);
+  // <== sans
+// printf("sans make_resfiles L\n");fflush(stdout);
 }
 
 void ligand_calc_output(
@@ -636,8 +838,10 @@ void ligand_calc_output(
                               bool          output_energy
                        )
 {
-  if(output_analysis || output_energy)
+// printf("sans ligand_calc_output-1\n");fflush(stdout);
+  if(output_analysis || output_energy) // sans
   {
+    // sans ==>
     Liganddata *calc_lig;
     calc_lig = (Liganddata *) malloc(sizeof(Liganddata));
     if(calc_lig == NULL)
@@ -647,7 +851,10 @@ void ligand_calc_output(
     }
     LiganddataCopy(calc_lig, ligand);
 
+    // <== sans
+// printf("sans ligand_calc_output-2\n");fflush(stdout);
     Ligandresult calc;
+    // sans ==>
     calc.atom_idxyzq = (double **) malloc(ligand->num_of_atoms * sizeof(double *));
     if(calc.atom_idxyzq == NULL)
     {
@@ -685,23 +892,26 @@ void ligand_calc_output(
       printf("ERROR: Cannot allocate memory for calc.peratom_elec\n");
       exit(1);
     }
+    // <== sans
+// printf("sans ligand_calc_output-3\n");fflush(stdout);
     double orig_vec[3];
     for (unsigned int i=0; i<3; i++)
       orig_vec [i] = -mygrid->origo_real_xyz [i];
-    move_ligand(/*&*/calc_lig, orig_vec, orig_vec);
-    scale_ligand(/*&*/calc_lig, 1.0/mygrid->spacing);
-    calc.interE = calc_interE_f(mygrid, /*&*/calc_lig, mypars->ligandOnly, mypars->cautionOn, mypars->shakingRadius, calc.shakingGridE, 0.0005, 0, calc.intraflexE, &(calc.interE_elec), calc.peratom_vdw, calc.peratom_elec);
+    move_ligand(/*&*/calc_lig, orig_vec, orig_vec); //moving it according to grid location // sans
+    scale_ligand(/*&*/calc_lig, 1.0/mygrid->spacing); // sans
+    calc.interE = calc_interE_f(mygrid, /*&*/calc_lig, mypars->ligandOnly, mypars->cautionOn, mypars->shakingRadius, calc.shakingGridE, 0.0005, 0, calc.intraflexE, &(calc.interE_elec), calc.peratom_vdw, calc.peratom_elec); // calculate intermolecular and per atom energies // sans
     if (output_analysis){
-      calc.analysis = analyze_ligand_receptor(mygrid, /*&*/calc_lig, mypars->receptor_atoms.data(), mypars->receptor_map, mypars->receptor_map_list, 0.0005, 0, mypars->H_cutoff, mypars->V_cutoff);
+      calc.analysis = analyze_ligand_receptor(mygrid, /*&*/calc_lig, mypars->receptor_atoms.data(), mypars->receptor_map, mypars->receptor_map_list, 0.0005, 0, mypars->H_cutoff, mypars->V_cutoff); // sans
     }
-    scale_ligand(/*&*/calc_lig, mygrid->spacing);
+    scale_ligand(/*&*/calc_lig, mygrid->spacing); // sans
     // the interaction between flex res and ligand is stored in accurate_interflexE
     if(output_analysis)
-      calc.intraE = calc_intraE_f(/*&*/calc_lig, mygrid, mypars->shakingRadius, calc.shakingGridE, calc.shakingGridEL, 8, mypars->smooth, 0, mypars->elec_min_distance, tables, 0, calc.interflexE, &(calc.analysis), mypars->receptor_atoms.data() + mypars->nr_receptor_atoms, mypars->R_cutoff, mypars->H_cutoff, mypars->V_cutoff);
+      calc.intraE = calc_intraE_f(/*&*/calc_lig, mygrid, mypars->shakingRadius, calc.shakingGridE, calc.shakingGridEL, 8, mypars->smooth, 0, mypars->elec_min_distance, tables, 0, calc.interflexE, &(calc.analysis), mypars->receptor_atoms.data() + mypars->nr_receptor_atoms, mypars->R_cutoff, mypars->H_cutoff, mypars->V_cutoff); // sans
     else
-      calc.intraE = calc_intraE_f(/*&*/calc_lig, mygrid, mypars->shakingRadius, calc.shakingGridE, calc.shakingGridEL, 8, mypars->smooth, 0, mypars->elec_min_distance, tables, 0, calc.interflexE);
-    move_ligand(/*&*/calc_lig, mygrid->origo_real_xyz, mygrid->origo_real_xyz); //moving it according to grid location
-    calcEntropy(&calc, mygrid, mypars, calc_lig);
+      calc.intraE = calc_intraE_f(/*&*/calc_lig, mygrid, mypars->shakingRadius, calc.shakingGridE, calc.shakingGridEL, 8, mypars->smooth, 0, mypars->elec_min_distance, tables, 0, calc.interflexE); // sans
+    move_ligand(/*&*/calc_lig, mygrid->origo_real_xyz, mygrid->origo_real_xyz); //moving it according to grid location // sans
+// printf("sans ligand_calc_output-4\n");fflush(stdout);
+    calcEntropy(&calc, mygrid, mypars, calc_lig); // sans
     
     if (output_analysis){
       // sort by analysis type
@@ -759,9 +969,17 @@ void ligand_calc_output(
       }
     }
     if(output_energy){
+      // double torsional_energy = mypars->coeffs.AD4_coeff_tors * calc_lig.true_ligand_rotbonds; // sans
+      // sans ==>
       fprintf(fp, "%s    Estimated Free Energy of Binding (bad) =", prefix);
       PRINT1000(fp, ((float) (calc.interE + calc.interflexE + calc.intraE + calc.intraflexE + calc.nts)));
       fprintf(fp, " kcal/mol  [=(1)+(2)+(3)]\n");
+      // <== sans
+      /* sans
+      fprintf(fp, "%s    Estimated Free Energy of Binding    =", prefix);
+      PRINT1000(fp, ((float) (calc.interE + calc.interflexE + torsional_energy)));
+      fprintf(fp, " kcal/mol  [=(1)+(2)+(3)-(4)]\n");
+      sans */
       fprintf(fp, "%s\n", prefix);
       fprintf(fp, "%s    (1) Final Intermolecular Energy     =", prefix);
       PRINT1000(fp, ((float) (calc.interE + calc.interflexE)));
@@ -781,18 +999,27 @@ void ligand_calc_output(
       fprintf(fp, "%s    (2) Final Total Internal Energy     =", prefix);
       PRINT1000(fp, ((float) (calc.intraE + calc.intraflexE)));
       fprintf(fp, " kcal/mol\n");
+      /* sans
+      fprintf(fp, "%s    (3) Torsional Free Energy           =", prefix);
+      PRINT1000(fp, ((float) torsional_energy));
+      sans */
+      // sans ==>
       fprintf(fp, "%s    (1)+(2) Enthalpy of Free Energy     =", prefix);
       PRINT1000(fp, ((float) (calc.interE + calc.interflexE + calc.intraE + calc.intraflexE)));
       fprintf(fp, " kcal/mol\n");
       fprintf(fp, "%s    (3) -TS of Free Energy              =", prefix);
       PRINT1000(fp, ((float) calc.nts));
+      // <== sans
       fprintf(fp, " kcal/mol\n");
       fprintf(fp, "%s    (4) Unbound System's Energy         =", prefix);
-      PRINT1000(fp, ((float) (calc.intraE + calc.intraflexE + calc.ntsL)));
+      // PRINT1000(fp, ((float) (calc.intraE + calc.intraflexE))); // sans
+      PRINT1000(fp, ((float) (calc.intraE + calc.intraflexE + calc.ntsL))); // sans
       fprintf(fp, " kcal/mol\n");
       fprintf(fp, "%s\n", prefix);
     }
+    // sans ==>
     LiganddataFree(calc_lig);
+// printf("sans ligand_calc_output-5\n");fflush(stdout);
     
     for(int i = 0; i < ligand->num_of_atoms; i++)
     {
@@ -803,11 +1030,14 @@ void ligand_calc_output(
     free(calc.shakingGridE);
     free(calc.peratom_vdw);
     free(calc.peratom_elec);
-  }
+    // <== sans
+  } // sans End of if(output_analysis || output_energy
+// printf("sans ligand_calc_output-L\n");fflush(stdout);
 }
 
 void generate_output(
-                           Ligandresult *myresults,
+//                            Ligandresult  myresults [], // sans
+                           Ligandresult *myresults, // sans
                            int           num_of_runs,
                            IntraTables*  tables,
                            Liganddata*   ligand_ref,
@@ -817,14 +1047,21 @@ void generate_output(
                      const int*          argc,
                            char**        argv,
                      const double        docking_avg_runtime,
+                           /* sans
+                           unsigned long generations_used,
+                           unsigned long evals_performed,
+                           sans */
+                           // sans ==>
                            mpz_t         generations_used,
                            mpz_t         evals_performed,
+                           // <== sans
                            double        exec_time,
                            double        idle_time
                     )
 // The function performs ranked cluster analysis similar to that of AutoDock and creates a file with report_file_name name, the result
 // will be written to it.
 {
+// printf("sans generate_output1\n");fflush(stdout);
   int i, j, atom_cnt;
   int num_of_clusters = 0;
   int current_clust_center;
@@ -833,6 +1070,14 @@ void generate_output(
   int subrank;
   FILE* fp = stdout;
   FILE* fp_xml;
+  /* sans
+  int cluster_sizes [1000];
+  double sum_energy [1000];
+  double best_energy [1000];
+  int best_energy_runid [1000];
+  char tempstr [256];
+  sans */
+  // sans ==>
   char   *mpz_str;
   int    *cluster_sizes;
   double *sum_energy;
@@ -866,6 +1111,8 @@ void generate_output(
   char fileName4bestN[512];
   char **bestPdbqt;
   char **bestPdb;
+  // <== sans
+// printf("sans generate_output2\n");fflush(stdout);
   double cluster_tolerance = mypars->rmsd_tolerance;
 
   // // first of all, let's calculate the constant torsional free energy term
@@ -873,10 +1120,12 @@ void generate_output(
 
   int len = strlen(mypars->resname) + 4 + 1;
 
-  int genotype_length_in_globmem = ligand_ref->num_of_rotbonds + 7;
+  int genotype_length_in_globmem = ligand_ref->num_of_rotbonds + 7; // sans
 
   // GENERATING DLG FILE
+// printf("sans generate_output3\n");fflush(stdout);
   if(mypars->output_dlg){
+// printf("sans generate_output3-1\n");fflush(stdout);
     if(!mypars->dlg2stdout){
       char* report_file_name = (char*)malloc(len*sizeof(char));
       strcpy(report_file_name, mypars->resname);
@@ -895,25 +1144,37 @@ void generate_output(
     if(!mypars->xml2dlg){
       fprintf(fp, "    COUNTER STATES\n");
       fprintf(fp, "    ________________________\n\n\n");
+      /* sans
+      fprintf(fp, "Number of energy evaluations performed:    %lu\n", evals_performed);
+      fprintf(fp, "Number of generations used:                %lu\n", generations_used);
+      sans */
+      // sans ==>
       mpz_str = mpz_get_str(NULL, 10, evals_performed);
       fprintf(fp, "Number of energy evaluations performed:    %s\n", mpz_str);
       free(mpz_str);
       mpz_str = mpz_get_str(NULL, 10, generations_used);
       fprintf(fp, "Number of generations used:                %s\n", mpz_str);
       free(mpz_str);
+      // <== sans
       fprintf(fp, "\n\n");
     }
+// printf("sans generate_output3-2\n");fflush(stdout);
     std::string pdbqt_template;
+    // std::string pdb_template; // sans
     std::vector<unsigned int> atom_data;
-    std::string pdbqt_out;
-    std::string pdb_out;
-    std::vector<unsigned int> pdbqt_out_data;
-    std::vector<unsigned int> pdb_out_data;
+    std::string pdbqt_out; // sans
+    std::string pdb_out; // sans
+    std::vector<unsigned int> pdbqt_out_data; // sans
+    std::vector<unsigned int> pdb_out_data; // sans
+//     char lineout [264]; // sans
+    // sans ==>
     char  *lineout = NULL;
     size_t lineoutSize;
+    // <== sans
     bool output_ref_calcs = mypars->reflig_en_required;
-    if(mypars->given_xrayligandfile)
-    {
+// printf("sans generate_output3-2-1a\n");fflush(stdout);
+    if(mypars->given_xrayligandfile){
+// printf("sans generate_output3-2-1a-1\n");fflush(stdout);
       // writing xray ligand pdbqt file
       fprintf(fp, "    XRAY LIGAND PDBQT FILE:\n");
       fprintf(fp, "    ________________________\n\n\n");
@@ -922,6 +1183,8 @@ void generate_output(
       unsigned int line_count = 0;
       while (line_count < ligand_xray->ligand_line_count)
       {
+//         strcpy(tempstr,ligand_xray->file_content[line_count].c_str()); // sans
+        // sans ==>
         if(tempstr != NULL)
         {
           printf("ERROR: Bug? The tempstr should point to NULL.\n");
@@ -929,20 +1192,29 @@ void generate_output(
         }
         tempstrSize = strlen(ligand_xray->fileData[line_count]) + 1;
         tempstr = (char *) malloc(tempstrSize);
-        strncpy(tempstr, ligand_xray->fileData[line_count], tempstrSize);
+        strncpy(tempstr, ligand_xray->fileData[line_count], tempstrSize); // sans problem ??!!
+        // <== sans
         line_count++;
         fprintf(fp, "XRAY-LIGAND-PDBQT: %s", tempstr);
+        // sans ==>
         free(tempstr);
         tempstr = NULL;
+        // <== sans
       }
       fprintf(fp, "\n\n");
     }
     // writing input pdbqt file
     fprintf(fp, "    INPUT LIGAND PDBQT FILE:\n    ________________________\n\n\n");
+// printf("sans generate_output3-2-1b\n");fflush(stdout);
     ligand_calc_output(fp, "INPUT-LIGAND-PDBQT: USER", tables, ligand_ref, mypars, mygrid, mypars->contact_analysis, output_ref_calcs);
+// printf("sans generate_output3-2-2\n");fflush(stdout);
     unsigned int line_count = 0;
+// printf("sans generate_output3-3\n");fflush(stdout);
     while (line_count < ligand_ref->ligand_line_count)
     {
+// printf("sans generate_output3-3-1\n");fflush(stdout);
+//       strcpy(tempstr,ligand_ref->file_content[line_count].c_str()); // sans
+      // sans ==>
       if(tempstr != NULL)
       {
         printf("ERROR: Bug? The tempstr should point to NULL.\n");
@@ -955,11 +1227,17 @@ void generate_output(
         printf("ERROR: Cannot allocate memory for tempstr.\n");
         exit(1);
       }
-      strncpy(tempstr, ligand_ref->fileData[line_count], tempstrSize);
+      strncpy(tempstr, ligand_ref->fileData[line_count], tempstrSize); // sans problem ??!!
+//       printf("tempstrSize: %zu\n", tempstrSize);
+//       printf("tempstr: %s\n", tempstr);
+      // <== sans
       line_count++;
       fprintf(fp, "INPUT-LIGAND-PDBQT: %s", tempstr);
       if ((strncmp("ATOM", tempstr, 4) == 0) || (strncmp("HETATM", tempstr, 6) == 0))
       {
+// printf("sans generate_output3-3-1-1\n");fflush(stdout);
+//         tempstr[30] = '\0'; // sans
+        // sans ==>
         if(tempstrSize > 30)
         {
           tempstr[30] = '\0';
@@ -977,25 +1255,27 @@ void generate_output(
           printf("ERROR: Cannot allocate memory for lineout.\n");
           exit(1);
         }
+        // <== sans
         pdbqt_out += tempstr;
         pdbqt_out_data.push_back(pdbqt_out.length());
         pdb_out += tempstr;
         pdb_out_data.push_back(pdb_out.length());
+        // <== sans
         sprintf(lineout, "DOCKED: %s", tempstr);
         pdbqt_template += lineout;
         atom_data.push_back(pdbqt_template.length());
-      }
-      else
-      {
+      } else{
+// printf("sans generate_output3-3-1-2\n");fflush(stdout);
         if (strncmp("ROOT", tempstr, 4) == 0)
         {
           pdbqt_template += "DOCKED: USER                              x       y       z     vdW  Elec       q    Type\n";
           pdbqt_template += "DOCKED: USER                           _______ _______ _______ _____ _____    ______ ____\n";
-          pdbqt_out += "USER                              x       y       z     vdW  Elec       q    Type\n";
-          pdbqt_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n";
-          pdb_out += "USER                              x       y       z     vdW  Elec       q    Type\n";
-          pdb_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n";
+          pdbqt_out += "USER                              x       y       z     vdW  Elec       q    Type\n"; // sans
+          pdbqt_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n"; // sans
+          pdb_out += "USER                              x       y       z     vdW  Elec       q    Type\n"; // sans
+          pdb_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n"; // sans
         }
+        // sans ==>
         if(lineout != NULL)
         {
           printf("ERROR: Bug? The lineout should point to NULL.\n");
@@ -1024,22 +1304,31 @@ void generate_output(
             pdb_out += tempstr;
           }
         }
+        // <== sans
         sprintf(lineout, "DOCKED: %s", tempstr);
         pdbqt_template += lineout;
       }
+// printf("sans generate_output3-3-2\n");fflush(stdout);
+      // sans ==>
       free(tempstr);
       tempstr = NULL;
       free(lineout);
       lineout = NULL;
+      // <== sans
+// printf("sans generate_output3-3-3\n");fflush(stdout);
     }
     fprintf(fp, "\n\n");
+//     printf("sans generate_output3-4\n");fflush(stdout);
 
     // writing input flexres pdbqt file if specified
     if (mypars->flexresfile!=NULL) {
       if ( strlen(mypars->flexresfile)>0 ) {
         fprintf(fp, "    INPUT FLEXRES PDBQT FILE:\n    ________________________\n\n\n");
-        while (line_count < ligand_ref->fileDataLineNum)
+//         while (line_count < ligand_ref->file_content.size()) // sans
+        while (line_count < ligand_ref->fileDataLineNum) // sans
         {
+//           strcpy(tempstr,ligand_ref->file_content[line_count].c_str()); // sans
+          // sans ==>
           if(tempstr != NULL)
           {
             printf("ERROR: Bug? The tempstr should point to NULL.\n");
@@ -1052,12 +1341,14 @@ void generate_output(
             printf("ERROR: Cannot allocate memory for tempstr.\n");
             exit(1);
           }
-          strncpy(tempstr, ligand_ref->fileData[line_count], tempstrSize);
+          strncpy(tempstr, ligand_ref->fileData[line_count], tempstrSize); // sans problem ??!!
+          // <== sans
           line_count++;
           fprintf(fp, "INPUT-FLEXRES-PDBQT: %s", tempstr);
           if ((strncmp("ATOM", tempstr, 4) == 0) || (strncmp("HETATM", tempstr, 6) == 0))
           {
             tempstr[30] = '\0';
+            // sans ==>
             if(lineout != NULL)
             {
               printf("ERROR: Bug? The lineout should point to NULL.\n");
@@ -1070,25 +1361,26 @@ void generate_output(
               printf("ERROR: Cannot allocate memory for lineout.\n");
               exit(1);
             }
+            // <== sans
             pdbqt_out += tempstr;
             pdbqt_out_data.push_back(pdbqt_out.length());
             pdb_out += tempstr;
             pdb_out_data.push_back(pdb_out.length());
+            // <== sans
             sprintf(lineout, "DOCKED: %s", tempstr);
             pdbqt_template += lineout;
             atom_data.push_back(pdbqt_template.length());
-          }
-          else
-          {
+          } else{
             if (strncmp("ROOT", tempstr, 4) == 0)
             {
               pdbqt_template += "DOCKED: USER                              x       y       z     vdW  Elec       q    Type\n";
               pdbqt_template += "DOCKED: USER                           _______ _______ _______ _____ _____    ______ ____\n";
-              pdbqt_out += "USER                              x       y       z     vdW  Elec       q    Type\n";
-              pdbqt_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n";
-              pdb_out += "USER                              x       y       z     vdW  Elec       q    Type\n";
-              pdb_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n";
+              pdbqt_out += "USER                              x       y       z     vdW  Elec       q    Type\n"; // sans
+              pdbqt_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n"; // sans
+              pdb_out += "USER                              x       y       z     vdW  Elec       q    Type\n"; // sans
+              pdb_out += "USER                           _______ _______ _______ _____ _____    ______ ____\n"; // sans
             }
+            // sans ==>
             if(lineout != NULL)
             {
               printf("ERROR: Bug? The lineout should point to NULL.\n");
@@ -1117,23 +1409,29 @@ void generate_output(
                 pdb_out += tempstr;
               }
             }
+            // <== sans
             sprintf(lineout, "DOCKED: %s", tempstr);
             pdbqt_template += lineout;
           }
+          // sans ==>
           free(tempstr);
           tempstr = NULL;
           free(lineout);
           lineout = NULL;
+          // <== sans
         }
         fprintf(fp, "\n\n");
       }
     }
+// printf("sans generate_output3-5\n");fflush(stdout);
 
     // writing docked conformations
     std::string curr_model;
+    // sans ==>
     std::string curr_pdbqt;
     std::string curr_pdb;
     if(num_of_runs > 1)
+    // <== sans
     {
       bestPdbqt = (char **) malloc(num_of_runs * sizeof(char*));
       if(bestPdbqt == NULL)
@@ -1147,6 +1445,7 @@ void generate_output(
         printf("ERROR: Cannot allocate enough memory for bestPdb.\n");
         exit(1);
       }
+      // sans ==>
       myresults[0].interE     *= mypars->enthalpyScaling;
       myresults[0].interflexE *= mypars->enthalpyScaling;
       myresults[0].intraE     *= mypars->enthalpyScaling;
@@ -1168,12 +1467,15 @@ void generate_output(
           lowestUnboundG      = UE;
         }
       }
+      // <== sans
       for (i=0; i<num_of_runs; i++)
       {
+//         printf("sans generate_output3-5-1\n");fflush(stdout);
         fprintf(fp, "    FINAL DOCKED STATE:\n    ________________________\n\n\n");
       
         fprintf(fp, "Run:   %d / %lu\n", i+1, mypars->num_of_runs);
         fprintf(fp, "Time taken for this run:   %.3lfs\n\n", docking_avg_runtime);
+// p  rintf("sans generate_output3-5-2\n");fflush(stdout);
         if(mypars->contact_analysis){
           if(myresults[i].analysis.size()>0){
             fprintf(fp, "ANALYSIS: COUNT %lu\n", myresults[i].analysis.size());
@@ -1224,54 +1526,82 @@ void generate_output(
             fprintf(fp, "ANALYSIS: %s}\n\n", chain.c_str());
           }
         }
-        
+//         printf("sans generate_output3-5-3\n");fflush(stdout);
+      
         fprintf(fp, "DOCKED: MODEL        %d\n", i+1);
         fprintf(fp, "DOCKED: USER    Run = %d\n", i+1);
         fprintf(fp, "DOCKED: USER\n");
-        
-        fprintf(fp, "DOCKED: USER    Estimated Free Energy of Binding    =");
+      
 
+        fprintf(fp, "DOCKED: USER    Estimated Free Energy of Binding    =");
+        // PRINT1000(fp, ((float) (myresults[i].interE + myresults[i].interflexE + torsional_energy))); // sans
+        // fprintf(fp, " kcal/mol  [=(1)+(2)+(3)-(4)]\n");
+
+        // sans ==>
         myresults[i].complexG_H   = myresults[i].interE + myresults[i].interflexE + myresults[i].intraE + myresults[i].intraflexE;
         myresults[i].complexG_nts = myresults[i].nts;
         myresults[i].complexG     = myresults[i].complexG_H + myresults[i].complexG_nts;
         PRINT1000(fp, (myresults[i].complexG - lowestUnboundG));
+        // <== sans
         fprintf(fp, "DOCKED: USER                                        = (1)+(2)+(3)-(4)\n");
-        
+      
         fprintf(fp, "DOCKED: USER\n");
-        
+      
         fprintf(fp, "DOCKED: USER    (1) Final Intermolecular Energy     =");
         PRINT1000(fp, ((float) (myresults[i].interE + myresults[i].interflexE)));
-        
+        // fprintf(fp, " kcal/mol\n"); // sans
+      
         fprintf(fp, "DOCKED: USER        vdW + Hbond + desolv Energy     =");
         PRINT1000(fp, ((float) (myresults[i].interE - myresults[i].interE_elec)));
-        
+        // fprintf(fp, " kcal/mol\n"); // sans
+      
         fprintf(fp, "DOCKED: USER        Electrostatic Energy            =");
         PRINT1000(fp, ((float) myresults[i].interE_elec));
-        
+        // fprintf(fp, " kcal/mol\n"); // sans
+      
         fprintf(fp, "DOCKED: USER        Moving Ligand-Fixed Receptor    =");
         PRINT1000(fp, ((float) myresults[i].interE));
-        
+        // fprintf(fp, " kcal/mol\n"); // sans
+      
         fprintf(fp, "DOCKED: USER        Moving Ligand-Moving Receptor   =");
         PRINT1000(fp, ((float) myresults[i].interflexE));
-        
+        // fprintf(fp, " kcal/mol\n"); // sans
+      
         fprintf(fp, "DOCKED: USER    (2) Final Total Internal Energy     =");
         PRINT1000(fp, ((float) (myresults[i].intraE + myresults[i].intraflexE)));
+        // fprintf(fp, " kcal/mol\n"); // sans
         
+        /* sans
+        fprintf(fp, "DOCKED: USER    (3) Torsional Free Energy           =");
+        PRINT1000(fp, ((float) torsional_energy));
+        sans */
+        // sans ==>
         fprintf(fp, "DOCKED: USER    (1)+(2)        Enthalpy of Complex  =");
         PRINT1000(fp, myresults[i].complexG_H);
+        // fprintf(fp, " kcal/mol\n"); // sans
         fprintf(fp, "DOCKED: USER    (3)                 -TS of Complex  =");
         PRINT1000(fp, myresults[i].complexG_nts);
         fprintf(fp, "DOCKED: USER    (1)+(2)+(3) Free Energy of Complex  =");
         PRINT1000(fp, myresults[i].complexG);
-        
+        // <== sans
+        // fprintf(fp, " kcal/mol\n"); // sans
+      
+        /* sans
+        fprintf(fp, "DOCKED: USER    (4) Unbound System's Energy         =");
+        PRINT1000(fp, ((float) (myresults[i].intraE + myresults[i].intraflexE)));
+        sans */
+        // sans ==>
         fprintf(fp, "DOCKED: USER    (4) Lowest Energy of Unbound System =");
         PRINT1000(fp, lowestUnboundG);
         fprintf(fp, "DOCKED: USER             Enthalpy of Unbound System =");
         PRINT1000(fp, lowestUnboundG_H);
         fprintf(fp, "DOCKED: USER                  -TS of Unbound System =");
         PRINT1000(fp, lowestUnboundG_ntsL);
+        // <== sans
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER\n");
+//         printf("sans generate_output3-5-4\n");fflush(stdout);
         if(mypars->xml2dlg || mypars->contact_analysis){
           fprintf(fp, "DOCKED: USER    NEWDPF about 0.0 0.0 0.0\n");
           fprintf(fp, "DOCKED: USER    NEWDPF tran0 %.6f %.6f %.6f\n", myresults[i].genotype[0]*mygrid->spacing, myresults[i].genotype[1]*mygrid->spacing, myresults[i].genotype[2]*mygrid->spacing);
@@ -1286,6 +1616,7 @@ void generate_output(
           fprintf(fp, "\n");
         }
         fprintf(fp, "DOCKED: USER\n");
+// p  rintf("sans generate_output3-5-5\n");fflush(stdout);
         unsigned int lnr=1;
         if ( mypars->flexresfile!=NULL) {
           if ( strlen(mypars->flexresfile)>0 )
@@ -1293,10 +1624,12 @@ void generate_output(
         }
       
         curr_model = pdbqt_template;
-        curr_pdbqt = pdbqt_out;
-        curr_pdb   = pdb_out;
+        curr_pdbqt = pdbqt_out; // sans
+        curr_pdb   = pdb_out; // sans
         // inserting text from the end means prior text positions won't shift
         // so there's less to keep track off ;-)
+//         for(atom_cnt = ligand_ref->num_of_atoms; atom_cnt-->0;) // sans
+        // sans ==>
         if(lineout != NULL)
         {
           printf("ERROR: Bug? The lineout should point to NULL.\n");
@@ -1324,6 +1657,7 @@ void generate_output(
           exit(1);
         }
         for(atom_cnt = ligand_ref->num_of_atoms - 1; atom_cnt >= 0; atom_cnt--)
+        // <== sans
         {
           char* line = lineout;
           line += sprintf(line, "%8.3lf", myresults[i].atom_idxyzq[atom_cnt][1]); // x
@@ -1334,6 +1668,8 @@ void generate_output(
           line += sprintf(line, "    %+6.3lf ", myresults[i].atom_idxyzq[atom_cnt][4]); // q
           line += sprintf(line, "%-2s\n", ligand_ref->atom_types[((int)myresults[i].atom_idxyzq[atom_cnt][0])]); // type
           curr_model.insert(atom_data[atom_cnt],lineout);
+//           printf("sans generate_output3-5-5\n");fflush(stdout);
+          // sans ==>
           line = lineout_pdbqt;
           line += sprintf(line, "%8.3lf", myresults[i].atom_idxyzq[atom_cnt][1]); // x
           line += sprintf(line, "%8.3lf", myresults[i].atom_idxyzq[atom_cnt][2]); // y
@@ -1352,14 +1688,20 @@ void generate_output(
           line += sprintf(line, "    %+6.3lf ", myresults[i].atom_idxyzq[atom_cnt][4]); // q
           line += sprintf(line, "%-6s\n", ligand_ref->atom_types[((int)myresults[i].atom_idxyzq[atom_cnt][0])]); // type
           curr_pdb.insert(pdb_out_data[atom_cnt], lineout_pdb);
+//           printf("sans generate_output3-5-5\n");fflush(stdout);
+          // <== sans
         }
+        // sans ==>
         free(lineout);
         lineout = NULL;
         free(lineout_pdbqt);
         lineout_pdbqt = NULL;
         free(lineout_pdb);
         lineout_pdb = NULL;
+        // <== sans
+//         printf("sans generate_output3-5-6\n");fflush(stdout);
         fprintf(fp, "%s", curr_model.c_str());
+        // sans ==>
         bestPdbqt[i] = (char *) malloc(curr_pdbqt.size() + 1);
         if(bestPdbqt[i] == NULL)
         {
@@ -1375,11 +1717,13 @@ void generate_output(
           exit(1);
         }
         strncpy(bestPdb[i], curr_pdb.c_str(), curr_pdb.size() + 1);
+        // <== sans
         fprintf(fp, "DOCKED: TER\n");
         fprintf(fp, "DOCKED: ENDMDL\n");
         fprintf(fp, "________________________________________________________________________________\n\n\n");
       }
     }
+    // sans ==>
     else if(num_of_runs == 1)
     {
       bestPdbqt = (char **) malloc(mypars->topN4rescore * sizeof(char*));
@@ -1419,10 +1763,12 @@ void generate_output(
       
       for (i=0; i < mypars->topN4rescore; i++)
       {
+// printf("sans generate_output3-5-1\n");fflush(stdout);
         fprintf(fp, "    FINAL DOCKED STATE:\n    ________________________\n\n\n");
       
         fprintf(fp, "TopN:   %d / %lu\n", i+1, mypars->topN4rescore);
         fprintf(fp, "Time taken for this:   %.3lfs\n\n", docking_avg_runtime);
+// printf("sans generate_output3-5-2\n");fflush(stdout);
         if(mypars->contact_analysis){
           if(myresults[i].analysis.size()>0){
             fprintf(fp, "ANALYSIS: COUNT %lu\n", myresults[i].analysis.size());
@@ -1473,54 +1819,81 @@ void generate_output(
             fprintf(fp, "ANALYSIS: %s}\n\n", chain.c_str());
           }
         }
+//         printf("sans generate_output3-5-3\n");fflush(stdout);
       
         fprintf(fp, "DOCKED: MODEL        %d\n", i+1);
         fprintf(fp, "DOCKED: USER    Run = %d\n", i+1);
         fprintf(fp, "DOCKED: USER\n");
       
         fprintf(fp, "DOCKED: USER    Estimated Free Energy of Binding    =");
+        // PRINT1000(fp, ((float) (myresults[i].interE + myresults[i].interflexE + torsional_energy))); // sans
+        // fprintf(fp, " kcal/mol  [=(1)+(2)+(3)-(4)]\n");
         
+        // sans ==>
         myresults[i].complexG_H   = myresults[i].interE + myresults[i].interflexE + myresults[i].intraE + myresults[i].intraflexE;
         myresults[i].complexG_nts = myresults[i].nts;
         myresults[i].complexG     = myresults[i].complexG_H + myresults[i].complexG_nts;
         PRINT1000(fp, (myresults[i].complexG - lowestUnboundG));
+        // <== sans
         fprintf(fp, "DOCKED: USER                                        = (1)+(2)+(3)-(4)\n");
       
         fprintf(fp, "DOCKED: USER\n");
       
         fprintf(fp, "DOCKED: USER    (1) Final Intermolecular Energy     =");
         PRINT1000(fp, ((float) (myresults[i].interE + myresults[i].interflexE)));
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER        vdW + Hbond + desolv Energy     =");
         PRINT1000(fp, ((float) (myresults[i].interE - myresults[i].interE_elec)));
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER        Electrostatic Energy            =");
         PRINT1000(fp, ((float) myresults[i].interE_elec));
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER        Moving Ligand-Fixed Receptor    =");
         PRINT1000(fp, ((float) myresults[i].interE));
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER        Moving Ligand-Moving Receptor   =");
         PRINT1000(fp, ((float) myresults[i].interflexE));
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER    (2) Final Total Internal Energy     =");
         PRINT1000(fp, ((float) (myresults[i].intraE + myresults[i].intraflexE)));
+        // fprintf(fp, " kcal/mol\n"); // sans 
       
+        /* sans
+        fprintf(fp, "DOCKED: USER    (3) Torsional Free Energy           =");
+        PRINT1000(fp, ((float) torsional_energy));
+        sans */
+        // sans ==>
         fprintf(fp, "DOCKED: USER    (1)+(2)        Enthalpy of Complex  =");
         PRINT1000(fp, myresults[i].complexG_H);
+        // fprintf(fp, " kcal/mol\n"); // sans
         fprintf(fp, "DOCKED: USER    (3)                 -TS of Complex  =");
         PRINT1000(fp, myresults[i].complexG_nts);
         fprintf(fp, "DOCKED: USER    (1)+(2)+(3) Free Energy of Complex  =");
         PRINT1000(fp, myresults[i].complexG);
+        // <== sans
+        // fprintf(fp, " kcal/mol\n"); // sans
       
+        /* sans
+        fprintf(fp, "DOCKED: USER    (4) Unbound System's Energy         =");
+        PRINT1000(fp, ((float) (myresults[i].intraE + myresults[i].intraflexE)));
+        sans */
+        // sans ==>
         fprintf(fp, "DOCKED: USER    (4) Lowest Energy of Unbound System =");
         PRINT1000(fp, lowestUnboundG);
         fprintf(fp, "DOCKED: USER             Enthalpy of Unbound System =");
         PRINT1000(fp, lowestUnboundG_H);
         fprintf(fp, "DOCKED: USER                  -TS of Unbound System =");
         PRINT1000(fp, lowestUnboundG_ntsL);
+        // <== sans
+        // fprintf(fp, " kcal/mol\n"); // sans
       
         fprintf(fp, "DOCKED: USER\n");
+//         printf("sans generate_output3-5-4\n");fflush(stdout);
         if(mypars->xml2dlg || mypars->contact_analysis){
           fprintf(fp, "DOCKED: USER    NEWDPF about 0.0 0.0 0.0\n");
           fprintf(fp, "DOCKED: USER    NEWDPF tran0 %.6f %.6f %.6f\n", myresults[i].genotype[0]*mygrid->spacing, myresults[i].genotype[1]*mygrid->spacing, myresults[i].genotype[2]*mygrid->spacing);
@@ -1535,6 +1908,7 @@ void generate_output(
           fprintf(fp, "\n");
         }
         fprintf(fp, "DOCKED: USER\n");
+// p  rintf("sans generate_output3-5-5\n");fflush(stdout);
         unsigned int lnr=1;
         if ( mypars->flexresfile!=NULL) {
           if ( strlen(mypars->flexresfile)>0 )
@@ -1542,10 +1916,12 @@ void generate_output(
         }
       
         curr_model = pdbqt_template;
-        curr_pdbqt = pdbqt_out;
-        curr_pdb   = pdb_out;
+        curr_pdbqt = pdbqt_out; // sans
+        curr_pdb   = pdb_out; // sans
         // inserting text from the end means prior text positions won't shift
         // so there's less to keep track off ;-)
+//         for(atom_cnt = ligand_ref->num_of_atoms; atom_cnt-->0;) // sans
+        // sans ==>
         if(lineout != NULL)
         {
           printf("ERROR: Bug? The lineout should point to NULL.\n");
@@ -1573,6 +1949,7 @@ void generate_output(
           exit(1);
         }
         for(atom_cnt = ligand_ref->num_of_atoms - 1; atom_cnt >= 0; atom_cnt--)
+        // <== sans
         {
           char* line = lineout;
           line += sprintf(line, "%8.3lf", myresults[i].atom_idxyzq[atom_cnt][1]); // x
@@ -1583,6 +1960,8 @@ void generate_output(
           line += sprintf(line, "    %+6.3lf ", myresults[i].atom_idxyzq[atom_cnt][4]); // q
           line += sprintf(line, "%-2s\n", ligand_ref->atom_types[((int)myresults[i].atom_idxyzq[atom_cnt][0])]); // type
           curr_model.insert(atom_data[atom_cnt],lineout);
+//           printf("sans generate_output3-5-5\n");fflush(stdout);
+          // sans ==>
           line = lineout_pdbqt;
           line += sprintf(line, "%8.3lf", myresults[i].atom_idxyzq[atom_cnt][1]); // x
           line += sprintf(line, "%8.3lf", myresults[i].atom_idxyzq[atom_cnt][2]); // y
@@ -1601,14 +1980,20 @@ void generate_output(
           line += sprintf(line, "    %+6.3lf ", myresults[i].atom_idxyzq[atom_cnt][4]); // q
           line += sprintf(line, "%-6s\n", ligand_ref->atom_types[((int)myresults[i].atom_idxyzq[atom_cnt][0])]); // type
           curr_pdb.insert(pdb_out_data[atom_cnt], lineout_pdb);
+//           printf("sans generate_output3-5-5\n");fflush(stdout);
+          // <== sans
         }
+        // sans ==>
         free(lineout);
         lineout = NULL;
         free(lineout_pdbqt);
         lineout_pdbqt = NULL;
         free(lineout_pdb);
         lineout_pdb = NULL;
+        // <== sans
+//         printf("sans generate_output3-5-6\n");fflush(stdout);
         fprintf(fp, "%s", curr_model.c_str());
+        // sans ==>
         bestPdbqt[i] = (char *) malloc(curr_pdbqt.size() + 1);
         if(bestPdbqt[i] == NULL)
         {
@@ -1624,6 +2009,7 @@ void generate_output(
           exit(1);
         }
         strncpy(bestPdb[i], curr_pdb.c_str(), curr_pdb.size() + 1);
+        // <== sans
         fprintf(fp, "DOCKED: TER\n");
         fprintf(fp, "DOCKED: ENDMDL\n");
         fprintf(fp, "________________________________________________________________________________\n\n\n");
@@ -1634,17 +2020,32 @@ void generate_output(
       printf("ERROR: Bug? num_of_runs (%d) is not larger than zero!?\n", num_of_runs);
       exit(1);
     }
+    // <== sans
+//     printf("sans generate_output3-6\n");fflush(stdout);
   }
+// printf("sans generate_output4\n");fflush(stdout);
 
-  if(num_of_runs > 1)
+  if(num_of_runs > 1) // sans
   {
     // arranging results according to energy, myresults [energy_order[0]] will be the best one (with lowest energy)
     std::vector<int> energy_order(num_of_runs);
     std::vector<double> energies(num_of_runs);
     
+    // // sans ==>
+    // lowestUnboundG = myresults[0].intraE + myresults[0].intraflexE + myresults[0].ntsL;
+    // for(i = 1; i < num_of_runs; i++)
+    // {
+    //   float UE = myresults[i].intraE + myresults[i].intraflexE + myresults[i].ntsL;
+    //   if(UE < lowestUnboundG)
+    //   {
+    //     lowestUnboundG = UE;
+    //   }
+    // }
+    // // <== sans
     for (i=0; i<num_of_runs; i++){
       energy_order[i] = i;
-      energies[i] = myresults[i].complexG - lowestUnboundG;
+      // energies[i] = myresults [i].interE+myresults[i].interflexE; // mimics the behaviour of AD4 unbound_same_as_bound // sans
+      energies[i] = myresults[i].complexG - lowestUnboundG; // sans
       myresults[i].clus_id = 0; // indicates that it hasn't been put into cluster yet (may as well do that here ...)
     }
     // sorting the indices instead of copying the results around will be faster
@@ -1653,6 +2054,7 @@ void generate_output(
         if(energies[energy_order[j]]>energies[energy_order[j+1]]) // swap indices to percolate larger energies up
           std::swap(energy_order[j], energy_order[j+1]);
     // PERFORM CLUSTERING
+//     printf("sans generate_output5-1\n");fflush(stdout);
     if(mypars->calc_clustering){
     
       // the best result is the center of the first cluster
@@ -1702,11 +2104,13 @@ void generate_output(
           {
             subrank++;
             cluster_sizes[i-1]++;
-            sum_energy [i-1] += myresults[j].complexG - lowestUnboundG;
+            // sum_energy [i-1] += myresults[j].interE + myresults[j].interflexE + /*(myresults [j]).intraE +*/ torsional_energy; // intraE can be commented when unbound_same_as_bound // sans
+            sum_energy [i-1] += myresults[j].complexG - lowestUnboundG; // sans
             myresults[j].clus_subrank = subrank;
             if (subrank == 1)
             {
-              best_energy [i-1] = myresults[j].complexG - lowestUnboundG;
+              // best_energy [i-1] = myresults[j].interE + myresults[j].interflexE + /*(myresults [j]).intraE +*/ torsional_energy; // intraE can be commented when unbound_same_as_bound // sans
+              best_energy [i-1] = myresults[j].complexG - lowestUnboundG; // sans
               best_energy_runid  [i-1] = myresults[j].run_number;
             }
           }
@@ -1725,6 +2129,7 @@ void generate_output(
     
         for (i=0; i<num_of_clusters; i++)
         {
+          // sans ==>
           if(mypars->gen_best > i)
           {
             FILE* fp_best;
@@ -1749,6 +2154,7 @@ void generate_output(
             fprintf(fp_best, "%s", bestPdb[best_energy_runid[i] - 1]);
             fclose(fp_best);
           }
+          // <== sans
           fprintf(fp, "%4d |", i+1);
     
           if (best_energy[i] > 999999.99)
@@ -1788,12 +2194,14 @@ void generate_output(
           for (int u=0; u<num_of_runs; u++){
             j = energy_order[u];
             if (myresults[j].clus_id == i+1) {
-              if (myresults[j].complexG - lowestUnboundG > 999999.99)
+              // if (myresults[j].interE + myresults[j].interflexE + torsional_energy > 999999.99) // sans
+              if (myresults[j].complexG - lowestUnboundG > 999999.99) // sans
                 fprintf(fp, "%4d   %4d   %4d  %+10.2e  %8.2f  %8.2f           RANKING\n",
                              myresults[j].clus_id,
                                    myresults[j].clus_subrank,
                                          myresults[j].run_number,
-                                              myresults[j].complexG - lowestUnboundG,
+                                              // myresults[j].interE + myresults[j].interflexE + torsional_energy, // sans
+                                              myresults[j].complexG - lowestUnboundG, // sans
                                                              myresults[j].rmsd_from_cluscent,
                                                                  myresults[j].rmsd_from_ref);
               else
@@ -1801,7 +2209,8 @@ void generate_output(
                              myresults[j].clus_id,
                                    myresults[j].clus_subrank,
                                          myresults[j].run_number,
-                                              myresults[j].complexG - lowestUnboundG,
+                                              // myresults[j].interE + myresults[j].interflexE + torsional_energy, // sans
+                                              myresults[j].complexG - lowestUnboundG, // sans
                                                              myresults[j].rmsd_from_cluscent,
                                                                  myresults[j].rmsd_from_ref);
             }
@@ -1809,6 +2218,7 @@ void generate_output(
         }
       }
     }
+    // sans ==>
     for(int i = 0; i < num_of_runs; i++)
     {
       free(bestPdbqt[i]);
@@ -1816,6 +2226,8 @@ void generate_output(
     }
     free(bestPdbqt);
     free(bestPdb);
+    // <== sans
+//     printf("sans generate_output6\n");fflush(stdout);
     
     if(mypars->output_dlg){
       // Add execution and idle time information
@@ -1829,6 +2241,7 @@ void generate_output(
     // if xml has to be generated
     if (mypars->output_xml)
     {
+//   printf("sans generate_output6-1\n");fflush(stdout);
       char* xml_file_name = (char*)malloc(len*sizeof(char));
       strcpy(xml_file_name, mypars->resname);
       strcat(xml_file_name, ".xml");
@@ -1840,9 +2253,12 @@ void generate_output(
       fprintf(fp_xml, "<?xml version=\"1.0\" ?>\n");
       fprintf(fp_xml, "<omegadocker>\n");
       fprintf(fp_xml, "\t<version>%s</version>\n",VERSION);
+//   printf("sans generate_output6-1-1\n");fflush(stdout);
       if((*argc)>1){
+//   printf("sans generate_output6-1-1-1\n");fflush(stdout);
         fprintf(fp_xml, "\t<arguments>");
         for(i=1; i<(*argc); i++){
+//   printf("sans generate_output6-1-1-1-a\n");fflush(stdout);
           fprintf(fp_xml, "%s%s", (i>1)?" ":"", argv[i]);
           if (argcmp("filelist", argv[i], 'B')){
             if(mypars->filelist_files>1){
@@ -1859,6 +2275,7 @@ void generate_output(
         }
         fprintf(fp_xml, "</arguments>\n");
       }
+//   printf("sans generate_output6-1-2\n");fflush(stdout);
       if(mypars->dpffile)
         fprintf(fp_xml, "\t<dpf>%s</dpf>\n",mypars->dpffile);
       if(mypars->list_nr>1)
@@ -1880,6 +2297,7 @@ void generate_output(
       fprintf(fp_xml, "\t<run_requested>%lu</run_requested>\n",mypars->num_of_runs);
       fprintf(fp_xml, "\t<runs>\n");
       double phi, theta;
+//   printf("sans generate_output6-1-3\n");fflush(stdout);
       for(int u=0; u<num_of_runs; u++){
         j = energy_order[u];
         fprintf(fp_xml, "\t\t<run id=\"%d\">\n",(myresults [j]).run_number);
@@ -1934,7 +2352,8 @@ void generate_output(
             fprintf(fp_xml, "\t\t\t</contact_analysis>\n");
           }
         }
-        fprintf(fp_xml, "\t\t\t<free_NRG_binding>%.2f</free_NRG_binding>\n", myresults[j].complexG - lowestUnboundG);
+        fprintf(fp_xml, "\t\t\t<free_NRG_binding>%.2f</free_NRG_binding>\n", myresults[j].complexG - lowestUnboundG); // sans
+        // fprintf(fp_xml, "\t\t\t<free_NRG_binding>   %.2f</free_NRG_binding>\n", myresults[j].interE + myresults[j].interflexE + torsional_energy); // sans
         fprintf(fp_xml, "\t\t\t<final_intermol_NRG> %.2f</final_intermol_NRG>\n", myresults[j].interE + myresults[j].interflexE);
         fprintf(fp_xml, "\t\t\t<internal_ligand_NRG>%.2f</internal_ligand_NRG>\n", myresults[j].intraE + myresults[j].intraflexE);
         fprintf(fp_xml, "\t\t\t<torsonial_free_NRG> %.2f</torsonial_free_NRG>\n", myresults[j].nts);
@@ -1949,6 +2368,7 @@ void generate_output(
         fprintf(fp_xml, "\n\t\t\t</dihe0>\n");
         fprintf(fp_xml, "\t\t</run>\n");
       }
+//   printf("sans generate_output6-1-4\n");fflush(stdout);
       fprintf(fp_xml, "\t</runs>\n");
       if(mypars->calc_clustering){
         fprintf(fp_xml, "\t<result>\n");
@@ -1968,78 +2388,126 @@ void generate_output(
             if (myresults[j].clus_id == i+1)
             {
               fprintf(fp_xml, "\t\t\t<run rank=\"%d\" sub_rank=\"%d\" run=\"%d\" binding_energy=\"%.2lf\" cluster_rmsd=\"%.2lf\" reference_rmsd=\"%.2lf\" />\n",
-                myresults[j].clus_id, myresults[j].clus_subrank, myresults[j].run_number, myresults[j].complexG - lowestUnboundG, myresults[j].rmsd_from_cluscent, myresults[j].rmsd_from_ref);
+                // myresults[j].clus_id, myresults[j].clus_subrank, myresults[j].run_number, myresults[j].interE + myresults[j].interflexE + torsional_energy, myresults[j].rmsd_from_cluscent, myresults[j].rmsd_from_ref); // sans
+                myresults[j].clus_id, myresults[j].clus_subrank, myresults[j].run_number, myresults[j].complexG - lowestUnboundG, myresults[j].rmsd_from_cluscent, myresults[j].rmsd_from_ref); // sans
             }
           }
         }
         fprintf(fp_xml, "\t\t</rmsd_table>\n");
         fprintf(fp_xml, "\t</result>\n");
       }
+//   printf("sans generate_output6-1-5\n");fflush(stdout);
       fprintf(fp_xml, "</omegadocker>\n");
       fclose(fp_xml);
       free(xml_file_name);
+//   printf("sans generate_output6-1-6\n");fflush(stdout);
     }
   }
+  // sans ==>
   else if(num_of_runs == 1)
   {
+// printf("sans generate_output5\n");fflush(stdout);
     // arranging results according to energy, myresults [energy_order[0]] will be the best one (with lowest energy)
     std::vector<int> energy_order(mypars->topN4rescore);
     std::vector<double> energies(mypars->topN4rescore);
     
+    // lowestUnboundG = myresults[0].intraE + myresults[0].intraflexE + myresults[0].ntsL;
+    // for(i = 1; i < mypars->topN4rescore; i++)
+    // {
+    //   float UE = myresults[i].intraE + myresults[i].intraflexE + myresults[i].ntsL;
+    //   if(UE < lowestUnboundG)
+    //   {
+    //     lowestUnboundG = UE;
+    //   }
+    // }
+    
     for(i = 0; i < mypars->topN4rescore; i++){
       energy_order[i] = i;
-      energies[i] = myresults[i].complexG - lowestUnboundG;
+      // energies[i] = myresults [i].interE+myresults[i].interflexE; // mimics the behaviour of AD4 unbound_same_as_bound // sans
+// printf("sans generate_output5 i: %d\n", i);fflush(stdout);
+// printf("sans generate_output5 myresults[i].interE: %f\n", myresults[i].interE);fflush(stdout);
+// printf("sans generate_output5 myresults[i].interflexE: %f\n", myresults[i].interflexE);fflush(stdout);
+// printf("sans generate_output5 myresults[i].intraE: %f\n", myresults[i].intraE);fflush(stdout);
+// printf("sans generate_output5 myresults[i].intraflexE: %f\n", myresults[i].intraflexE);fflush(stdout);
+// printf("sans generate_output5B energies[i]: %f\n", energies[i]);fflush(stdout);
+      energies[i] = myresults[i].complexG - lowestUnboundG; // sans
+// printf("sans generate_output5A energies[i]: %f\n", energies[i]);fflush(stdout);
       myresults[i].clus_id = 0; // indicates that it hasn't been put into cluster yet (may as well do that here ...)
+// printf("sans generate_output5 myresults[i].clus_id: %d\n", myresults[i].clus_id);fflush(stdout);
     }
+// printf("sans generate_output5\n");fflush(stdout);
+// for(i=0; i<mypars->topN4rescore-1; i++)
+// {
+//   printf("sans generate_output5B, i: %d, energy_order[i]: %d, energies[energy_order[i]]: %f\n", i, energy_order[i], energies[energy_order[i]]);fflush(stdout);
+// }
     // sorting the indices instead of copying the results around will be faster
     for(i=0; i<mypars->topN4rescore-1; i++)
     {
       for(j=0; j<mypars->topN4rescore-i-1; j++)
       {
+// printf("sans generate_output5, j: %d, energy_order[j]: %d, energy_order[j+1] :%d\n", j, energy_order[j], energy_order[j+1]);fflush(stdout);
+// printf("sans generate_output5B, energies[energy_order[j]]: %f, energies[energy_order[j+1]]: %f\n", energies[energy_order[j]], energies[energy_order[j+1]]);fflush(stdout);
         if(energies[energy_order[j]]>energies[energy_order[j+1]]) // swap indices to percolate larger energies up
         {
           std::swap(energy_order[j], energy_order[j+1]);
         }
+// printf("sans generate_output5A, energies[energy_order[j]]: %f, energies[energy_order[j+1]]: %f\n", energies[energy_order[j]], energies[energy_order[j+1]]);fflush(stdout);
       }
     }
+// for(i=0; i<mypars->topN4rescore-1; i++)
+// {
+//   printf("sans generate_output5A, i: %d, energy_order[i]: %d, energies[energy_order[i]]: %f\n", i, energy_order[i], energies[energy_order[i]]);fflush(stdout);
+// }
     // PERFORM CLUSTERING
+// printf("sans generate_output5\n");fflush(stdout);
     if(mypars->calc_clustering){
+// printf("sans generate_output5-1\n");fflush(stdout);
       // the best result is the center of the first cluster
       myresults[energy_order[0]].clus_id = 1;
       myresults[energy_order[0]].rmsd_from_cluscent = 0;
       num_of_clusters = 1;
     
+// printf("sans generate_output5-2\n");fflush(stdout);
       for (int w=1; w<mypars->topN4rescore; w++) // for each result
       {
+// printf("sans generate_output5-2-1\n");fflush(stdout);
         i=energy_order[w];
         current_clust_center = 0;
         result_clustered = 0;
     
         for (int u=0; u<w; u++) // results with lower id-s are clustered, look for cluster centers
         {
+// printf("sans generate_output5-2-1-1\n");fflush(stdout);
           j=energy_order[u];
           if (myresults[j].clus_id > current_clust_center) // it is the center of a new cluster
           {
+// printf("sans generate_output5-2-1-1-1\n");fflush(stdout);
             current_clust_center = myresults[j].clus_id;
             temp_rmsd = calc_rmsd(myresults[j].atom_idxyzq, myresults[i].atom_idxyzq, ligand_ref->true_ligand_atoms, mypars->handle_symmetry); // comparing current result with cluster center
+// printf("sans generate_output5-2-1-1-2\n");fflush(stdout);
             if (temp_rmsd <= cluster_tolerance) // in this case we put result i to cluster with center j
             {
+// printf("sans generate_output5-2-1-1-1-1\n");fflush(stdout);
               myresults[i].clus_id = current_clust_center;
               myresults[i].rmsd_from_cluscent = temp_rmsd;
               result_clustered = 1;
               break;
             }
           }
+// printf("sans generate_output5-2-1-2\n");fflush(stdout);
         }
     
+// printf("sans generate_output5-2-2\n");fflush(stdout);
         if (result_clustered != 1) // if no suitable cluster was found, this is the center of a new one
         {
           num_of_clusters++;
           myresults[i].clus_id = num_of_clusters; // new cluster id
           myresults[i].rmsd_from_cluscent = 0;
         }
+// printf("sans generate_output5-2-3\n");fflush(stdout);
       }
     
+// printf("sans generate_output5-3\n");fflush(stdout);
       for (i=1; i<=num_of_clusters; i++) // printing cluster info to file
       {
         subrank = 0;
@@ -2051,17 +2519,24 @@ void generate_output(
           {
             subrank++;
             cluster_sizes[i-1]++;
-            sum_energy [i-1] += myresults[j].complexG - lowestUnboundG;
+            // sum_energy [i-1] += myresults[j].interE + myresults[j].interflexE + /*(myresults [j]).intraE +*/ torsional_energy; // intraE can be commented when unbound_same_as_bound // sans
+            sum_energy [i-1] += myresults[j].complexG - lowestUnboundG; // sans
             myresults[j].clus_subrank = subrank;
             if (subrank == 1)
             {
+              // best_energy [i-1] = myresults[j].interE + myresults[j].interflexE + /*(myresults [j]).intraE +*/ torsional_energy; // intraE can be commented when unbound_same_as_bound // sans
+              // best_energy_runid  [i-1] = myresults[j].run_number; // sans
+              // sans ==>
               best_energy [i-1] = myresults[j].complexG - lowestUnboundG;
               best_energy_runid  [i-1] = j + 1;
+              // <== sans
+// printf("sans num_of_clusters: %d/%d, best_energy_runid: %d\n", i, num_of_clusters, j+1);
             }
           }
         }
       }
     
+// printf("sans generate_output5-4\n");fflush(stdout);
       if(mypars->output_dlg){
         // WRITING CLUSTER INFORMATION
         fprintf(fp, "    CLUSTERING HISTOGRAM\n    ____________________\n\n\n");
@@ -2072,10 +2547,17 @@ void generate_output(
         fprintf(fp, "Rank | Energy    | Rank | Energy    | Clus|    5    10   15   20   25   30   35\n");
         fprintf(fp, "_____|___________|______|___________|_____|____:____|____:____|____:____|____:___\n");
     
+// printf("sans generate_output5-4-1\n");fflush(stdout);
         for (i=0; i<num_of_clusters; i++)
         {
+// printf("sans generate_output5-4-1-1\n");fflush(stdout);
+          // sans ==>
           if(mypars->gen_best > i)
           {
+// printf("sans generate_output5-4-1-1-1\n");fflush(stdout);
+// printf("sans generate_output5-4-1-1-1 mypars->resname: %s\n", mypars->resname);fflush(stdout);
+// printf("sans generate_output5-4-1-1-1 CR: %d\n", i + 1);fflush(stdout);
+// printf("sans generate_output5-4-1-1-1 oriRank: %d\n", best_energy_runid[i]);fflush(stdout);
             FILE* fp_best;
     
             sprintf(fileName4bestN, "%s_best_CR%d_oriRank%d.pdbqt", mypars->resname, i + 1, best_energy_runid[i]);
@@ -2097,9 +2579,12 @@ void generate_output(
             }
             fprintf(fp_best, "%s", bestPdb[best_energy_runid[i] - 1]);
             fclose(fp_best);
+// printf("sans generate_output5-4-1-1-2\n");fflush(stdout);
           }
+          // <== sans
           fprintf(fp, "%4d |", i+1);
     
+// printf("sans generate_output5-4-1-2\n");fflush(stdout);
           if (best_energy[i] > 999999.99)
             fprintf(fp, "%+10.2e", best_energy[i]);
           else
@@ -2117,6 +2602,7 @@ void generate_output(
             fprintf(fp, "#");
     
           fprintf(fp, "\n");
+// printf("sans generate_output5-4-1-3\n");fflush(stdout);
         }
     
         fprintf(fp, "_____|___________|______|___________|_____|______________________________________\n\n\n");
@@ -2132,32 +2618,55 @@ void generate_output(
         fprintf(fp, "     | Rank | Rank | Energy    | RMSD    | RMSD            | Pattern\n");
         fprintf(fp, "_____|______|______|___________|_________|_________________|___________\n" );
     
+// printf("sans generate_output5-4-2\n");fflush(stdout);
         for (i=0; i<num_of_clusters; i++) // printing cluster info to file
         {
+// printf("sans generate_output5-4-2-1\n");fflush(stdout);
           for (int u=0; u<mypars->topN4rescore; u++){
+// printf("sans generate_output5-4-2-1-1\n");fflush(stdout);
             j = energy_order[u];
             if (myresults[j].clus_id == i+1) {
+// printf("sans generate_output5-4-2-1-1-1\n");fflush(stdout);
+              // if (myresults[j].interE + myresults[j].interflexE + torsional_energy > 999999.99) // sans
               if (myresults[j].complexG - lowestUnboundG > 999999.99)
                 fprintf(fp, "%4d   %4d   %4d  %+10.2e  %8.2f  %8.2f           RANKING\n",
                              myresults[j].clus_id,
                                    myresults[j].clus_subrank,
+                                         /*
+                                           best_energy_runid[i],
+                                              myresults[j].interE + myresults[j].interflexE + torsional_energy,
+                                              */
+                                           // sans ==>
                                            j + 1,
                                               myresults[j].complexG - lowestUnboundG,
+                                             // <== sans
                                                              myresults[j].rmsd_from_cluscent,
                                                                  myresults[j].rmsd_from_ref);
               else
                 fprintf(fp, "%4d   %4d   %4d  %+10.2f  %8.2f  %8.2f           RANKING\n",
                              myresults[j].clus_id,
                                    myresults[j].clus_subrank,
+                                         /*
+                                           best_energy_runid[i],
+                                              myresults[j].interE + myresults[j].interflexE + torsional_energy,
+                                              */
+                                           // sans ==>
                                            j + 1,
                                               myresults[j].complexG - lowestUnboundG,
+                                              // <== sans
                                                              myresults[j].rmsd_from_cluscent,
                                                                  myresults[j].rmsd_from_ref);
+// printf("sans generate_output5-4-2-1-1-2\n");fflush(stdout);
             }
+// printf("sans generate_output5-4-2-1-2\n");fflush(stdout);
           }
+// printf("sans generate_output5-4-2-2\n");fflush(stdout);
         }
+// printf("sans generate_output5-4-3\n");fflush(stdout);
       }
-    }
+// printf("sans generate_output5-5\n");fflush(stdout);
+    } // sans End of if(mypars->calc_clustering)
+    // sans ==>
     for(int i = 0; i < mypars->topN4rescore; i++)
     {
       free(bestPdbqt[i]);
@@ -2165,6 +2674,8 @@ void generate_output(
     }
     free(bestPdbqt);
     free(bestPdb);
+    // <== sans
+// printf("sans generate_output6\n");fflush(stdout);
     
     if(mypars->output_dlg){
       // Add execution and idle time information
@@ -2178,6 +2689,7 @@ void generate_output(
     // if xml has to be generated
     if (mypars->output_xml)
     {
+// printf("sans generate_output6-1\n");fflush(stdout);
       char* xml_file_name = (char*)malloc(len*sizeof(char));
       strcpy(xml_file_name, mypars->resname);
       strcat(xml_file_name, ".xml");
@@ -2189,9 +2701,12 @@ void generate_output(
       fprintf(fp_xml, "<?xml version=\"1.0\" ?>\n");
       fprintf(fp_xml, "<omegadocker>\n");
       fprintf(fp_xml, "\t<version>%s</version>\n",VERSION);
+// printf("sans generate_output6-2\n");fflush(stdout);
       if((*argc)>1){
+// printf("sans generate_output6-2-1\n");fflush(stdout);
         fprintf(fp_xml, "\t<arguments>");
         for(i=1; i<(*argc); i++){
+// printf("sans generate_output6-2-1-1\n");fflush(stdout);
           fprintf(fp_xml, "%s%s", (i>1)?" ":"", argv[i]);
           if (argcmp("filelist", argv[i], 'B')){
             if(mypars->filelist_files>1){
@@ -2205,9 +2720,12 @@ void generate_output(
               i+=mypars->xml_files; // skip ahead in case there are multiple entries here
             }
           }
+// printf("sans generate_output6-2-1-2\n");fflush(stdout);
         }
         fprintf(fp_xml, "</arguments>\n");
+// printf("sans generate_output6-2-2\n");fflush(stdout);
       }
+// printf("sans generate_output6-3\n");fflush(stdout);
       if(mypars->dpffile)
         fprintf(fp_xml, "\t<dpf>%s</dpf>\n",mypars->dpffile);
       if(mypars->list_nr>1)
@@ -2229,11 +2747,15 @@ void generate_output(
       fprintf(fp_xml, "\t<run_requested>%lu</run_requested>\n",mypars->num_of_runs);
       fprintf(fp_xml, "\t<runs>\n");
       double phi, theta;
+// printf("sans generate_output6-4\n");fflush(stdout);
       for(int u=0; u<mypars->topN4rescore; u++){
+// printf("sans generate_output6-4-1\n");fflush(stdout);
         j = energy_order[u];
         fprintf(fp_xml, "\t\t<run id=\"%d\">\n",(myresults [j]).run_number);
         if(mypars->contact_analysis){
+// printf("sans generate_output6-4-1-1\n");fflush(stdout);
           if(myresults[j].analysis.size()>0){
+printf("sans generate_output6-4-1-1-1\n");fflush(stdout);
             fprintf(fp_xml, "\t\t\t<contact_analysis count=\"%lu\">\n", myresults[j].analysis.size());
             std::string types;
             std::string lig_id;
@@ -2244,7 +2766,9 @@ void generate_output(
             std::string res_id;
             std::string chain;
             char item[8], pad[8];
+printf("sans generate_output6-4-1-1-2\n");fflush(stdout);
             for(unsigned int i=0; i<myresults[j].analysis.size(); i++){
+printf("sans generate_output6-4-1-1-2-1\n");fflush(stdout);
               if(i>0){
                 types    += ",";
                 lig_id   += ",";
@@ -2255,6 +2779,7 @@ void generate_output(
                 res_id   += ",";
                 chain    += ",";
               }
+printf("sans generate_output6-4-1-1-2-2\n");fflush(stdout);
               switch(myresults[j].analysis[i].type){
                 case 0: types += "   \"R\"";
                         break;
@@ -2272,6 +2797,7 @@ void generate_output(
               sprintf(item, "%5d ", myresults[j].analysis[i].res_id);   res_id+=item;
               sprintf(item, "\"%s\"", myresults[j].analysis[i].chain); sprintf(pad, "%6s", item);    chain+=pad;
             }
+printf("sans generate_output6-4-1-1-3\n");fflush(stdout);
             fprintf(fp_xml, "\t\t\t\t<contact_analysis_types>  %s</contact_analysis_types>\n", types.c_str());
             fprintf(fp_xml, "\t\t\t\t<contact_analysis_ligid>  %s</contact_analysis_ligid>\n", lig_id.c_str());
             fprintf(fp_xml, "\t\t\t\t<contact_analysis_ligname>%s</contact_analsyis_ligname>\n", ligname.c_str());
@@ -2282,8 +2808,22 @@ void generate_output(
             fprintf(fp_xml, "\t\t\t\t<contact_analysis_chain>  %s</contact_analysis_chain>\n", chain.c_str());
             fprintf(fp_xml, "\t\t\t</contact_analysis>\n");
           }
+// printf("sans generate_output6-4-1-2\n");fflush(stdout);
         }
-        fprintf(fp_xml, "\t\t\t<free_NRG_binding>   %.2f</free_NRG_binding>\n", myresults[j].complexG - lowestUnboundG);
+// printf("sans generate_output6-4-2\n");fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].interE: %f\n", myresults[j].interE);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].interflexE: %f\n", myresults[j].interflexE);fflush(stdout);
+// printf("sans generate_output6-4-2 torsional_energy: %f\n", torsional_energy);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].intraE: %f\n", myresults[j].intraE);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].intraflexE: %f\n", myresults[j].intraflexE);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].genotype[0]*mygrid->spacing: %f\n", myresults[j].genotype[0]*mygrid->spacing);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].genotype[1]*mygrid->spacing: %f\n", myresults[j].genotype[1]*mygrid->spacing);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].genotype[2]*mygrid->spacing: %f\n", myresults[j].genotype[2]*mygrid->spacing);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].genotype[3]/180.0*PI: %f\n", myresults[j].genotype[3]/180.0*PI);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].genotype[4]/180.0*PI: %f\n", myresults[j].genotype[4]/180.0*PI);fflush(stdout);
+// printf("sans generate_output6-4-2 myresults[j].genotype[5]: %f\n", myresults[j].genotype[5]);fflush(stdout);
+        // fprintf(fp_xml, "\t\t\t<free_NRG_binding>   %.2f</free_NRG_binding>\n", myresults[j].interE + myresults[j].interflexE + torsional_energy); // sans
+        fprintf(fp_xml, "\t\t\t<free_NRG_binding>   %.2f</free_NRG_binding>\n", myresults[j].complexG - lowestUnboundG); // sans
         fprintf(fp_xml, "\t\t\t<final_intermol_NRG> %.2f</final_intermol_NRG>\n", myresults[j].interE + myresults[j].interflexE);
         fprintf(fp_xml, "\t\t\t<internal_ligand_NRG>%.2f</internal_ligand_NRG>\n", myresults[j].intraE + myresults[j].intraflexE);
         fprintf(fp_xml, "\t\t\t<torsonial_free_NRG> %.2f</torsonial_free_NRG>\n", myresults[j].nts);
@@ -2293,11 +2833,14 @@ void generate_output(
         fprintf(fp_xml, "\t\t\t<axisangle0>%.8f %.8f %.8f %.6f</axisangle0>\n", sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta), myresults[j].genotype[5]);
         fprintf(fp_xml, "\t\t\t<ndihe>%d</ndihe>\n", ligand_ref->num_of_rotbonds);
         fprintf(fp_xml, "\t\t\t<dihe0>");
+// printf("sans generate_output6-4-3\n");fflush(stdout);
         for(i=0; i<ligand_ref->num_of_rotbonds; i++)
           fprintf(fp_xml, "%s%.6f", (i>0)?" ":"", myresults[j].genotype[6+i]);
+// printf("sans generate_output6-4-4\n");fflush(stdout);
         fprintf(fp_xml, "\n\t\t\t</dihe0>\n");
         fprintf(fp_xml, "\t\t</run>\n");
       }
+// printf("sans generate_output6-5\n");fflush(stdout);
       fprintf(fp_xml, "\t</runs>\n");
       if(mypars->calc_clustering){
         fprintf(fp_xml, "\t<result>\n");
@@ -2317,30 +2860,39 @@ void generate_output(
             if (myresults[j].clus_id == i+1)
             {
               fprintf(fp_xml, "\t\t\t<run rank=\"%d\" sub_rank=\"%d\" run=\"%d\" binding_energy=\"%.2lf\" cluster_rmsd=\"%.2lf\" reference_rmsd=\"%.2lf\" />\n",
-                myresults[j].clus_id, myresults[j].clus_subrank, best_energy_runid[i], myresults[j].complexG - lowestUnboundG, myresults[j].rmsd_from_cluscent, myresults[j].rmsd_from_ref);
+                // myresults[j].clus_id, myresults[j].clus_subrank, myresults[j].run_number, myresults[j].interE + myresults[j].interflexE + torsional_energy, myresults[j].rmsd_from_cluscent, myresults[j].rmsd_from_ref); // sans
+                myresults[j].clus_id, myresults[j].clus_subrank, best_energy_runid[i], myresults[j].complexG - lowestUnboundG, myresults[j].rmsd_from_cluscent, myresults[j].rmsd_from_ref); // sans
             }
           }
         }
         fprintf(fp_xml, "\t\t</rmsd_table>\n");
         fprintf(fp_xml, "\t</result>\n");
       }
+// printf("sans generate_output6-6\n");fflush(stdout);
       fprintf(fp_xml, "</omegadocker>\n");
       fclose(fp_xml);
       free(xml_file_name);
-    }
+// printf("sans generate_output6-L\n");fflush(stdout);
+    } // sans End of if (mypars->output_xml)
   }
   else
   {
     printf("ERROR: Bug? num_of_runs (%d) is not larger than zero!?\n", num_of_runs);
     exit(1);
   }
-  
+  // <== sans
+
+//   printf("sans generate_output7\n");fflush(stdout);
+  // sans ==>
   free(cluster_sizes);
   free(sum_energy);
   free(best_energy);
   free(best_energy_runid);
+  // <== sans
+//   printf("sans generate_outputL\n");fflush(stdout);
 }
 
+// sans ==>
 int qsortCompFloatInc(const void *a, const void *b)
 {
   float fa = *(const float*) a;
@@ -2374,6 +2926,8 @@ void calcEntropy
   ligResult->nts  = 0.0;
   ligResult->ntsL = 0.0;
   
+// float *tmpGridE;
+// tmpGridE = (float *) malloc(shakingGridNum* sizeof(float));
   for(int atomIndex = 0; atomIndex < lig->num_of_atoms; atomIndex++)
   {
     atomRandomness        = 0.0;
@@ -2381,12 +2935,34 @@ void calcEntropy
     molRandomness         = 1.0;
     molRandomnessLigOnly  = 1.0;
     centerE      = ligResult->shakingGridE[atomIndex][shakingGridCenterIndex];
+// if(atomIndex < 3)
+// {
+// for(int shakingGridIndex = 0; shakingGridIndex < shakingGridNum; shakingGridIndex++)
+// {
+// printf("Bsort atomIndex shakingGridIndex E: %d %d %f\n", atomIndex, shakingGridIndex, ligResult->shakingGridE[atomIndex][shakingGridIndex]);
+// }
+// }
+// for(int i  = 0; i < shakingGridNum; i++)
+// {
+//   tmpGridE[i] = ligResult->shakingGridE[atomIndex][i];
+// }
     qsort(ligResult->shakingGridE[atomIndex], shakingGridNum, sizeof(float), qsortCompFloatInc);
     qsort(ligResult->shakingGridEL[atomIndex], shakingGridNum, sizeof(float), qsortCompFloatInc);
+// if(atomIndex < 3)
+// {
+// for(int shakingGridIndex = 0; shakingGridIndex < shakingGridNum; shakingGridIndex++)
+// {
+// printf("Asort atomIndex shakingGridIndex E: %d %d %f\n", atomIndex, shakingGridIndex, ligResult->shakingGridE[atomIndex][shakingGridIndex]);
+// }
+// }
     centerE -= ligResult->shakingGridE[atomIndex][0];
     if(mypars->warningOn && centerE >= mypars->wellDepth)
     {
       printf("WARNING: The central potential energy (%f kcal/mol) of atom index %d is higher then the well depth (%f kcal/mol).\n", centerE, atomIndex, mypars->wellDepth);
+// for(int i  = 0; i < shakingGridNum; i++)
+// {
+//   printf("!!!!!atomIndex shakingGridIndex ori mod: %d %d %f %f\n", atomIndex, i, tmpGridE[i], ligResult->shakingGridE[atomIndex][i]);
+// }
     }
     
     for(int shakingGridIndex = shakingGridNum - 1; shakingGridIndex > -1; shakingGridIndex--)
@@ -2400,6 +2976,7 @@ void calcEntropy
       if(ligResult->shakingGridE[atomIndex][shakingGridIndex] < mypars->wellDepth)
       {
         atomRandomness += 1.0 - ((double) ligResult->shakingGridE[atomIndex][shakingGridIndex]) / mypars->wellDepth;
+// printf("shakingGridIndex atomRandomness ligResult->shakingGridE[atomIndex][shakingGridIndex] ligResult->nts %d %f %f %e\n", shakingGridIndex, atomRandomness, ligResult->shakingGridE[atomIndex][shakingGridIndex], ligResult->nts);
       }
       else
       {
@@ -2432,12 +3009,34 @@ void calcEntropy
     }
   }
   
+// printf("ligResult->nts B %f\n", ligResult->nts);
+// printf("ligResult->ntsL B %f\n", ligResult->ntsL);
   ligResult->nts  += log(molRandomness);
   ligResult->nts  *= mypars->entropyScaling;
   ligResult->ntsL += log(molRandomnessLigOnly);
   ligResult->ntsL *= mypars->entropyScaling;
+// printf("ligResult->nts A %f\n", ligResult->nts);
+// printf("ligResult->ntsL A %f\n", ligResult->ntsL);
 }
+// <== sans
 
+// // sans time ==>
+// #include <sys/time.h>
+// template<typename T>
+// inline double seconds_since(T& time_start)
+// {
+//   timeval time_end;
+//   gettimeofday(&time_end,NULL);
+//         double num_sec     = time_end.tv_sec  - time_start.tv_sec;
+//         double num_usec    = time_end.tv_usec - time_start.tv_usec;
+//         return (num_sec + (num_usec/1000000));
+// }
+// template<typename T>
+// inline void start_timer(T& time_start)
+// {
+//   gettimeofday(&time_start,NULL);
+// }
+// // <== sans time
 void process_result(
                     const Gridinfo*        mygrid,
                     const Dockpars*        mypars,
@@ -2448,17 +3047,28 @@ void process_result(
                           SimulationState& sim_state
                    )
 {
+// printf("sans process_result1\n");fflush(stdout);
+//   std::vector<Ligandresult> cpu_result_ligands(mypars->num_of_runs); // sans
+  // sans ==>
   Ligandresult *cpu_result_ligands;
   if(mypars->num_of_runs > 1)
   {
+// printf("sans process_result1-1\n");fflush(stdout);
     cpu_result_ligands = (Ligandresult *) malloc(mypars->num_of_runs * sizeof(Ligandresult));
     if(cpu_result_ligands == NULL)
     {
       printf("ERROR: Cannot allocat memory for cpu_result_ligands\n");
       exit(1);
     }
+//     // sans time ==>
+//     timeval processing_timer, processing_time2;
+//     double processing_time;
+//     processing_time = 0.0;
+//     start_timer(processing_timer);
+//     // <== sans time
     for(long unsigned int i = 0; i < mypars->num_of_runs; i++)
     {
+//       printf("sans process_result1-1-1\n");fflush(stdout);
       cpu_result_ligands[i].genotype = NULL;
       cpu_result_ligands[i].atom_idxyzq = (double **) calloc(myligand_init->num_of_atoms, sizeof(double*));
       if(cpu_result_ligands[i].atom_idxyzq == NULL)
@@ -2505,9 +3115,14 @@ void process_result(
         exit(1);
       }
     }
+//     // sans time ==>
+//     processing_time = seconds_since(processing_timer);
+//     printf("processing time 1: %f\n", processing_time);
+//     // <== sans time
   }
-  else if(mypars->num_of_runs == 1)
+  else if(mypars->num_of_runs == 1) // sans 只有將 mypars->num_of_runs 改成 mypars->topN4rescore 而已
   {
+// printf("sans process_result1-2\n");fflush(stdout);
     cpu_result_ligands = (Ligandresult *) malloc(mypars->topN4rescore * sizeof(Ligandresult));
     if(cpu_result_ligands == NULL)
     {
@@ -2517,6 +3132,7 @@ void process_result(
     
     for(long unsigned int i = 0; i < mypars->topN4rescore; i++)
     {
+// printf("sans process_result1-2-1 %d\n", i);fflush(stdout);
       cpu_result_ligands[i].genotype = NULL;
       cpu_result_ligands[i].atom_idxyzq = (double **) calloc(myligand_init->num_of_atoms, sizeof(double*));
       if(cpu_result_ligands[i].atom_idxyzq == NULL)
@@ -2564,6 +3180,7 @@ void process_result(
       }
       
       cpu_result_ligands[i].interE_elec = 0.0;
+// printf("sans process_result1-2-2 %d\n", i);fflush(stdout);
     }
   }
   else
@@ -2571,18 +3188,59 @@ void process_result(
     printf("ERROR: Bug? mypars->num_of_runs (%d) is not larger than zero!?\n", mypars->num_of_runs);
     exit(1);
   }
+  // <== sans
   
   // Fill in cpu_result_ligands
   float best_energy_of_all = 1000000000000.0;
-  IntraTables *tables= new IntraTables(sim_state.myligand_reference, mypars->coeffs.scaled_AD4_coeff_elec, mypars->coeffs.AD4_coeff_desolv, mypars->qasp, mypars->nr_mod_atype_pairs, mypars->mod_atype_pairs);
-  if(mypars->num_of_runs > 1)
+// printf("sans process_result2\n");fflush(stdout);
+//   IntraTables tables(&(sim_state.myligand_reference), mypars->coeffs.scaled_AD4_coeff_elec, mypars->coeffs.AD4_coeff_desolv, mypars->qasp, mypars->nr_mod_atype_pairs, mypars->mod_atype_pairs); // sans
+//   // sans time ==>
+//   processing_time = 0.0;
+//   start_timer(processing_timer);
+//   // <== sans time
+  IntraTables *tables= new IntraTables(sim_state.myligand_reference, mypars->coeffs.scaled_AD4_coeff_elec, mypars->coeffs.AD4_coeff_desolv, mypars->qasp, mypars->nr_mod_atype_pairs, mypars->mod_atype_pairs); // sans
+//   // sans time ==>
+//   processing_time = seconds_since(processing_timer);
+//   printf("processing time 2: %f\n", processing_time);
+//   // <== sans time
+// printf("sans process_result3\n");fflush(stdout);
+//   // sans time ==>
+//   processing_time = 0.0;
+//   start_timer(processing_timer);
+//   // <== sans time
+  if(mypars->num_of_runs > 1) // sans
   {
     for (unsigned long run_cnt=0; run_cnt < mypars->num_of_runs; run_cnt++)
     {
+      /* sans
+      arrange_result(sim_state.cpu_populations.data()+run_cnt*mypars->pop_size*GENOTYPE_LENGTH_IN_GLOBMEM, sim_state.cpu_energies.data()+run_cnt*mypars->pop_size, mypars->pop_size);
+      make_resfiles(sim_state.cpu_populations.data()+run_cnt*mypars->pop_size*GENOTYPE_LENGTH_IN_GLOBMEM,
+                    sim_state.cpu_energies.data()+run_cnt*mypars->pop_size,
+      sans */
+      // sans ==>
+//       arrange_result(sim_state.cpu_populations[run_cnt].data(), sim_state.cpu_energies[run_cnt].data(), mypars->pop_size); // sans for for std::vector<float> *
+//       make_resfiles(sim_state.cpu_populations[run_cnt].data(), // sans for for std::vector<float> *
+//                     sim_state.cpu_energies[run_cnt].data(), // sans for for std::vector<float> *
+//       arrange_result(sim_state.cpu_populations[run_cnt], sim_state.cpu_energies[run_cnt], mypars->pop_size); // sans
+//     // sans time ==>
+//     processing_time = 0.0;
+//     start_timer(processing_time2);
+//     // <== sans time
+      // arrange_result(sim_state.cpu_populations[run_cnt], sim_state.cpu_energies[run_cnt], myligand_init, mypars->pop_size); // sans
+//     // sans time ==>
+//     processing_time = seconds_since(processing_time2);
+//     printf("processing time 3-1: %f\n", processing_time);
+//     // <== sans time
+//     // sans time ==>
+//     processing_time = 0.0;
+//     start_timer(processing_time2);
+//     // <== sans time
       make_resfiles(sim_state.cpu_populations[run_cnt],
                     sim_state.cpu_energies[run_cnt],
-                    tables,
-                    sim_state.myligand_reference,
+      // <== sans
+                    /*&*/tables, // sans
+//                     &(sim_state.myligand_reference), // sans
+                    sim_state.myligand_reference, // sans
                     myligand_init,
                     myxrayligand,
                     mypars,
@@ -2591,18 +3249,63 @@ void process_result(
                     mygrid,
                     argc,
                     argv,
-                    0,
+                    /*1*/0,
                     run_cnt,
                     best_energy_of_all,
                     &(cpu_result_ligands [run_cnt]));
+//     // sans time ==>
+//     processing_time = seconds_since(processing_time2);
+//     printf("processing time 3-2: %f\n", processing_time);
+//     // <== sans time
     }
   }
-  else if(mypars->num_of_runs == 1)
+  // sans ==>
+  else if(mypars->num_of_runs == 1) // sans "並非"只有將 mypars->num_of_runs 改成 mypars->topN4rescore 而已
   {
+    // for (unsigned long topN_cnt=0; topN_cnt < mypars->topN4rescore; topN_cnt++)
+    // {
+      /* sans
+      arrange_result(sim_state.cpu_populations.data()+run_cnt*mypars->pop_size*GENOTYPE_LENGTH_IN_GLOBMEM, sim_state.cpu_energies.data()+run_cnt*mypars->pop_size, mypars->pop_size);
+      make_resfiles(sim_state.cpu_populations.data()+run_cnt*mypars->pop_size*GENOTYPE_LENGTH_IN_GLOBMEM,
+                    sim_state.cpu_energies.data()+run_cnt*mypars->pop_size,
+      sans */
+      // sans ==>
+//       arrange_result(sim_state.cpu_populations[run_cnt].data(), sim_state.cpu_energies[run_cnt].data(), mypars->pop_size); // sans for for std::vector<float> *
+//       make_resfiles(sim_state.cpu_populations[run_cnt].data(), // sans for for std::vector<float> *
+//                     sim_state.cpu_energies[run_cnt].data(), // sans for for std::vector<float> *
+//       arrange_result(sim_state.cpu_populations[run_cnt], sim_state.cpu_energies[run_cnt], mypars->pop_size); // sans
+//     // sans time ==>
+//     processing_time = 0.0;
+//     start_timer(processing_time2);
+//     // <== sans time
+// int zz = (myligand_init->num_of_rotbonds + 7);
+// for(int z = 0; z < mypars->pop_size; z++)
+// {
+//   int zzz = z * zz;
+//   printf("Bindex %d, 1stgene: %f, 6thgene: %f, 7thgene: %f, 8thgene: %f, energy: %f\n", z, sim_state.cpu_populations[0][zzz], sim_state.cpu_populations[0][zzz], sim_state.cpu_populations[0][zzz+6], sim_state.cpu_populations[0][zzz+7], sim_state.cpu_energies[0][z]);fflush(stdout);
+// }
+//       arrange_result(sim_state.cpu_populations[0], sim_state.cpu_energies[0], myligand_init, mypars->pop_size); // sans
+// for(int z = 0; z < mypars->pop_size; z++)
+// {
+//   int zzz = z * zz;
+//   printf("Aindex %d, 1stgene: %f, 6thgene: %f, 7thgene: %f, 8thgene: %f, energy: %f\n", z, sim_state.cpu_populations[0][z], sim_state.cpu_populations[0][zzz], sim_state.cpu_populations[0][zzz+6], sim_state.cpu_populations[0][zzz+7], sim_state.cpu_energies[0][z]);fflush(stdout);
+// }
+
+//     // sans time ==>
+//     processing_time = seconds_since(processing_time2);
+//     printf("processing time 3-1: %f\n", processing_time);
+//     // <== sans time
+//     // sans time ==>
+//     processing_time = 0.0;
+//     start_timer(processing_time2);
+//     // <== sans time
+// printf("mypars->topN4rescore2-1: %d\n", mypars->topN4rescore);fflush(stdout);
       make_resfiles(sim_state.cpu_populations[0],
                     sim_state.cpu_energies[0],
-                    tables,
-                    sim_state.myligand_reference,
+      // <== sans
+                    /*&*/tables, // sans
+//                     &(sim_state.myligand_reference), // sans
+                    sim_state.myligand_reference, // sans
                     myligand_init,
                     myxrayligand,
                     mypars,
@@ -2611,22 +3314,41 @@ void process_result(
                     mygrid,
                     argc,
                     argv,
-                    0,
+                    /*1*/0,
                     0,
                     best_energy_of_all,
                     cpu_result_ligands);
+//     // sans time ==>
+//     processing_time = seconds_since(processing_time2);
+//     printf("processing time 3-2: %f\n", processing_time);
+//     // <== sans time
+    // }
   }
   else
   {
     printf("ERROR: Bug? mypars->num_of_runs (%d) is not larger than zero!?\n", mypars->num_of_runs);
     exit(1);
   }
+  // <== sans
+//   // sans time ==>
+//   processing_time = seconds_since(processing_timer);
+//   printf("processing time 3: %f\n", processing_time);
+//   // <== sans time
+// printf("sans process_result4\n");fflush(stdout);
+  // Do analyses and generate dlg or xml output files
+//   generate_output(cpu_result_ligands.data(), // sans
+//   // sans time ==>
+//   processing_time = 0.0;
+//   start_timer(processing_timer);
+//   // <== sans time
+  // sans time ==>
   mpz_t Evaluations;
   mpz_init(Evaluations);
   mpz_fdiv_q_ui(Evaluations, sim_state.total_evals, mypars->num_of_runs);
-  generate_output(cpu_result_ligands,
+  // <== sans time
+  generate_output(cpu_result_ligands, // sans
                   mypars->num_of_runs,
-                  tables,
+                  /*&*/tables, // sans
                   myligand_init,
                   myxrayligand,
                   mypars,
@@ -2635,11 +3357,23 @@ void process_result(
                   argv,
                   sim_state.sec_per_run,
                   sim_state.generation_cnt,
-                  Evaluations,
+//                   sim_state.total_evals/mypars->num_of_runs, // sans
+                  Evaluations, // sans
                   sim_state.exec_time,
                   sim_state.idle_time);
   mpz_clear(Evaluations);
+//   // sans time ==>
+//   processing_time = seconds_since(processing_timer);
+//   printf("processing time 4: %f\n", processing_time);
+//   // <== sans time
+// printf("sans process_result5\n");fflush(stdout);
   delete tables;
+// printf("sans process_result6\n");fflush(stdout);
+//   // sans time ==>
+//   processing_time = 0.0;
+//   start_timer(processing_timer);
+//   // <== sans time
+  // sans ==>
   if(mypars->num_of_runs > 1)
   {
     for(long unsigned int i = 0; i < mypars->num_of_runs; i++)
@@ -2679,5 +3413,11 @@ void process_result(
     printf("ERROR: Bug? mypars->num_of_runs (%d) is not larger than zero!?\n", mypars->num_of_runs);
     exit(1);
   }
+//   // sans time ==>
+//   processing_time = seconds_since(processing_timer);
+//   printf("processing time 5: %f\n", processing_time);
+//   // <== sans time
   free(cpu_result_ligands);
+  // <== sans
+// printf("sans process_resultL\n");fflush(stdout);
 }

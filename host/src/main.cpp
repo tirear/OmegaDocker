@@ -77,6 +77,7 @@ int main(int argc, char* argv[])
 {
   // Print version info
   printf("OmegaDocker version: %s\n\n", VERSION);
+//   printf("sans main0\n");fflush(stdout);
   // Print help screen if no parameters were specified
   // (or if last parameter is "-help"; parameters in
   //  between will be caught in initial_commandpars later)
@@ -170,6 +171,7 @@ int main(int argc, char* argv[])
       }
     }
   }
+//   printf("sans main0-1\n");fflush(stdout);
   int nr_devices=initial_pars.dev_pool.size();
   if(devnum>=0){ // user-specified argument on command line has precedence
     if(initial_pars.dev_pool.size()>1)
@@ -210,6 +212,7 @@ int main(int argc, char* argv[])
   }
   printf("\n");
   int max_preallocated_gridsize = preallocated_gridsize(filelist);
+//   printf("sans main0-2\n");fflush(stdout);
 
 #ifndef TOOLMODE
   // Objects that are arguments of docking_with_gpu
@@ -237,12 +240,19 @@ int main(int argc, char* argv[])
   Profiler profiler;
   for (int i=0;i<n_files;i++){
     profiler.p.push_back(Profile(i));
-    mpz_init(profiler.p[i].n_evals);
+    mpz_init(profiler.p[i].n_evals); // sans
     if (!get_profiles) break; // still create 1 if off
   }
 
   // Error flag for each ligand
   std::vector<int> err(n_files,0);
+// printf("sans main1\n");fflush(stdout);
+/* sans
+#ifndef TOOLMODE
+  if(!initial_pars.xml2dlg && (nr_devices==1))
+    setup_gpu_for_docking(cData[0],tData[0]);
+#endif
+sans */
   total_setup_time+=seconds_since(time_start);
   
   if(initial_pars.xml2dlg && !initial_pars.dlg2stdout){
@@ -252,7 +262,7 @@ int main(int argc, char* argv[])
     }
   }
 
-  Dockpars   mypars = initial_pars;
+  Dockpars   mypars = initial_pars; // sans
 #ifdef USE_PIPELINE
   #pragma omp parallel
   {
@@ -260,8 +270,14 @@ int main(int argc, char* argv[])
     int t_id = omp_get_thread_num();
 #else
   {
+//     printf("sans main1-1\n");fflush(stdout);
 #endif
+//     Dockpars   mypars = initial_pars; // sans
+//     Liganddata myligand_init; // sans
     Gridinfo*  mygrid = &initial_grid;
+//     Liganddata myxrayligand;  // sans
+//     SimulationState sim_state; // sans
+    // sans ==>
     Liganddata *myligand_init;
     Liganddata *myxrayligand;
     SimulationState *sim_state;
@@ -292,6 +308,7 @@ int main(int argc, char* argv[])
     sim_state->cpu_evals_of_runs = NULL;
     mpz_init(sim_state->generation_cnt);
     mpz_init(sim_state->total_evals);
+    // <== sans
     int dev_nr = 0;
 #ifndef _WIN32
     timeval setup_timer, exec_timer, processing_timer;
@@ -301,6 +318,7 @@ int main(int argc, char* argv[])
 #ifdef USE_PIPELINE
     #pragma omp for schedule(dynamic,1)
 #endif
+//     printf("sans main1-2\n");fflush(stdout);
     for(int i_job=0; i_job<n_files; i_job++){
       // Setup the next file in the queue
       if(filelist.used){
@@ -332,7 +350,8 @@ int main(int argc, char* argv[])
           if(nr_devices>1){
             if(mypars.dev_pool_nr<0){ // assign next available GPU
               dev_nr=-1;
-              for(int i=0; i<nr_devices; i++){
+//               for(unsigned int i=0; i<nr_devices; i++){ // sans
+              for(int i=0; i<nr_devices; i++){ // sans
                 if(!tData[i].device_busy){ // found an available GPU
                   dev_nr=i;
                   break;
@@ -342,15 +361,20 @@ int main(int argc, char* argv[])
               if(dev_nr<0) dev_nr = i_job % nr_devices;
             } else dev_nr = mypars.dev_pool_nr; // this is set when specific GPU is requested
             tData[dev_nr].device_busy = true;
+//             setup_gpu_for_docking(cData[dev_nr],tData[dev_nr]); // sans
+//             printf("sans main2\n");fflush(stdout);
             fflush(stdout);
           }
         }
       }
 #endif
+// printf("sans main1-2-1\n");fflush(stdout);
       start_timer(setup_timer);
+//       printf("sans main1-2-1?\n");fflush(stdout);
       // Load files, read inputs, prepare arrays for docking stage
-      if (setup(mygrid, &mypars, *myligand_init, *myxrayligand, filelist, i_job, argc, argv) != 0)
-      {
+//       if (setup(mygrid, &mypars, myligand_init, myxrayligand, filelist, i_job, argc, argv) != 0) { // sans
+      if (setup(mygrid, &mypars, *myligand_init, *myxrayligand, filelist, i_job, argc, argv) != 0) { // sans
+//         printf("sans main1-2-1-1\n");fflush(stdout);
         // If error encountered: Set error flag to 1; Add to count of finished jobs
         // Keep in setup stage rather than moving to launch stage so a different job will be set up
 #ifdef USE_PIPELINE
@@ -374,55 +398,79 @@ int main(int argc, char* argv[])
         #pragma omp atomic update
 #endif
         total_setup_time+=seconds_since(setup_timer);
+//         printf("sans main1-2-1-2\n");fflush(stdout);
       }
+// printf("sans main1-2-2\n");fflush(stdout);
+// sans ==>
 #ifndef TOOLMODE
-      if(!initial_pars.xml2dlg)
-      {
-        if(nr_devices==1)
-        {
-          setup_gpu_for_docking(cData[0],tData[0], myligand_init, &mypars);
-        }
-        else if(nr_devices>1)
-        {
-          setup_gpu_for_docking(cData[dev_nr],tData[dev_nr], myligand_init, &mypars);
-        }
-        else
-        {
-          printf("ERROR: Number of GPU devices is smaller than 1.\n");
-          exit(1);
-        }
-      }
+// printf("sans main_cData1\n");fflush(stdout);
+  if(!initial_pars.xml2dlg)
+  {
+    if(nr_devices==1)
+    {
+      setup_gpu_for_docking(cData[0],tData[0], myligand_init, &mypars);
+//       printf("sans main_cData2\n");fflush(stdout);
+    }
+    else if(nr_devices>1)
+    {
+      setup_gpu_for_docking(cData[dev_nr],tData[dev_nr], myligand_init, &mypars);
+//       printf("sans main_cData3\n");fflush(stdout);
+    }
+    else
+    {
+      printf("ERROR: Number of GPU devices is smaller than 1.\n");
+      exit(1);
+    }
+  }
 #endif
+// printf("sans main_cData4\n");fflush(stdout);
+// <== sans
       // Starting Docking or loading results
-      if(mypars.xml2dlg)
-      {
+      if(mypars.xml2dlg){
         start_timer(setup_timer);
         // allocating CPU memory for initial populations
         mypars.output_xml = false;
         int nrot;
         long unsigned int runNum = 0;
-        sim_state->cpu_populations = read_xml_genomes(mypars.load_xml, mygrid->spacing, nrot, myligand_init, &runNum, true);
-        if(nrot!=(*myligand_init).num_of_rotbonds)
-        {
-          printf("\nError: XML genome contains %d rotatable bonds but current ligand has %d.\n",nrot,(*myligand_init).num_of_rotbonds);
+//         (*sim_state).cpu_populations = read_xml_genomes(mypars.load_xml, mygrid->spacing, nrot, &runNum, true); // sans
+        sim_state->cpu_populations = read_xml_genomes(mypars.load_xml, mygrid->spacing, nrot, myligand_init, &runNum, true); // sans
+        if(nrot!=(*myligand_init).num_of_rotbonds){ // sans
+          printf("\nError: XML genome contains %d rotatable bonds but current ligand has %d.\n",nrot,(*myligand_init).num_of_rotbonds); // sans
           exit(2);
         }
         double movvec_to_origo[3];
+        /* sans
+        sim_state.myligand_reference = myligand_init;
+        get_movvec_to_origo(&(sim_state.myligand_reference), movvec_to_origo);
+        sans */
+        // sans ==>
         LiganddataCopy(sim_state->myligand_reference, myligand_init);
         get_movvec_to_origo(sim_state->myligand_reference, movvec_to_origo);
+        // <== sans
         double flex_vec[3];
         for (unsigned int i=0; i<3; i++)
-        {
           flex_vec [i] = -mygrid->origo_real_xyz [i];
-        }
+        /* sans
+        move_ligand(&(sim_state.myligand_reference), movvec_to_origo, flex_vec);
+        scale_ligand(&(sim_state.myligand_reference), 1.0/mygrid->spacing);
+        get_moving_and_unit_vectors(&(sim_state.myligand_reference));
+        sans */
+        // sans ==>
         move_ligand(sim_state->myligand_reference, movvec_to_origo, flex_vec);
         scale_ligand(sim_state->myligand_reference, 1.0/mygrid->spacing);
         get_moving_and_unit_vectors(sim_state->myligand_reference);
+        // <== sans
         mypars.pop_size = 1;
+//         mypars.num_of_runs = sim_state.cpu_populations.size()/GENOTYPE_LENGTH_IN_GLOBMEM; // sans
         mypars.num_of_runs = runNum;
-        
         // allocating CPU memory for results
+        /* sans
+        size_t size_energies = mypars.pop_size * mypars.num_of_runs * sizeof(float);
+        sim_state.cpu_energies.resize(size_energies);
+        sans */
+        // sans ==>
         size_t size_energies = mypars.pop_size * sizeof(float);
+//         (*sim_state).cpu_energies = (std::vector<float> *) malloc(mypars.num_of_runs * sizeof(std::vector<float>)); // sans for std::vector<float> *
         sim_state->cpu_energies = (float **) malloc(mypars.num_of_runs * sizeof(float *));
         if(sim_state->cpu_energies == NULL)
         {
@@ -432,6 +480,7 @@ int main(int argc, char* argv[])
         
         for(long unsigned int i = 0; i < mypars.num_of_runs; i++)
         {
+//           (*sim_state).cpu_energies[i].resize(size_energies); // sans for std::vector<float> *
           sim_state->cpu_energies[i] = (float *) malloc(size_energies);
           if(sim_state->cpu_energies[i] = NULL)
           {
@@ -439,17 +488,24 @@ int main(int argc, char* argv[])
             exit(1);
           }
         }
-        
+        // <== sans
         // allocating memory in CPU for evaluation counters
+        /* sans
+        size_t size_evals_of_runs = mypars.num_of_runs*sizeof(int);
+        sim_state.cpu_evals_of_runs.resize(size_evals_of_runs);
+        memset(sim_state.cpu_evals_of_runs.data(), 0, size_evals_of_runs);
+        sans */
+        // sans ==>
         if(sim_state->cpu_evals_of_runs != NULL)
         {
           printf("ERROR: Bug? sim_state->cpu_evals_of_runs should be NULL.");
           exit(1);
         }
         sim_state->cpu_evals_of_runs = (int *) calloc(mypars.num_of_runs, sizeof(int));
+        // <== sans
         total_setup_time+=seconds_since(setup_timer);
-        sim_state->idle_time = 0.0;
-        sim_state->exec_time = 0.0;
+        sim_state->idle_time = 0.0; // sans
+        sim_state->exec_time = 0.0; // sans
       }
 #ifndef TOOLMODE
       else
@@ -472,41 +528,43 @@ int main(int argc, char* argv[])
           fflush(stdout);
         } else para_printf("\n");
         // End idling timer, start exec timer
-        sim_state->idle_time = seconds_since(idle_timer);
+        sim_state->idle_time = seconds_since(idle_timer); // sans
         start_timer(exec_timer);
-        
         // Dock
+//         printf("sans main1-2-2-1\n");fflush(stdout);
+        // sans ==>
         printf("    Number of atoms of the ligand          : %d\n", myligand_init->num_of_atoms);
         printf("    Number of rotatable bonds of the ligand: %d\n", myligand_init->num_of_rotbonds);
-        error_in_docking = docking_with_gpu(mygrid, &(mypars), myligand_init, myxrayligand, profiler.p[(get_profiles ? i_job : 0)], &argc, argv, *sim_state, cData[dev_nr], tData[dev_nr], output);
-        
+        // <== sans
+//         error_in_docking = docking_with_gpu(mygrid, &(mypars), &(myligand_init), &(myxrayligand), profiler.p[(get_profiles ? i_job : 0)], &argc, argv, sim_state, cData[dev_nr], tData[dev_nr], output); // sans
+        error_in_docking = docking_with_gpu(mygrid, &(mypars), myligand_init, myxrayligand, profiler.p[(get_profiles ? i_job : 0)], &argc, argv, *sim_state, cData[dev_nr], tData[dev_nr], output); // sans
+//         printf("sans main1-2-2-2\n");fflush(stdout);
         // End exec timer, start idling timer
-        sim_state->exec_time = seconds_since(exec_timer);
+        sim_state->exec_time = seconds_since(exec_timer); // sans
         start_timer(idle_timer);
 #ifdef USE_PIPELINE
         omp_unset_lock(&gpu_locks[dev_nr]);
 #endif
-        if (error_in_docking!=0)
-        {
+//         printf("sans main1-2-3\n");fflush(stdout);
+        if (error_in_docking!=0){
           // If error encountered: Set error flag to 1; Add to count of finished jobs
           // Set back to setup stage rather than moving to processing stage so a different job will be set up
           para_printf("\nError in docking_with_gpu, stopped Job #%d.\n",i_job+1);
           err[i_job] = 1;
           continue;
-        }
-        else
-        { // Successful run
+        } else { // Successful run
 #ifndef _WIN32
 #ifdef USE_PIPELINE
           #pragma omp atomic update
 #endif
-          total_exec_time+=(*sim_state).exec_time;
-          para_printf("\nJob #%d took %.3f sec after waiting %.3f sec for setup\n\n", i_job+1, (*sim_state).exec_time, (*sim_state).idle_time);
+          total_exec_time+=(*sim_state).exec_time; // sans
+          para_printf("\nJob #%d took %.3f sec after waiting %.3f sec for setup\n\n", i_job+1, (*sim_state).exec_time, (*sim_state).idle_time); // sans
           if (get_profiles && filelist.used){
             // Detailed timing information to .timing
-            profiler.p[i_job].exec_time = (*sim_state).exec_time;
+            profiler.p[i_job].exec_time = (*sim_state).exec_time; // sans
           }
 #endif
+// printf("sans main1-2-4\n");fflush(stdout);
         }
 #ifdef USE_PIPELINE
         if(nr_devices>1){
@@ -518,6 +576,7 @@ int main(int argc, char* argv[])
           delete output;
         }
 #endif
+// printf("sans main1-2-5\n");fflush(stdout);
       }
 #endif
       // Post-processing
@@ -530,7 +589,10 @@ int main(int argc, char* argv[])
       }
 #endif
       start_timer(processing_timer);
-      process_result(mygrid, &(mypars), myligand_init, myxrayligand, &argc,argv, *sim_state);
+//       printf("sans main1-2-6\n");fflush(stdout);
+//       process_result(mygrid, &(mypars), &(myligand_init), &(myxrayligand), &argc,argv, sim_state); // sans
+      process_result(mygrid, &(mypars), myligand_init, myxrayligand, &argc,argv, *sim_state); // sans
+//       printf("sans main1-2-7\n");fflush(stdout);
 #ifdef USE_PIPELINE
       #pragma omp atomic update
 #endif
@@ -544,9 +606,12 @@ int main(int argc, char* argv[])
         if(mypars.xrayligandfile) free(mypars.xrayligandfile);
         if(mypars.resname) free(mypars.resname);
       }
+      // sans ==>
       free(sim_state->cpu_evals_of_runs);
       sim_state->cpu_evals_of_runs = NULL;
+      // <== sans
     } // end of for loop
+//     printf("sans main1-3\n");fflush(stdout);
 #ifdef USE_PIPELINE
     #pragma omp single
 #endif
@@ -559,14 +624,17 @@ int main(int argc, char* argv[])
       if(mypars.xrayligandfile) free(mypars.xrayligandfile);
       if(mypars.resname) free(mypars.resname);
     }
+    // sans ==>
     mpz_clear(sim_state->generation_cnt);
     mpz_clear(sim_state->total_evals);
+    // <== sans
   } // end of parallel section
   if(initial_pars.xml2dlg && !initial_pars.dlg2stdout && (n_files>100)) printf("\n\n"); // finish progress bar
 
   
 #ifndef _WIN32
   // Total time measurement
+  // printf("Run time of entire job set (%d file%s): %.3f sec\n", n_files, n_files>1?"s":"", seconds_since(time_start)); // sans
 #ifdef USE_PIPELINE
   if(n_files>1){
     printf("Savings from multithreading: %.3f sec\n",(total_setup_time+total_processing_time+total_exec_time) - seconds_since(time_start));
@@ -578,7 +646,7 @@ int main(int argc, char* argv[])
 #else
   printf("Processing time: %.3f sec\n",total_processing_time);
 #endif
-  printf("Run time of entire job set (%d file%s): %.3f sec\n", n_files, n_files>1?"s":"", seconds_since(time_start));
+  printf("Run time of entire job set (%d file%s): %.3f sec\n", n_files, n_files>1?"s":"", seconds_since(time_start)); // sans
 #endif
 #ifndef TOOLMODE
   for(int i=0; i<nr_devices; i++){

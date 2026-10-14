@@ -27,13 +27,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include <vector>
 #include <cmath>
 
-#include <gmp.h> 
+#include <gmp.h> // sans
 
 struct Profile{
 public:
   int   id;
   bool  adadelta;
-  mpz_t n_evals;
+//   int   n_evals; // sans
+  mpz_t n_evals; // sans
   bool  capped;
   bool  autostopped;
   int   nev_at_stop;
@@ -46,10 +47,13 @@ public:
   void write_to_file(FILE* fp){
     int success = (exec_time>=0.0f ? 1 : 0);
     float real_exec_time = (exec_time>=0.0f ? exec_time : 0.0f);
-    char *evals_str;
+//     fprintf(fp, "\n%d %d %s %d %d %d %d %d %d %.3f", id, adadelta?1:0, n_evals, capped?1:0, autostopped, nev_at_stop, num_atoms, num_rotbonds, success, real_exec_time ); // sans
+    // sans ==>
+    char *evals_str; //sans
     evals_str = mpz_get_str(NULL, 10, n_evals);
     fprintf(fp, "\n%d %d %s %d %d %d %d %d %d %.3f", id, adadelta?1:0, evals_str, capped?1:0, autostopped, nev_at_stop, num_atoms, num_rotbonds, success, real_exec_time );
     free(evals_str);
+    // <== sans
   }
 };
 

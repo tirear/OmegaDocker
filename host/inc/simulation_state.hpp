@@ -37,13 +37,21 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include "processresult.h"
 
 struct SimulationState{
-  float             **cpu_populations;
-  float             **cpu_energies;
-  Liganddata        *myligand_reference;
-  int               *cpu_evals_of_runs;
-  mpz_t              generation_cnt;
+//  std::vector<float> cpu_populations; // sans
+//  std::vector<float> cpu_energies; // sans
+//   std::vector<float> *cpu_populations; // sans for std::vector<float> *
+  float             **cpu_populations; // sans
+//   std::vector<float> *cpu_energies; // sans for std::vector<float> *
+  float             **cpu_energies; // sans
+//   Liganddata         myligand_reference; // sans
+  Liganddata        *myligand_reference; // sans
+//   std::vector<int>   cpu_evals_of_runs; // sans
+  int               *cpu_evals_of_runs; // sans
+//   int                generation_cnt; // sans
+  mpz_t              generation_cnt; // sans
   float              sec_per_run;
-  mpz_t              total_evals;
+//   unsigned long      total_evals; // sans
+  mpz_t              total_evals; // sans
   double             exec_time;
   double             idle_time;
 };

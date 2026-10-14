@@ -49,30 +49,55 @@ int prepare_const_fields_for_gpu(
 // --------------------------------------------------
 // atom_charges:            Stores the ligand atom charges.
 //                          Element i corresponds to atom with atom ID i in myligand_reference.
-  float* atom_charges            = new float[myligand_reference->num_of_atoms];
+//   float* atom_charges            = new float[MAX_NUM_OF_ATOMS]; // sans
+  float* atom_charges            = new float[myligand_reference->num_of_atoms]; // sans
 // atom_types:              Stores the ligand atom type IDs according to myligand_reference.
 //                          Element i corresponds to atom with ID i in myligand_reference.
-  int*   atom_types              = new int[myligand_reference->num_of_atoms];
+//   int*   atom_types              = new int[MAX_NUM_OF_ATOMS]; // sans
+  int*   atom_types              = new int[myligand_reference->num_of_atoms]; // sans
 // intraE_contributors:     Each three contiguous items describe an intramolecular contributor.
 //                          The first two elements store the atom ID of the contributors according to myligand_reference.
 //                          The third element is 0, if no H-bond can occur between the two atoms, and 1, if it can.
+//   int*   intraE_contributors     = new int[2*MAX_INTRAE_CONTRIBUTORS]; // sans
   int max_num_of_intraE_contributors = myligand_reference->num_of_atoms * myligand_reference->num_of_atoms;
-  int*   intraE_contributors     = new int[2 * max_num_of_intraE_contributors];
-  size_t num_used_atom_types      = myligand_reference->num_of_atypes;
-  size_t num_used_atom_type_pairs = myligand_reference->num_of_atypes * myligand_reference->num_of_atypes;
-  unsigned short* VWpars_exp     = new unsigned short[num_used_atom_type_pairs];
-  float* reqm_AB                 = new float[num_used_atom_type_pairs];
+  int*   intraE_contributors     = new int[2 * max_num_of_intraE_contributors]; // sans
+  size_t num_used_atom_types      = myligand_reference->num_of_atypes; // sans
+  size_t num_used_atom_type_pairs = myligand_reference->num_of_atypes * myligand_reference->num_of_atypes; // sans
+//   unsigned short* VWpars_exp     = new unsigned short[MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES]; // sans
+  unsigned short* VWpars_exp     = new unsigned short[num_used_atom_type_pairs]; // sans
+//   float* reqm_AB                 = new float[MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES]; // sans
+  float* reqm_AB                 = new float[num_used_atom_type_pairs]; // sans
 // VWpars_AC_const:         Stores the A or C van der Waals parameters.
 //                          The element i*MAX_NUM_OF_ATYPES+j and j*MAX_NUM_OF_ATYPES+i corresponds to A or C in case of
 //                          H-bond for atoms with type ID i and j (according to myligand_reference).
-  float* VWpars_AC               = new float[num_used_atom_type_pairs];
+//   float* VWpars_AC               = new float[MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES]; // sans
+  float* VWpars_AC               = new float[num_used_atom_type_pairs]; // sans
 // VWpars_BD:               Stores the B or D van der Waals parameters similar to VWpars_AC.
-  float* VWpars_BD               = new float[num_used_atom_type_pairs];
+//   float* VWpars_BD               = new float[MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES]; // sans
+  float* VWpars_BD               = new float[num_used_atom_type_pairs]; // sans
 // dspars_S:                Stores the S desolvation parameters.
 //                          The element i corresponds to the S parameter of atom with type ID i
 //                          according to myligand_reference.
-  float* dspars_S                = new float[myligand_reference->num_of_atypes];
-  float* dspars_V                = new float[myligand_reference->num_of_atypes];
+//   float* dspars_S                = new float[MAX_NUM_OF_ATYPES]; // sans
+  float* dspars_S                = new float[myligand_reference->num_of_atypes]; // sans
+//   float* dspars_V                = new float[MAX_NUM_OF_ATYPES]; // sans
+  float* dspars_V                = new float[myligand_reference->num_of_atypes]; // sans
+// rotlist:                 Stores the data describing the rotations for conformation calculation.
+//                          Each element describes one rotation, and the elements are in a proper order,
+//                          considering that NUM_OF_THREADS_PER_BLOCK rotations will be performed in
+//                          parallel (that is, each block of contiguous NUM_OF_THREADS_PER_BLOCK pieces of
+//                          elements describe rotations that can be performed simultaneously).
+//                          One element is a 32 bit integer, with bit 0 in the LSB position.
+//                          Bit  7-0 describe the atom ID of the atom to be rotated (according to myligand_reference).
+//                          Bit 15-7 describe the rotatable bond ID of the bond around which the atom is to be rotated (if this is not a general rotation)
+//                                   (bond ID is according to myligand_reference).
+//                          If bit 16 is 1, this is the first rotation of the atom.
+//                          If bit 17 is 1, this is a general rotation (so rotbond ID has to be ignored).
+//                          If bit 18 is 1, this is a "dummy" rotation, that is, no rotation can be performed in this cycle
+//                                         (considering the other rotations which are being carried out in this period).
+//   int*   rotlist                 = new int[MAX_NUM_OF_ROTATIONS]; // sans
+  // sans ==>
+  // sans 由於 gen_rotlist() 裡面的設計，所以要如下 if...else
   int max_num_rotations;
   int windowSize;
   if(myligand_reference->num_of_atoms < NUM_OF_THREADS_PER_BLOCK)
@@ -87,19 +112,25 @@ int prepare_const_fields_for_gpu(
   int   *rotlist                 = new int[max_num_rotations];
   int   *rotlist_atomId          = (int *)  calloc(max_num_rotations, sizeof(int));
   int   *rotlist_rotatableBondId = (int *)  calloc(max_num_rotations, sizeof(int));
+  // <== sans
 // ref_coords_x:            Stores the x coordinates of the reference ligand atoms.
 //                          Element i corresponds to the x coordinate of the atom with atom ID i (according to myligand_reference).
-  float* ref_coords_x            = new float[myligand_reference->num_of_atoms];
+//   float* ref_coords_x            = new float[MAX_NUM_OF_ATOMS]; // sans
+  float* ref_coords_x            = new float[myligand_reference->num_of_atoms]; // sans
 // ref_coords_y:            Stores the y coordinates of the reference ligand atoms similarly to ref_coords_x.
-  float* ref_coords_y            = new float[myligand_reference->num_of_atoms];
+//   float* ref_coords_y            = new float[MAX_NUM_OF_ATOMS]; // sans
+  float* ref_coords_y            = new float[myligand_reference->num_of_atoms]; // sans
 // ref_coords_z:            Stores the z coordinates of the reference ligand atoms similarly to ref_coords_x.
-  float* ref_coords_z            = new float[myligand_reference->num_of_atoms];
+//   float* ref_coords_z            = new float[MAX_NUM_OF_ATOMS]; // sans
+  float* ref_coords_z            = new float[myligand_reference->num_of_atoms]; // sans
 // rotbonds_moving_vectors: Stores the coordinates of rotatable bond moving vectors. Element i, i+1 and i+2 (where i%3=0)
 //                          correspond to the moving vector coordinates x, y and z of rotbond ID i, respectively
 //                          (according to myligand_reference).
-  float* rotbonds_moving_vectors = new float[3*myligand_reference->num_of_rotbonds];
+//   float* rotbonds_moving_vectors = new float[3*MAX_NUM_OF_ROTBONDS]; // sans
+  float* rotbonds_moving_vectors = new float[3*myligand_reference->num_of_rotbonds]; // sans
 // rotbonds_unit_vectors:   Stores the coordinates of rotatable bond unit vectors similarly to rotbonds_moving_vectors.
-  float* rotbonds_unit_vectors = new float[3*myligand_reference->num_of_rotbonds];
+//   float* rotbonds_unit_vectors   = new float[3*MAX_NUM_OF_ROTBONDS]; // sans
+  float* rotbonds_unit_vectors = new float[3*myligand_reference->num_of_rotbonds]; // sans
 
 // rot_bonds:               Added for calculating torsion-related gradients.
 //                          Passing list of rotbond-atom ids to the GPU.
@@ -108,18 +139,21 @@ int prepare_const_fields_for_gpu(
 //                          The rotatable bond is described with the indices of the two atoms which are connected
 //                          to each other by the bond.
 //                          The row index is equal to the index of the rotatable bond.
-  int*   rotbonds                = new int[2*myligand_reference->num_of_rotbonds];
+//   int*   rotbonds                = new int[2*MAX_NUM_OF_ROTBONDS]; // sans
+  int*   rotbonds                = new int[2*myligand_reference->num_of_rotbonds]; // sans
 
 // rotbonds_atoms:          Contains the same information as processligand.h/Liganddata->atom_rotbonds:
 //                                  Matrix that contains the rotatable bonds - atoms assignment.
 //                                  If the element [atom index][rotatable bond index] is equal to 1,
 //                                  then the atom must be rotated if the bond rotates. A 0 means the opposite.
-  int*   rotbonds_atoms          = new int[max_num_rotations];
+//   int*   rotbonds_atoms          = new int[MAX_NUM_OF_ATOMS*MAX_NUM_OF_ROTBONDS]; // sans
+  int*   rotbonds_atoms          = new int[max_num_rotations]; // sans 可能也受到 gen_rotlist() 的影響
 
 // num_rotating_atoms_per_rotbond:
 //                          Each entry corresponds to a rotbond_id
 //                          The value of an entry indicates the number of atoms that rotate along with that rotbond_id
-  int*   num_rotating_atoms_per_rotbond = new int[myligand_reference->num_of_rotbonds];
+//   int*   num_rotating_atoms_per_rotbond = new int[MAX_NUM_OF_ROTBONDS]; // sans
+  int*   num_rotating_atoms_per_rotbond = new int[myligand_reference->num_of_rotbonds]; // sans
 // --------------------------------------------------
 
   // charges and type id-s
@@ -210,6 +244,7 @@ int prepare_const_fields_for_gpu(
   }
 
   // generate rotation list
+//   if (gen_rotlist(myligand_reference, rotlist) != 0) // sans
   if(gen_rotlist(myligand_reference,
                  rotlist,
                  rotlist_atomId,
@@ -249,7 +284,8 @@ int prepare_const_fields_for_gpu(
   // "atom_rotbonds": array that contains the rotatable bonds - atoms assignment.
   // If the element atom_rotbonds[atom index][rotatable bond index] is equal to 1,
   // it means,that the atom must be rotated if the bond rotates. A 0 means the opposite.
-  for (i=0; i<myligand_reference->num_of_rotbonds; i++)
+//   for (i=0; i<MAX_NUM_OF_ROTBONDS; i++) // sans
+  for (i=0; i<myligand_reference->num_of_rotbonds; i++) // sans
   {
     num_rotating_atoms_per_rotbond [i] = 0;
   }
@@ -257,7 +293,8 @@ int prepare_const_fields_for_gpu(
   for (i=0; i < myligand_reference->num_of_rotbonds; i++)
   {
     // Pointing to the mem area corresponding to a given rotbond
-    intpoi = rotbonds_atoms + windowSize*i;
+//     intpoi = rotbonds_atoms + MAX_NUM_OF_ATOMS*i; // sans
+    intpoi = rotbonds_atoms + windowSize*i; // sans
 
     for (j=0; j < myligand_reference->num_of_atoms; j++)
     {
@@ -278,8 +315,23 @@ int prepare_const_fields_for_gpu(
   }
 
   int m;
-  size_t m2;
-  
+  size_t m2; // sans
+
+  /* sans
+  for (m=0;m<MAX_NUM_OF_ATOMS;m++){
+    if (m<myligand_reference->num_of_atoms)
+      KerConst_interintra->ignore_inter_const[m] = (char)myligand_reference->ignore_inter[m];
+    else
+      KerConst_interintra->ignore_inter_const[m] = 1;
+  }
+  for (m=0;m<MAX_NUM_OF_ATOMS;m++){ KerConst_interintra->atom_charges_const[m]    = atom_charges[m];    }
+  for (m=0;m<MAX_NUM_OF_ATOMS;m++){ KerConst_interintra->atom_types_const[m]      = atom_types[m];      }
+  for (m=0;m<MAX_NUM_OF_ATOMS;m++){ KerConst_interintra->atom_types_map_const[m]  = myligand_reference->atom_map_to_fgrids[m]; }
+
+  for (m=0;m<2*MAX_INTRAE_CONTRIBUTORS;m++){ KerConst_intracontrib->intraE_contributors_const[m] = intraE_contributors[m]; }
+  sans */
+  // sans ==>
+//   printf("sans calcenergy prepare_const_fields_for_gpu 3 myligand_reference->num_of_atoms: %d\n", myligand_reference->num_of_atoms);fflush(stdout); // sans
   for (m=0;m<myligand_reference->num_of_atoms;m++){
     KerConst_interintra->ignore_inter_const[m] = (char)myligand_reference->ignore_inter[m];
   }
@@ -288,7 +340,19 @@ int prepare_const_fields_for_gpu(
   for (m=0;m<myligand_reference->num_of_atoms;m++){ KerConst_interintra->atom_types_map_const[m]  = myligand_reference->atom_map_to_fgrids[m]; }
 
   for (m=0;m<2*max_num_of_intraE_contributors;m++){ KerConst_intracontrib->intraE_contributors_const[m] = intraE_contributors[m]; }
+  // <== sans
 
+  /* sans
+  for (m=0;m<MAX_NUM_OF_ATYPES;m++)      { KerConst_intra->atom_types_reqm_const[m]  = myligand_reference->atom_types_reqm[m]; }
+  for (m=0;m<MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES;m++)  { KerConst_intra->VWpars_exp_const[m]       = VWpars_exp[m]; }
+  for (m=0;m<MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES;m++)  { KerConst_intra->reqm_AB_const[m]          = reqm_AB[m]; }
+  for (m=0;m<MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES;m++)  { KerConst_intra->VWpars_AC_const[m]        = VWpars_AC[m]; }
+  for (m=0;m<MAX_NUM_OF_ATYPES*MAX_NUM_OF_ATYPES;m++)  { KerConst_intra->VWpars_BD_const[m]        = VWpars_BD[m]; }
+  for (m=0;m<MAX_NUM_OF_ATYPES;m++)         { KerConst_intra->dspars_S_const[m]         = dspars_S[m]; }
+  for (m=0;m<MAX_NUM_OF_ATYPES;m++)         { KerConst_intra->dspars_V_const[m]         = dspars_V[m]; }
+  sans */
+
+  // sans ==>
   for (m2=0;m2<num_used_atom_types;m2++)      { KerConst_intra->atom_types_reqm_const[m2] = myligand_reference->atom_types_reqm[m2]; }
   for (m2=0;m2<num_used_atom_type_pairs;m2++) { KerConst_intra->VWpars_exp_const[m2]      = VWpars_exp[m2]; }
   for (m2=0;m2<num_used_atom_type_pairs;m2++) { KerConst_intra->reqm_AB_const[m2]         = reqm_AB[m2]; }
@@ -296,19 +360,40 @@ int prepare_const_fields_for_gpu(
   for (m2=0;m2<num_used_atom_type_pairs;m2++) { KerConst_intra->VWpars_BD_const[m2]       = VWpars_BD[m2]; }
   for (m2=0;m2<num_used_atom_types;m2++)      { KerConst_intra->dspars_S_const[m2]        = dspars_S[m2]; }
   for (m2=0;m2<num_used_atom_types;m2++)      { KerConst_intra->dspars_V_const[m2]        = dspars_V[m2]; }
+  // <== sans
 
-  for (m=0;m<max_num_rotations;m++) {
-    KerConst_rotlist->rotlist_const[m]  = rotlist[m];
-    KerConst_rotlist->rotlist_atomId[m]          = rotlist_atomId[m];
-    KerConst_rotlist->rotlist_rotatableBondId[m] = rotlist_rotatableBondId[m];
+//   for (m=0;m<MAX_NUM_OF_ROTATIONS;m++) { // sans
+  for (m=0;m<max_num_rotations;m++) { // sans
+    KerConst_rotlist->rotlist_const[m]  = rotlist[m]; // sans 可能也受到 gen_rotlist() 的影響
+    KerConst_rotlist->rotlist_atomId[m]          = rotlist_atomId[m]; // sans 可能也受到 gen_rotlist() 的影響
+    KerConst_rotlist->rotlist_rotatableBondId[m] = rotlist_rotatableBondId[m]; // sans 可能也受到 gen_rotlist() 的影響
+/*
+    if(m!=0 && m%myligand_reference->num_of_atoms==0)
+      printf("***\n");
+    if(m!=0 && m%NUM_OF_THREADS_PER_BLOCK==0)
+      printf("===\n");
+    printf("%i (%i): %i -> atom_id: %i, dummy: %i, first: %i, genrot: %i, rotbond_id: %i\n",m,m%NUM_OF_THREADS_PER_BLOCK,rotlist[m],rotlist[m] & RLIST_ATOMID_MASK, rotlist[m] & RLIST_DUMMY_MASK,rotlist[m] & RLIST_FIRSTROT_MASK,rotlist[m] & RLIST_GENROT_MASK,(rotlist[m] & RLIST_RBONDID_MASK) >> RLIST_RBONDID_SHIFT);
+*/
   }
 
-  for (m=0;m<myligand_reference->num_of_atoms;m++) {
+//   for (m=0;m<MAX_NUM_OF_ATOMS;m++) { // sans
+  for (m=0;m<myligand_reference->num_of_atoms;m++) { // sans
     KerConst_conform->ref_coords_const[3*m]     = ref_coords_x[m];
     KerConst_conform->ref_coords_const[3*m+1]   = ref_coords_y[m];
     KerConst_conform->ref_coords_const[3*m+2]   = ref_coords_z[m];
   }
+  /* sans
+  for (m=0;m<3*MAX_NUM_OF_ROTBONDS;m++){ KerConst_conform->rotbonds_moving_vectors_const[m]= rotbonds_moving_vectors[m]; } // sans
+  for (m=0;m<3*MAX_NUM_OF_ROTBONDS;m++){ KerConst_conform->rotbonds_unit_vectors_const[m]  = rotbonds_unit_vectors[m]; } // sans
 
+  // Added for calculating torsion-related gradients.
+  // Passing list of rotbond-atoms ids to the GPU.
+  // Contains the same information as processligand.h/Liganddata->rotbonds
+  for (m=0;m<2*MAX_NUM_OF_ROTBONDS;m++)       { KerConst_grads->rotbonds[m]           = rotbonds[m]; }
+  for (m=0;m<MAX_NUM_OF_ATOMS*MAX_NUM_OF_ROTBONDS;m++)   { KerConst_grads->rotbonds_atoms[m]                 = rotbonds_atoms[m]; }
+  for (m=0;m<MAX_NUM_OF_ROTBONDS;m++)       { KerConst_grads->num_rotating_atoms_per_rotbond[m] = num_rotating_atoms_per_rotbond[m]; }
+  sans */
+  // sans ==>
   for (m=0;m<3*myligand_reference->num_of_rotbonds;m++)
   {
     KerConst_conform->rotbonds_moving_vectors_const[m] = rotbonds_moving_vectors[m];
@@ -319,29 +404,51 @@ int prepare_const_fields_for_gpu(
   // Passing list of rotbond-atoms ids to the GPU.
   // Contains the same information as processligand.h/Liganddata->rotbonds
   for (m=0;m<2*myligand_reference->num_of_rotbonds;m++)       { KerConst_grads->rotbonds[m]           = rotbonds[m]; }
-  for (m=0;m<max_num_rotations;m++)   { KerConst_grads->rotbonds_atoms[m]                 = rotbonds_atoms[m]; }
+  for (m=0;m<max_num_rotations;m++)   { KerConst_grads->rotbonds_atoms[m]                 = rotbonds_atoms[m]; } // sans 可能也受到 gen_rotlist() 的影響
   for (m=0;m<myligand_reference->num_of_rotbonds;m++)       { KerConst_grads->num_rotating_atoms_per_rotbond[m] = num_rotating_atoms_per_rotbond[m]; }
+  // <== sans
 
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-1\n");fflush(stdout); // sans
   delete[] atom_charges;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-2\n");fflush(stdout); // sans
   delete[] atom_types;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-3\n");fflush(stdout); // sans
   delete[] intraE_contributors;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-4\n");fflush(stdout); // sans
   delete[] VWpars_exp;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-5\n");fflush(stdout); // sans
   delete[] reqm_AB;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-6\n");fflush(stdout); // sans
   delete[] VWpars_AC;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-7\n");fflush(stdout); // sans
   delete[] VWpars_BD;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-8\n");fflush(stdout); // sans
   delete[] dspars_S;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-9\n");fflush(stdout); // sans
   delete[] dspars_V;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-10\n");fflush(stdout); // sans
   delete[] rotlist;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-11\n");fflush(stdout); // sans
   delete[] ref_coords_x;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-12\n");fflush(stdout); // sans
   delete[] ref_coords_y;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-13\n");fflush(stdout); // sans
   delete[] ref_coords_z;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-14\n");fflush(stdout); // sans
   delete[] rotbonds_moving_vectors;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-15\n");fflush(stdout); // sans
   delete[] rotbonds_unit_vectors;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-16\n");fflush(stdout); // sans
   delete[] rotbonds;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-17\n");fflush(stdout); // sans
   delete[] rotbonds_atoms;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-18\n");fflush(stdout); // sans
   delete[] num_rotating_atoms_per_rotbond;
+//   printf("sans calcenergy prepare_const_fields_for_gpu L-19\n");fflush(stdout); // sans
+  // sans ==>
   free(rotlist_atomId);
   free(rotlist_rotatableBondId);
+  // <== sans
 
   return 0;
 }
@@ -349,8 +456,14 @@ int prepare_const_fields_for_gpu(
 
 
 void make_reqrot_ordering(
+                          /* sans
+                          int number_of_req_rotations[MAX_NUM_OF_ATOMS],
+                          int atom_id_of_numrots[MAX_NUM_OF_ATOMS],
+                          sans */
+                          // sans ==>
                           int *number_of_req_rotations,
                           int *atom_id_of_numrots,
+                          // <== sans
                           int num_of_atoms
                          )
 // The function puts the first array into a descending order and
@@ -375,20 +488,38 @@ void make_reqrot_ordering(
         atom_id_of_numrots[i] = atom_id_of_numrots[i+1];
         atom_id_of_numrots[i+1] = temp;
       }
+
+/*  printf("\n\nRotation priority list after re-ordering:\n");
+  for (i=0; i<num_of_atoms; i++)
+    printf("Roatom_rotbondstation of %d (required rots remaining: %d)\n", atom_id_of_numrots[i], number_of_req_rotations[i]);
+  printf("\n\n");*/
+
+
 }
 
 
 
 int gen_rotlist(
                 Liganddata* myligand,
-                int        *rotlist,
+//                 int         rotlist[MAX_NUM_OF_ROTATIONS] // sans
+                int        *rotlist, // sans
+                // sans ==>
                 int   *rotlist_atomId,
                 int   *rotlist_rotatableBondId
+                // <== sans
                )
 // The function generates the rotation list which will be stored in the constant memory field rotlist_const by
 // prepare_const_fields_for_gpu(). The structure of this array is described at that function.
 {
+//   printf("sans calcenergy gen_rotlist 1\n");fflush(stdout);
+//   printf("sans calcenergy gen_rotlist 1-1 myligand->num_of_atoms/myligand->num_of_rotbonds: %d/%d\n", myligand->num_of_atoms, myligand->num_of_rotbonds);fflush(stdout);
   int atom_id, rotb_id, parallel_rot_id, rotlist_id;
+  /* sans
+  int number_of_req_rotations[MAX_NUM_OF_ATOMS];
+  int atom_id_of_numrots[MAX_NUM_OF_ATOMS];
+  bool atom_wasnt_rotated_yet[MAX_NUM_OF_ATOMS];
+  sans */
+  // sans ==>
   int  *number_of_req_rotations;
   int  *atom_id_of_numrots;
   bool *atom_wasnt_rotated_yet;
@@ -422,17 +553,19 @@ int gen_rotlist(
     printf("ERROR: Cannot allocate memory for atom_wasnt_rotated_yet of gen_rotlist() on main memory.\n");
     exit(1);
   }
-  
+  // <== sans
   int new_rotlist_element;
   bool rotbond_found;
   int rotbond_candidate;
   int remaining_rots_around_rotbonds;
-  
+
+
   myligand->num_of_rotcyc = 0;
   myligand->num_of_rotations_required = 0;
 
 
-  for (atom_id=0; atom_id<NUM_OF_THREADS_PER_BLOCK; atom_id++)
+  // sans 下面這邊可能是 NUM_OF_THREADS_PER_BLOCK 上限是 256 的理由，原本 MAX_NUM_OF_ATOMS 就是 256
+  for (atom_id=0; atom_id<NUM_OF_THREADS_PER_BLOCK; atom_id++) // handling special case when num_of_atoms<NUM_OF_THREADS_PER_BLOCK
     number_of_req_rotations[atom_id] = 0;
 
   for (atom_id=0; atom_id<myligand->num_of_atoms; atom_id++)
@@ -444,6 +577,12 @@ int gen_rotlist(
 
     for (rotb_id=0; rotb_id<myligand->num_of_rotbonds; rotb_id++)
     {
+      // sans check ==>
+//       if(atom_id >= 70)
+//       {
+//         printf("sans calcenergy gen_rotlist 2-2 atom_id/rotb_id/myligand->atom_rotbonds[atom_id][rotb_id]: %d/%d/%d\n", atom_id, rotb_id, myligand->atom_rotbonds[atom_id][rotb_id]);
+//       }
+      // <== sans check
       if (myligand->atom_rotbonds[atom_id][rotb_id] != 0)
         (number_of_req_rotations[atom_id])++;
     }
@@ -455,7 +594,8 @@ int gen_rotlist(
   make_reqrot_ordering(number_of_req_rotations, atom_id_of_numrots, myligand->num_of_atoms);
   while (number_of_req_rotations[0] != 0) // if the atom with the most remaining rotations has to be rotated 0 times, done
   {
-    if (rotlist_id == max_num_rotations)
+//     if (rotlist_id == MAX_NUM_OF_ROTATIONS) // sans
+    if (rotlist_id == max_num_rotations) // sans
     {
       printf("sans calcenergy gen_rotlist 2-3-3 WhAt?!!!\n");fflush(stdout); // sans
       return 1;
@@ -464,6 +604,8 @@ int gen_rotlist(
     // putting the NUM_OF_THREADS_PER_BLOCK pieces of most important rotations to the list
     for (parallel_rot_id=0; parallel_rot_id<NUM_OF_THREADS_PER_BLOCK; parallel_rot_id++)
     {
+//       printf("sans calcenergy gen_rotlist 2-3-3-1 parallel_rot_id/number_of_req_rotations[parallel_rot_id]: %d/%d\n", parallel_rot_id, number_of_req_rotations[parallel_rot_id]);fflush(stdout); // sans
+
       if (number_of_req_rotations[parallel_rot_id] == 0) // if the atom has not to be rotated anymore, dummy rotation
       {
         new_rotlist_element = RLIST_DUMMY_MASK;
@@ -471,8 +613,10 @@ int gen_rotlist(
       else
       {
         atom_id = atom_id_of_numrots[parallel_rot_id];
-        rotlist_atomId[rotlist_id] = atom_id;
+        rotlist_atomId[rotlist_id] = atom_id; // sans
         new_rotlist_element = ((int) atom_id) & RLIST_ATOMID_MASK;
+
+//         printf("sans calcenergy gen_rotlist 2-3-3-2 parallel_rot_id/number_of_req_rotations[parallel_rot_id]: %d/%d\n", parallel_rot_id, number_of_req_rotations[parallel_rot_id]);fflush(stdout); // sans
 
         if (number_of_req_rotations[parallel_rot_id] == 1)
         {
@@ -483,8 +627,12 @@ int gen_rotlist(
           rotbond_found = false;
           rotbond_candidate = myligand->num_of_rotbonds - 1;
           remaining_rots_around_rotbonds = number_of_req_rotations[parallel_rot_id] - 1; // -1 because of genrot
+
+//           printf("sans calcenergy gen_rotlist 2-3-3-3 parallel_rot_id/number_of_req_rotations[parallel_rot_id]/rotbond_candidate: %d/%d/%d\n", parallel_rot_id, number_of_req_rotations[parallel_rot_id], rotbond_candidate);fflush(stdout); // sans
+
           while (!rotbond_found)
           {
+//             printf("sans calcenergy gen_rotlist 2-3-3-4 atom_id/rotbond_candidate/myligand->atom_rotbonds[atom_id][rotbond_candidate]: %d/%d/%d\n", atom_id, rotbond_candidate, myligand->atom_rotbonds[atom_id][rotbond_candidate]);fflush(stdout); // sans
             if (myligand->atom_rotbonds[atom_id][rotbond_candidate] != 0) // if the atom has to be rotated around current candidate
             {
               if (remaining_rots_around_rotbonds == 1) // if current value of remaining rots is 1, the proper rotbond is found
@@ -503,7 +651,7 @@ int gen_rotlist(
             }
           }
 
-          rotlist_rotatableBondId[rotlist_id] = rotbond_candidate;
+          rotlist_rotatableBondId[rotlist_id] = rotbond_candidate; // sans
           new_rotlist_element |= (((int) rotbond_candidate) << RLIST_RBONDID_SHIFT) & RLIST_RBONDID_MASK;
         }
 
@@ -519,6 +667,8 @@ int gen_rotlist(
 
 
       rotlist[rotlist_id] = new_rotlist_element;
+//       printf("sans calcenergy gen_rotlist 2-3-3 rotlist_id/rotlist[rotlist_id]: %d/%d/%d/%d/%d\n", rotlist_id, rotlist[rotlist_id], myligand->num_of_atoms, myligand->num_of_rotbonds, myligand->num_of_atoms * myligand->num_of_rotbonds);fflush(stdout); // sans
+
       rotlist_id++;
     }
 
@@ -526,8 +676,14 @@ int gen_rotlist(
     (myligand->num_of_rotcyc)++;
   }
 
+  // sans ==>
+//   printf("sans calcenergy gen_rotlist 3-1\n");fflush(stdout); // sans
   free(number_of_req_rotations);
+//   printf("sans calcenergy gen_rotlist 3-2\n");fflush(stdout); // sans
   free(atom_id_of_numrots);
+//   printf("sans calcenergy gen_rotlist 3-3\n");fflush(stdout); // sans
   free(atom_wasnt_rotated_yet);
+//   printf("sans calcenergy gen_rotlist 3-4\n");fflush(stdout); // sans
+  // <== sans
   return 0;
 }

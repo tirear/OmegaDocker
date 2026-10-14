@@ -74,8 +74,14 @@ else ifeq ($(NUMWI), 128)
 	NWI=-DN128WI
 	TARGET:=$(TARGET)_128wi
 else ifeq ($(NUMWI), 256)
-		NWI=-DN256WI
-		TARGET:=$(TARGET)_256wi
+	NWI=-DN256WI
+	TARGET:=$(TARGET)_256wi
+else ifeq ($(NUMWI), 512)
+	NWI=-DN512WI
+	TARGET:=$(TARGET)_512wi
+else ifeq ($(NUMWI), 1024)
+	NWI=-DN1024WI
+	TARGET:=$(TARGET)_1024wi
 else
 	ifeq ($(DEVICE), CPU)
 		NWI=-DN16WI

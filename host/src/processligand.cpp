@@ -27,10 +27,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #define AD4_desolv_peratom_vdW
 
 // Output showing the CG-G0 virtual bonds and pairs
-#define CG_G0_INFO
+// #define CG_G0_INFO
+#define CG_G0_INFO // sans
 
 // Show information about the atom types in each ligand
-#define TYPE_INFO
+// #define TYPE_INFO
+#define TYPE_INFO // sans
 
 #include "processligand.h"
 
@@ -49,14 +51,22 @@ int init_liganddata(
 // parameters correspond to each other.
 // If the operation was successful, the function returns 0, if not, it returns 1.
 {
+//   myligand->file_content.clear(); // sans
+  // sans ==>
   myligand->fileData        = NULL;
   myligand->fileDataLineNum = 0;
   int lineIndex             = -1;
   size_t lineSize;
   char **tmpFileData        = NULL;
+  // <== sans
   myligand->ligand_line_count = 0;
   std::ifstream fp;
   int num_of_atypes, new_type, num_of_base_atypes;
+//   char atom_types [MAX_NUM_OF_ATOMS][4]; // sans ?? Why they used MAX_NUM_OF_ATOMS instead of MAX_NUM_OF_ATYPES?
+//   char base_atom_types [MAX_NUM_OF_ATOMS][4]; // sans ?? Why they used MAX_NUM_OF_ATOMS instead of MAX_NUM_OF_ATYPES?
+  // sans ==>
+//   char atom_types [MAX_NUM_OF_ATYPES][7];
+//   char base_atom_types [MAX_NUM_OF_ATYPES][7];
   char **atom_types      = NULL;
   char **base_atom_types = NULL;
   char **tmp_atom_types;
@@ -64,7 +74,10 @@ int init_liganddata(
 
   myligand->base_type_idx = NULL;
   int   *tmp_base_type_idx;
-  char tempstr [256];
+  // <== sans
+//   memset(myligand->base_type_idx,0,MAX_NUM_OF_ATOMS*sizeof(int)); // sans N_A ==> N_AT
+//   memset(myligand->base_type_idx,0,MAX_NUM_OF_ATYPES*sizeof(int)); // sans N_A ==> N_AT
+  char tempstr [256]; // sans
   std::string line;
 
   unsigned int lnr=1;
@@ -73,6 +86,7 @@ int init_liganddata(
       lnr++;
   }
 
+  // sans ==>
   // count number of atoms
   unsigned int atom_cnt = 0;
   fp.open(ligfilename);
@@ -197,10 +211,13 @@ int init_liganddata(
     printf("ERROR: Cannot allocate enough memory for myligand->reactive.\n");
     exit(1);
   }
+  // line 1654
+  // <== sans
 
   num_of_atypes = 0;
   num_of_base_atypes = 0;
-  atom_cnt = 0;
+//   unsigned int atom_cnt = 0; // sans
+  atom_cnt = 0; // sans
   for (unsigned int l=0; l<lnr; l++)
   {
     if(l==0)
@@ -219,6 +236,8 @@ int init_liganddata(
     // reading the whole ligand pdbqt file
     while(std::getline(fp, line))
     {
+//       myligand->file_content.push_back(line+'\n'); // also stores flexres // sans
+      // sans ==>
       myligand->fileDataLineNum++;
       lineIndex++;
       tmpFileData = (char **) realloc(myligand->fileData, myligand->fileDataLineNum * sizeof(char *));
@@ -237,14 +256,21 @@ int init_liganddata(
       strncpy(myligand->fileData[lineIndex], line.c_str(), line.size());
       myligand->fileData[lineIndex][lineSize - 2] = '\n';
       myligand->fileData[lineIndex][lineSize - 1] = '\0';
+//       printf("line.c_str() %s a %zu\n", line.c_str(), line.size());
+//       printf("m->f[lineIn] %s b\n", myligand->fileData[lineIndex]);
+      // <== sans
       sscanf(line.c_str(),"%255s",tempstr);
       if ((strcmp(tempstr, "HETATM") == 0) || (strcmp(tempstr, "ATOM") == 0))
       {
         new_type = 1; // supposing this will be a new atom type
-        // for CGXXXX GXXXX==>
+        /* sans for CGXXXX GXXXX
+        sscanf(&line.c_str()[77], "%3s", tempstr); // reading atom type
+        tempstr[3] = '\0'; //just to be sure strcpy wont fail even if something is wrong with position
+        sans for CGXXXX GXXXX */
+        // sans for CGXXXX GXXXX==>
         sscanf(&line.c_str()[77], "%6s", tempstr); // reading atom type
         tempstr[6] = '\0'; //just to be sure strcpy wont fail even if something is wrong with position
-        // <== for CGXXXX GXXXX
+        // <== sans for CGXXXX GXXXX
         line[16]='\0';
         sscanf(&line.c_str()[12], "%4s", myligand->atom_names[atom_cnt]);
         atom_cnt++;
@@ -258,6 +284,16 @@ int init_liganddata(
 
         if (new_type == 1) // if new type, copying string...
         {
+          /* sans
+          // checking if atom type number doesn't exceed 14
+          if (num_of_atypes >= MAX_NUM_OF_ATYPES)
+          {
+            printf("Error: Too many ligand atom types (more than %d).\n",MAX_NUM_OF_ATYPES);
+            return 1;
+          }
+          sans */
+
+          // sans ==>
           tmp_num_of_atypes = num_of_atypes + 1;
           tmp_atom_types = (char **) realloc(atom_types, tmp_num_of_atypes * sizeof(char *));
           if(tmp_atom_types == NULL)
@@ -270,7 +306,7 @@ int init_liganddata(
             atom_types = tmp_atom_types;
           }
           tmp_atom_types = NULL;
-          atom_types[num_of_atypes] = (char *) calloc(7, 1); // for CGXXXX GXXXX
+          atom_types[num_of_atypes] = (char *) calloc(7, 1); // sans for CGXXXX GXXXX
           if(atom_types[num_of_atypes] == NULL)
           {
             printf("ERROR: Cannot allocate memory for atom_types[num_of_atypes]\n");
@@ -288,7 +324,7 @@ int init_liganddata(
             base_atom_types = tmp_atom_types;
           }
           tmp_atom_types = NULL;
-          base_atom_types[num_of_atypes] = (char *) calloc(7, 1); // for CGXXXX GXXXX
+          base_atom_types[num_of_atypes] = (char *) calloc(7, 1); // sans for CGXXXX GXXXX
           if(base_atom_types[num_of_atypes] == NULL)
           {
             printf("ERROR: Cannot allocate memory for base_atom_types[num_of_atypes]\n");
@@ -306,10 +342,15 @@ int init_liganddata(
             myligand->base_type_idx = tmp_base_type_idx;
           }
           tmp_base_type_idx = NULL;
-          // for CGXXXX GXXXX ==>
+          // <== sans
+          /* sans for CGXXXX GXXXX
+          strcpy(atom_types[num_of_atypes], tempstr);
+          strcpy(base_atom_types[num_of_atypes], tempstr);
+          sans for CGXXXX GXXXX */
+          // sans for CGXXXX GXXXX ==>
           strncpy(atom_types[num_of_atypes], tempstr, 6);
           strncpy(base_atom_types[num_of_atypes], tempstr, 6);
-          // <== for CGXXXX GXXXX
+          // <== sans for CGXXXX GXXXX
           // assumption is that we are adding a base atom type to the list
           myligand->base_type_idx[num_of_atypes] = num_of_base_atypes;
           num_of_atypes++;
@@ -340,6 +381,8 @@ int init_liganddata(
       }
     }
     // copying field to ligand and grid data
+//     if(l==0) myligand->ligand_line_count = myligand->file_content.size(); // sans
+    // sans ==>
     if(l==0) myligand->ligand_line_count = myligand->fileDataLineNum;
     myligand->num_of_atypes = num_of_atypes;
     myligand->atom_types = atom_types;
@@ -355,7 +398,7 @@ int init_liganddata(
     }
     for(int i = 0; i < num_ligand_grid_types; i++)
     {
-      myligand->ligand_grid_types[i] = (char *) calloc(7, 1); // for CGXXXX GXXXX
+      myligand->ligand_grid_types[i] = (char *) calloc(7, 1); // sans for CGXXXX GXXXX
       if(myligand->ligand_grid_types[i] == NULL)
       {
         printf("ERROR: Cannot allocate memory for myligand->ligand_grid_types[i].\n");
@@ -479,6 +522,7 @@ int init_liganddata(
       printf("ERROR: Cannot allocate memory for myligand->solpar.\n");
       exit(1);
     }
+    // <== sans
     fp.close();
   }
 #ifdef TYPE_INFO
@@ -486,11 +530,30 @@ int init_liganddata(
 #endif
   for (int i=0; i<num_of_atypes; i++)
   {
+    /* sans
+    strcpy(myligand->atom_types[i], atom_types[i]);
+    strcpy(myligand->base_atom_types[i], base_atom_types[i]);
+    strcpy(myligand->ligand_grid_types[myligand->base_type_idx[i]], base_atom_types[i]);
+    if((strncmp(atom_types[i],"CG",2)==0) || (strncmp(atom_types[i],"G",1)==0)){ // CGx and Gx can have derived types but purely to determine which map to use (so only ligand_grid_types should be set to base_type)
+      memcpy(myligand->ligand_grid_types[myligand->base_type_idx[i]], base_atom_types[i],2*sizeof(char)); // only base type name is copied
+      if(strcmp(atom_types[i],base_atom_types[i])!=0){ // derived CGx/Gx type exists
+        strcpy(myligand->base_atom_types[i], atom_types[i]);
+      } else{
+        if(strncmp(atom_types[i],"CG",2)==0){ // if no derived type CG type exists, use C map by default
+          myligand->ligand_grid_types[myligand->base_type_idx[i]][1] = '\0'; // CG was already in there
+        }
+      }
+      myligand->ligand_grid_types[myligand->base_type_idx[i]][2] = '\0'; // make sure CG0..9 results in CG
+      if (isdigit(myligand->ligand_grid_types[myligand->base_type_idx[i]][1])) // make sure G0..9 results in G0
+        myligand->ligand_grid_types[myligand->base_type_idx[i]][1] = '0';
+    }
+    sans */
+    // sans ==>
     strcpy(myligand->ligand_grid_types[myligand->base_type_idx[i]], myligand->base_atom_types[i]);
     if((strncmp(myligand->atom_types[i], "CG", 2) == 0) ||
-       (strncmp(myligand->atom_types[i], "HG", 2) == 0) ||
-       (strncmp(myligand->atom_types[i], "NG", 2) == 0) ||
-       (strncmp(myligand->atom_types[i], "OG", 2) == 0) ||
+       (strncmp(myligand->atom_types[i], "HG", 2) == 0) || // sans dna/rna
+       (strncmp(myligand->atom_types[i], "NG", 2) == 0) || // sans dna/rna
+       (strncmp(myligand->atom_types[i], "OG", 2) == 0) || // sans dna/rna
        (strncmp(myligand->atom_types[i], "G" , 1) ==0))
     { // CGx and Gx can have derived types but purely to determine which map to use (so only ligand_grid_types should be set to base_type)
       memcpy(myligand->ligand_grid_types[myligand->base_type_idx[i]], myligand->base_atom_types[i], 2); // only base type name is copied
@@ -504,6 +567,7 @@ int init_liganddata(
         { // if no derived type CG type exists, use C map by default
           myligand->ligand_grid_types[myligand->base_type_idx[i]][1] = '\0'; // CG was already in there
         }
+        // sans dna/rna ==>
         else if(strncmp(myligand->atom_types[i], "HG", 2) == 0)
         {
           myligand->ligand_grid_types[myligand->base_type_idx[i]][1] = 'D';
@@ -513,11 +577,13 @@ int init_liganddata(
         {
           myligand->ligand_grid_types[myligand->base_type_idx[i]][1] = 'A';
         }
+        // <== sans dna/rna
       }
       myligand->ligand_grid_types[myligand->base_type_idx[i]][2] = '\0'; // make sure CG0..9 results in CG
       if (isdigit(myligand->ligand_grid_types[myligand->base_type_idx[i]][1])) // make sure G0..9 results in G0
         myligand->ligand_grid_types[myligand->base_type_idx[i]][1] = '0';
     }
+    // <== sans
 #ifdef TYPE_INFO
     printf("Atom type %i -> %s -> %s (grid type %i)\n",i,myligand->atom_types[i],myligand->ligand_grid_types[myligand->base_type_idx[i]],myligand->base_type_idx[i]);
 #endif
@@ -583,6 +649,7 @@ int set_liganddata_typeid(
         printf("Error: No map file specified for atom type %s in fld and no derived type (--derivtype, -T) either.\n",myligand->ligand_grid_types[myligand->base_type_idx[type]]);
         if (strncmp(myligand->ligand_grid_types[myligand->base_type_idx[type]],"CG",2)==0)
           printf("       Expecting a derived type for each CGx (x=0..9) atom type (i.e. --derivtype CG0,CG1=C).\n");
+        // sans dna/rna ==>
         if(strncmp(myligand->ligand_grid_types[myligand->base_type_idx[type]], "HG", 2) == 0)
         {
           printf("       Expecting a derived type for each HGx atom type (i.e. --derivtype HG0,HG1=H).\n");
@@ -595,6 +662,7 @@ int set_liganddata_typeid(
         {
           printf("       Expecting a derived type for each OGx atom type (i.e. --derivtype OG0,OG1=O).\n");
         }
+        // <== sans dna/rna
         return 1;
       }
     }
@@ -613,6 +681,11 @@ void get_intraE_contributors(Liganddata* myligand)
 // this function.
 {
   int  atom_id1, atom_id2, atom_id3, rotb_id1, rotb_id2;
+  /* sans
+  unsigned int atom_neighbours [MAX_NUM_OF_ATOMS];
+  unsigned int atom_neighbours_temp [MAX_NUM_OF_ATOMS];
+  sans */
+  // sans ==>
   unsigned int *atom_neighbours;
   unsigned int *atom_neighbours_temp;
   atom_neighbours      = (unsigned int *) malloc(myligand->num_of_atoms * sizeof(unsigned int));
@@ -627,6 +700,7 @@ void get_intraE_contributors(Liganddata* myligand)
     printf("ERROR: Cannot allocate memory for atom_neighbours_temp of make_resfiles() on main memory.\n");
     exit(1);
   }
+  // <== sans
   int  atom_id_a, atom_id_b, structure_id_A, structure_id_B;
   int  atom_id_a2, atom_id_b2;
 
@@ -717,6 +791,7 @@ void get_intraE_contributors(Liganddata* myligand)
         myligand->intraE_contributors[atom_id2][atom_id1] = 0;
       }
       // first, make sure non-matching ID pairs don't interact with each other (the code above happily allows it)
+      // sans why this first is required???
       if (  (myligand->bonds[atom_id1][atom_id2] == 0) && // for non-bonded CG-G0 atoms
           (((strncmp(myligand->base_atom_types[atom_typeid1], "CG", 2) == 0) &&
             (strncmp(myligand->base_atom_types[atom_typeid2], "G", 1) == 0) &&
@@ -725,11 +800,19 @@ void get_intraE_contributors(Liganddata* myligand)
             (strncmp(myligand->base_atom_types[atom_typeid2], "CG", 2) == 0) &&
             (strcmp(myligand->base_atom_types[atom_typeid1]+1,myligand->base_atom_types[atom_typeid2]+2) != 0))))
       {
+//         // sans test ==>
+//         if((myligand->intraE_contributors[atom_id1][atom_id2] != 0) || (myligand->intraE_contributors[atom_id2][atom_id1] != 0) )
+//         {
+//           printf("ID %d %d\n", atom_id1, atom_id2);
+//         }
+//         // <== sans test
         myligand->intraE_contributors[atom_id1][atom_id2] = 0;
         myligand->intraE_contributors[atom_id2][atom_id1] = 0;
       }
       // second, let matching ID pair interact
       if (  (myligand->bonds[atom_id1][atom_id2] == 0) && // for non-bonded CG-G0 atoms
+//           (((strncmp(myligand->base_atom_types[atom_typeid1], "CG", 2) == 0) && // sans dna/rna
+          // sans dna/rna ==>
           (
             (
               (
@@ -738,21 +821,26 @@ void get_intraE_contributors(Liganddata* myligand)
                 (strncmp(myligand->base_atom_types[atom_typeid1], "NG", 2) == 0) ||
                 (strncmp(myligand->base_atom_types[atom_typeid1], "OG", 2) == 0)
               ) &&
+          // <== sans dna/rna
             (strncmp(myligand->base_atom_types[atom_typeid2], "G", 1) == 0) &&
             (strcmp(myligand->base_atom_types[atom_typeid1]+2,myligand->base_atom_types[atom_typeid2]+1) == 0)) || // with matching ids
            ((strncmp(myligand->base_atom_types[atom_typeid1], "G", 1) == 0) &&
+//             (strncmp(myligand->base_atom_types[atom_typeid2], "CG", 2) == 0) && // sans dna/rna
+            // sans dna/rna ==>
             (
               (strncmp(myligand->base_atom_types[atom_typeid2], "CG", 2) == 0) ||
               (strncmp(myligand->base_atom_types[atom_typeid2], "HG", 2) == 0) ||
               (strncmp(myligand->base_atom_types[atom_typeid2], "NG", 2) == 0) ||
               (strncmp(myligand->base_atom_types[atom_typeid2], "OG", 2) == 0)
             ) &&
+            // <== sans dna/rna
             (strcmp(myligand->base_atom_types[atom_typeid1]+1,myligand->base_atom_types[atom_typeid2]+2) == 0))))
       {
         myligand->intraE_contributors[atom_id1][atom_id2] = 1;
         myligand->intraE_contributors[atom_id2][atom_id1] = 1;
 #if defined(CG_G0_INFO)
-        printf("Found XG-G0 pair: atom %i (%s) <-> atom %i (%s)\n",atom_id1+1,myligand->base_atom_types[atom_typeid1],atom_id2+1,myligand->base_atom_types[atom_typeid2]);
+//         printf("Found CG-G0 pair: atom %i (%s) <-> atom %i (%s)\n",atom_id1+1,myligand->base_atom_types[atom_typeid1],atom_id2+1,myligand->base_atom_types[atom_typeid2]); // sans dna/rna
+        printf("Found XG-G0 pair: atom %i (%s) <-> atom %i (%s)\n",atom_id1+1,myligand->base_atom_types[atom_typeid1],atom_id2+1,myligand->base_atom_types[atom_typeid2]); // sans dna/rna
 #endif
       }
     }
@@ -838,8 +926,10 @@ void get_intraE_contributors(Liganddata* myligand)
       }
     }
   }
+  // sans ==>
   free(atom_neighbours);
   free(atom_neighbours_temp);
+  // <== sans
 }
 
 int get_bonds(Liganddata* myligand)
@@ -872,9 +962,11 @@ int get_bonds(Liganddata* myligand)
                                        0, // "CX"
                                        6, // "SI"
                                        0, // "B"
+                                       // sans dna/rna ==>
                                        3, // "HG"
                                        1, // "NG"
                                        2  // "OG"
+                                       // <== sans dna/rna
                                       };
 
   double mindist[NUM_ENUM_ATOMTYPES][NUM_ENUM_ATOMTYPES];
@@ -891,10 +983,12 @@ int get_bonds(Liganddata* myligand)
 
   int W_nameid = 18; // hard-coded (sorry!) id for W atom
   int CG_nameid = 16;
+  // sans dna/rna ==>
   int G0_nameid = 17;
   int HG_nameid = 22;
   int NG_nameid = 23;
   int OG_nameid = 24;
+  // <== sans dna/rna
 
   strcpy(atom_names[0],  "C");
   strcpy(atom_names[1],  "A");
@@ -918,9 +1012,11 @@ int get_bonds(Liganddata* myligand)
   strcpy(atom_names[19], "CX"); // used to disable all bonds containing W
   strcpy(atom_names[20], "SI");
   strcpy(atom_names[21], "B");
+  // sans dna/rna ==>
   strcpy(atom_names[22], "HG");
   strcpy(atom_names[23], "NG");
   strcpy(atom_names[24], "OG");
+  // <== sans dna/rna
 
 #ifdef AD4_BOND_DISTS
   // Set all the mindist and maxdist elements to the defaults for AutoDock versions 1 - 3...
@@ -1007,7 +1103,16 @@ int get_bonds(Liganddata* myligand)
   maxdist[H][H] = 1;
 #endif
 
+//   memset(myligand->bonds,0,MAX_NUM_OF_ATOMS*MAX_NUM_OF_ATOMS*sizeof(char)); // sans
+
   bool is_HD1, is_HD2;
+//   memset(myligand->donor,0,MAX_NUM_OF_ATOMS*sizeof(bool)); // sans
+  /* sans
+  double HD_dists[MAX_NUM_OF_ATOMS];
+  int HD_ids[MAX_NUM_OF_ATOMS];
+  memset(HD_ids,0xFF,MAX_NUM_OF_ATOMS*sizeof(int));
+  sans */
+  // sans ==>
   double *HD_dists;
   int    *HD_ids;
   HD_dists = (double *) malloc(myligand->num_of_atoms * sizeof(double));
@@ -1024,6 +1129,7 @@ int get_bonds(Liganddata* myligand)
     exit(1);
   }
   memset(HD_ids,0xFF,myligand->num_of_atoms*sizeof(int));
+  // <== sans
   // make sure the last ones are initialized too (saves work in second loop)
   myligand->acceptor[myligand->num_of_atoms-1] = is_H_acceptor(myligand->base_atom_types[(int)(myligand->atom_idxyzq[myligand->num_of_atoms-1][0])]);
   char reactnum = myligand->atom_types[(int)(myligand->atom_idxyzq[myligand->num_of_atoms-1][0])][strlen(myligand->atom_types[(int)(myligand->atom_idxyzq[myligand->num_of_atoms-1][0])])-1];
@@ -1097,7 +1203,8 @@ int get_bonds(Liganddata* myligand)
         myligand->bonds [atom_id1][atom_id2] = 0;
         myligand->bonds [atom_id2][atom_id1] = 0;
       }
-      else if(    (temp_dist >= mindist [bondtype_id1][bondtype_id2])  && (temp_dist <= maxdist [bondtype_id1][bondtype_id2]))
+      // else if (((temp_dist >= mindist [bondtype_id1][bondtype_id2]) && (temp_dist <= maxdist [bondtype_id1][bondtype_id2])) || (atom_id1 == atom_id2)) // sans Why do check (atom_id1 == atom_id2) here??
+      else if(    (temp_dist >= mindist [bondtype_id1][bondtype_id2])  && (temp_dist <= maxdist [bondtype_id1][bondtype_id2]))                            // sans Why do check (atom_id1 == atom_id2) here??
       {
         myligand->bonds [atom_id1][atom_id2] = 1;
         myligand->bonds [atom_id2][atom_id1] = 1;
@@ -1115,7 +1222,7 @@ int get_bonds(Liganddata* myligand)
         }
       }
       else if ((atom_nameid1 == CG_nameid) && (atom_nameid2 == CG_nameid) && // two CG atoms
-      // This is for flexring orginially, not necessary for distance restraints between orginially non-bonding atoms.
+      // sans This is for flexring orginially, not necessary for distance restraints between orginially non-bonding atoms.
          (strcmp(myligand->base_atom_types[atom_typeid1]+2,myligand->base_atom_types[atom_typeid2]+2) == 0)) // and matching numbers
       {
         myligand->bonds [atom_id1][atom_id2] = 2; // let's call 2 a "virtual" bond to
@@ -1124,6 +1231,7 @@ int get_bonds(Liganddata* myligand)
         printf("Found virtual CG-CG bond between atom %i (%s) and atom %i (%s).\n",atom_id1+1,myligand->base_atom_types[atom_typeid1],atom_id2+1,myligand->base_atom_types[atom_typeid2]);
 #endif
       }
+      // sans ==>
       else if
       (
         (
@@ -1158,6 +1266,7 @@ int get_bonds(Liganddata* myligand)
         myligand->bonds[atom_id1][atom_id2] = 2; // let's call 2 a "virtual" bond to
         myligand->bonds[atom_id2][atom_id1] = 2; // distinguish them if needed later
       }
+      // <== sans
     } // inner for-loop
   } // outer for-loop
 
@@ -1167,8 +1276,10 @@ int get_bonds(Liganddata* myligand)
     else if(strcmp(myligand->base_atom_types[(int)(myligand->atom_idxyzq[i][0])],"HD")==0) myligand->donor[i]=true;
   }
 
+  // sans ==>
   free(HD_dists);
   free(HD_ids);
+  // <== sans
   return 0;
 }
 
@@ -1200,7 +1311,8 @@ int get_VWpars(
 // _C and _D fields according to the result as well as the solvation parameters
 // and atomic volumes (desolv and volume fields) for each atom type.
 {
-  char atom_names [ATYPE_NUM][7]; // CGXXXX GXXXX
+//   char atom_names [ATYPE_NUM][3]; // sans CGXXXX GXXXX
+  char atom_names [ATYPE_NUM][7]; // sans CGXXXX GXXXX
 
   // Initial implementation included 22 atom-types.
   // Handling flexrings requires 2 additional atom-types: "CG" & "G0".
@@ -1211,7 +1323,7 @@ int get_VWpars(
   // CG (idx=22): a copy of the standard "C" (idx=3) atom-type
   // G0 (idx=23): an invisible atom-type, all atomic parameters are zero
 
-  //AD user guide P35
+// sans user guide P35
 
   // Sum of vdW radii of two like atoms (A)
   double reqm [ATYPE_NUM] = {
@@ -1220,15 +1332,19 @@ int get_VWpars(
                              3.09, 1.30, 4.20, 4.00, 4.00,
                              4.09, 1.98, 1.30, 1.30, 1.48,
                              4.33, 4.72, 4.10, 3.84,
-                             4.00, // CG
-                             0.00, // G0
+                             // 4.00, // CG sans
+                             // 0.00, // G0 sans
                              0.00, // W
                              4.00, // CX
                              3.50, // NX
                              3.20, // OX
+                             // sans dna/rna ==>
+                             0.00, // G0
+                             4.00, // CG
                              2.00, // HG
                              3.50, // NG
                              3.20  // OG
+                             // <== sans dna/rna
                             };
 
   // vdW well depth (kcal/mol)
@@ -1238,15 +1354,19 @@ int get_VWpars(
                             0.080, 0.875, 0.200, 0.200, 0.200,
                             0.276, 0.550, 0.875, 0.010, 0.550,
                             0.389, 0.550, 0.200, 0.155,
-                            0.150, // CG
-                            0.000, // G0
+                            // 0.150, // CG sans
+                            // 0.000, // G0 sans
                             0.000, // W
                             0.150, // CX
                             0.160, // NX
                             0.200, // OX
+                            // sans dna/rna ==>
+                            0.000, // G0
+                            0.150, // CG
                             0.020, // HG
                             0.160, // NG
                             0.200  // OG
+                            // <== sans dna/rna
                            };
 
   // Sum of vdW radii of two like atoms (A) in case of hydrogen bond
@@ -1256,15 +1376,19 @@ int get_VWpars(
                                    0.0, 0.0, 0.0, 2.5, 0.0,
                                    0.0, 0.0, 0.0, 0.0, 0.0,
                                    0.0, 0.0, 0.0, 0.0,
-                                   0.0, // CG
-                                   0.0, // G0
+                                   // 0.0, // CG sans
+                                   // 0.0, // G0 sans
                                    0.0, // W
                                    0.0, // CX
                                    0.0, // NX
                                    1.9, // OX
+                                   // sans dna/rna ==>
+                                   0.0, // G0
+                                   0.0, // CG
                                    0.0, // HG
                                    1.9, // NG
                                    1.9  // OG
+                                   // <== sans dna/rna
                                   };
 
   // vdW well depth (kcal/mol) in case of hydrogen bond
@@ -1274,15 +1398,19 @@ int get_VWpars(
                                   0.0, 0.0, 0.0, 1.0, 0.0,
                                   0.0, 0.0, 0.0, 0.0, 0.0,
                                   0.0, 0.0, 0.0, 0.0,
-                                  0.0, // CG
-                                  0.0, // G0
+                                  // 0.0, // CG sans
+                                  // 0.0, // G0 sans
                                   0.0, // W
                                   0.0, // CX
                                   0.0, // NX
                                   5.0, // OX
+                                  // sans dna/rna ==>
+                                  0.0, // G0
+                                  0.0, // CG
                                   1.0, // HG
                                   5.0, // NG
                                   5.0  // OG
+                                  // <== sans dna/rna
                                  };
 
   // volume of atoms
@@ -1292,15 +1420,19 @@ int get_VWpars(
                                15.4480,  1.5600, 38.7924, 33.5103, 33.5103,
                                35.8235,  2.7700,  2.1400,  1.8400,  1.7000,
                                42.5661, 55.0585, 35.8235, 29.6478,
-                               33.5103, // CG
-                                0.0000, // G0
+                               // 33.5103, // CG sans
+                                // 0.0000, // G0 sans
                                 0.0000, // W
                                33.5103, // CX
                                22.4493, // NX
                                17.1573, // OX
+                               // sans dna/rna ==>
+                                0.0000, // G0
+                               33.5103, // CG
                                 0.0000, // HG
                                22.4493, // NG
                                17.1573  // OG
+                               // <== sans dna/rna
                               };
 
   // atomic solvation parameters
@@ -1310,15 +1442,19 @@ int get_VWpars(
                                -0.00110, -0.00110, -0.00110, -0.00214, -0.00214,
                                -0.00110, -0.00110, -0.00110, -0.00110, -0.00110,
                                -0.00110, -0.00110, -0.00143, -0.00152,
-                               -0.00143, // CG
-                                0.00000, // G0
+                               // -0.00143, // CG sans
+                                // 0.00000, // G0 sans
                                 0.00000, // W
                                -0.00143, // CX
                                -0.00162, // NX
                                -0.00251, // OX
+                                // sans dna/rna ==>
+                                0.00000, // G0
+                               -0.00143, // CG
                                 0.00051, // HG
                                -0.00162, // NG
                                -0.00251  // OG
+                                // <== sans dna/rna
                               };
 
   int atom_typeid1, atom_typeid2, VWid_atype1, VWid_atype2, i;
@@ -1349,15 +1485,25 @@ int get_VWpars(
   strcpy(atom_names [21], "I");
   strcpy(atom_names [22], "SI");
   strcpy(atom_names [23], "B");
-  strcpy(atom_names [/*24*/ATYPE_CG_IDX], "CG"); // CG
-  strcpy(atom_names [/*25*/ATYPE_G0_IDX], "G0"); // G0
-  strcpy(atom_names [/*26*/ATYPE_W_IDX], "W"); // W
-  strcpy(atom_names [/*27*/ATYPE_CX_IDX], "CX"); // CX
-  strcpy(atom_names [/*28*/ATYPE_NX_IDX], "NX"); // NX
-  strcpy(atom_names [/*29*/ATYPE_OX_IDX], "OX"); // OX
-  strcpy(atom_names [/*30*/ATYPE_HG_IDX] , "HG");
-  strcpy(atom_names [/*31*/ATYPE_NG_IDX] , "NG");
-  strcpy(atom_names [/*32*/ATYPE_OG_IDX] , "OG");
+  // strcpy(atom_names [/*24*/ATYPE_CG_IDX], "CG"); // CG sans
+  // strcpy(atom_names [/*25*/ATYPE_G0_IDX], "G0"); // G0 sans
+  // strcpy(atom_names [/*26*/ATYPE_W_IDX], "W"); // W    sans
+  // strcpy(atom_names [/*27*/ATYPE_CX_IDX], "CX"); // CX sans
+  // strcpy(atom_names [/*28*/ATYPE_NX_IDX], "NX"); // NX sans
+  // strcpy(atom_names [/*29*/ATYPE_OX_IDX], "OX"); // OX sans
+  // sans dna/rna ==>
+  strcpy(atom_names [/*24*/ATYPE_W_IDX], "W"); // W
+  strcpy(atom_names [/*25*/ATYPE_CX_IDX], "CX"); // CX
+  strcpy(atom_names [/*26*/ATYPE_NX_IDX], "NX"); // NX
+  strcpy(atom_names [/*27*/ATYPE_OX_IDX], "OX"); // OX
+  strcpy(atom_names [/*28*/ATYPE_G0_IDX], "G0");
+  strcpy(atom_names [/*29*/ATYPE_CG_IDX], "CG");
+  strcpy(atom_names [/*30*/ATYPE_HG_IDX], "HG");
+  strcpy(atom_names [/*31*/ATYPE_NG_IDX], "NG");
+  strcpy(atom_names [/*32*/ATYPE_OG_IDX], "OG");
+  // <== sans dna/rna
+//  for(unsigned int i=0; i<nr_deriv_atypes; i++) // add derivative type names to get proper type ids
+//    strcpy(atom_names[ATYPE_NUM+i],deriv_atypes[i].deriv_name);
 
   // Using this variable to signal when the CG-CG pair was found.
   // This is further reused to set vdW constant coeffs: "vdWpars_A" and "vdWpars_B".
@@ -1410,13 +1556,15 @@ int get_VWpars(
         found_CG_CG_pair = false;
       }
 
-      if (VWid_atype1 == ATYPE_NUM)
+//       if (VWid_atype1 == MAX_NUM_OF_ATYPES) // sans ? Why do you use MAX_NUM_OF_ATYPES here instead of ATYPE_NUM?
+      if (VWid_atype1 == ATYPE_NUM) // sans
       {
         printf("Error: Ligand includes atom with unknown type 1: %s.\n", myligand->atom_types [atom_typeid1]);
         return 1;
       }
 
-      if  (VWid_atype2 == ATYPE_NUM)
+//       if  (VWid_atype2 == MAX_NUM_OF_ATYPES) // sans ? Why do you use MAX_NUM_OF_ATYPES here instead of ATYPE_NUM?
+      if  (VWid_atype2 == ATYPE_NUM) // sans
       {
         printf("Error: Ligand includes atom with unknown type 2: %s.\n", myligand->atom_types [atom_typeid2]);
         return 1;
@@ -1505,7 +1653,8 @@ int get_VWpars(
       }
       else
       {
-        if(isdigit(atom_names[i][1])) { // CGXXXX GXXXX
+//         if(atom_names[i][1] == '0') { // captures G0..9 to G0 in tables // sans CGXXXX GXXXX
+        if(isdigit(atom_names[i][1])) { // sans CGXXXX GXXXX
           if (atom_names[i][0] == toupper(myligand->base_atom_types[atom_typeid1][0]))
             VWid_atype1 = i;
         }
@@ -1608,11 +1757,35 @@ int parse_liganddata(
   int atom_rot_start = 0;
   int branch_start;
   int endbranch_counter = 0;
+//   int branches [MAX_NUM_OF_ROTBONDS][3]; // sans
+  // sans ==>
   int **branches = NULL;
   int **tmp_branches;
   myligand->rotbonds = NULL;
   int **tmp_rotbonds;
+//   branches = (int **) malloc(MAX_NUM_OF_ROTBONDS * sizeof(int *));
+//   if(branches == NULL)
+//   {
+//     printf("ERROR: Cannot allocate memory for branches of parse_liganddata() on main memory.\n");
+//     exit(1);
+//   }
+//   for(int i = 0; i < MAX_NUM_OF_ROTBONDS; i++)
+//   {
+//     branches[i] = (int *) malloc(3 * sizeof(int));
+//     if(branches[i] == NULL)
+//     {
+//       printf("ERROR: Cannot allocate memory for branches[%d] of parse_liganddata() on main memory.\n", i);
+//       exit(1);
+//     }
+//   }
+  // <== sans
   int i,j,k;
+  /* sans
+  unsigned int atom_rotbonds_temp [MAX_NUM_OF_ATOMS][MAX_NUM_OF_ROTBONDS];
+  memset(atom_rotbonds_temp,0,MAX_NUM_OF_ATOMS*MAX_NUM_OF_ROTBONDS*sizeof(unsigned int));
+  memset(myligand->ignore_inter,0,MAX_NUM_OF_ATOMS*sizeof(bool));
+  sans */
+  // sans ==>
   unsigned int **atom_rotbonds_temp;
   atom_rotbonds_temp = (unsigned int **) malloc(myligand->num_of_atoms * sizeof(unsigned int *));
   if(atom_rotbonds_temp == NULL)
@@ -1629,37 +1802,53 @@ int parse_liganddata(
       exit(1);
     }
   }
+  // <== sans
   int current_rigid_struct_id, reserved_highest_rigid_struct_id;
   current_rigid_struct_id = 1;
   reserved_highest_rigid_struct_id = 1;
 
   atom_counter = 0;
-  unsigned int lnr=1+(myligand->ligand_line_count<myligand->fileDataLineNum);
+//   unsigned int lnr=1+(myligand->ligand_line_count<myligand->file_content.size()); // sans
+  unsigned int lnr=1+(myligand->ligand_line_count<myligand->fileDataLineNum); // sans
 
   int endline = myligand->ligand_line_count;
   for (unsigned int l=0; l<lnr; l++)
   {
-    if(l>0) endline =  myligand->fileDataLineNum;
+//     if(l>0) endline =  myligand->file_content.size(); // sans
+    if(l>0) endline =  myligand->fileDataLineNum; // sans
     fp_start = line_count;
 
     // reading atomic coordinates, charges and atom types, and writing
     // data to myligand->atom_idxyzq
     while (line_count < endline)
     {
-      line = myligand->fileData[line_count];
+//       line = myligand->file_content[line_count]; // sans
+      line = myligand->fileData[line_count]; // sans
       line_count++;
       sscanf(line.c_str(),"%255s",tempstr);
       if ((strcmp(tempstr, "HETATM") == 0) || (strcmp(tempstr, "ATOM") == 0))
       {
+        /* sans
+        if (atom_counter > MAX_NUM_OF_ATOMS-1)
+        {
+          printf("Error: System consists of too many atoms.'\n");
+          printf("       Maximum number of atoms is %d.\n", MAX_NUM_OF_ATOMS);
+          return 1;
+        }
+        sans */
         line.insert(38,1,' '); // add spaces to make reading coordinates easier
         line.insert(47,1,' ');
         sscanf(&line.c_str()[30], "%lf %lf %lf", &(myligand->atom_idxyzq [atom_counter][1]), &(myligand->atom_idxyzq [atom_counter][2]), &(myligand->atom_idxyzq [atom_counter][3]));
         // the last two are shifted by two chars (the two spaces we added above)
         sscanf(&line.c_str()[72], "%lf", &(myligand->atom_idxyzq [atom_counter][4])); // reading charge
-        // for CGXXXX GXXXX ==>
+        /* sans for CGXXXX GXXXX
+        sscanf(&line.c_str()[79], "%3s", tempstr); // reading atom type
+        tempstr[3]='\0';
+        sans for CGXXXX GXXXX */
+        // sans for CGXXXX GXXXX ==>
         sscanf(&line.c_str()[79], "%6s", tempstr); // reading atom type
         tempstr[6]='\0';
-        // <== for CGXXXX GXXXX
+        // <== sans for CGXXXX GXXXX
         if (set_liganddata_typeid(myligand, mygrid, atom_counter, tempstr) != 0) // the function sets the type index
           return 1;
         if(tempstr[0]=='G'){ // G-type are ignored for inter calc unless there is a map specified (checked above)
@@ -1670,6 +1859,7 @@ int parse_liganddata(
       }
     }
 
+//     myligand->num_of_atoms = atom_counter; // sans
     if(l==0){
       myligand->true_ligand_atoms = atom_counter;
       atom_counter = 0; // this looks wrong but is correct as it's increment below again (like above)
@@ -1690,7 +1880,8 @@ int parse_liganddata(
     // reading data for rotbonds and atom_rotbonds fields
     while (line_count < endline)
     {
-      line = myligand->fileData[line_count];
+//       line = myligand->file_content[line_count]; // sans
+      line = myligand->fileData[line_count]; // sans
       line_count++;
       sscanf(line.c_str(),"%255s",tempstr);
       if ((l>0) && (strcmp(tempstr, "ROOT") == 0)){
@@ -1721,6 +1912,17 @@ int parse_liganddata(
 
       if (strcmp(tempstr, "BRANCH") == 0) // if new branch, stroing atom indexes into branches [][]
       {
+        /* sans
+        if (branch_counter >= MAX_NUM_OF_ROTBONDS)
+        {
+          if(l==0)
+            printf("Error: Ligand includes too many rotatable bonds (more than %d).\n",MAX_NUM_OF_ROTBONDS);
+          else
+            printf("Error: Ligand and flexible residue(s) include too many rotatable bonds (more than %d).\n",MAX_NUM_OF_ROTBONDS);
+          return 1;
+        }
+        sans */
+        // sans ==>
         tmp_branches = (int **) realloc(branches, (branch_counter + 1) * sizeof(int *));
         if(tmp_branches == NULL)
         {
@@ -1738,6 +1940,7 @@ int parse_liganddata(
           printf("ERROR: Cannot allocate memory for branches[branch_counter] of parse_liganddata() on main memory.\n");
           exit(1);
         }
+        // <== sans
         sscanf(&line.c_str()[6], "%d %d", &(branches [branch_counter][0]), &(branches [branch_counter][1]));
         branches [branch_counter][0] += atom_rot_start-atom_count_offset; // atom IDs start from 0 instead of 1
         branches [branch_counter][1] += atom_rot_start-atom_count_offset;
@@ -1752,6 +1955,7 @@ int parse_liganddata(
 
       if (strcmp(tempstr, "ENDBRANCH") == 0)
       {
+        // sans ==>
         tmp_rotbonds = (int **) realloc(myligand->rotbonds, branch_counter * sizeof(int *));
         if(tmp_rotbonds == NULL)
         {
@@ -1769,6 +1973,7 @@ int parse_liganddata(
           printf("ERROR: Cannot allocate enough memory for myligand->rotbonds[endbranch_counter].\n");
           exit(1);
         }
+        // <== sans
         sscanf(&line.c_str()[9], "%d %d", &(myligand->rotbonds [endbranch_counter][0]), &(myligand->rotbonds [endbranch_counter][1])); // rotatable bonds have to be stored in the order of endbranches
         myligand->rotbonds [endbranch_counter][0] += atom_rot_start-atom_count_offset;
         myligand->rotbonds [endbranch_counter][1] += atom_rot_start-atom_count_offset;
@@ -1786,6 +1991,7 @@ int parse_liganddata(
     if (l==0)
       myligand->true_ligand_rotbonds = branch_counter;
   }
+  // sans ==>
   myligand->atom_rotbonds = (char **) calloc(myligand->num_of_atoms, sizeof(char*));
   if(myligand->atom_rotbonds == NULL)
   {
@@ -1833,6 +2039,7 @@ int parse_liganddata(
       exit(1);
     }
   }
+  // <== sans
   // Now the rotbonds field contains the rotatable bonds (that is, the corresponding two atom's indexes) in the proper order
   // (this will be the order of rotations if an atom have to be rotated around more then one rotatable bond.) However, the
   // atom_rotbonds_temp, whose column indexes correspond to rotatable bond indexes, contains data according to the order of
@@ -1858,6 +2065,7 @@ int parse_liganddata(
   if (get_moving_and_unit_vectors(myligand) == 1)
                 return 1;
 
+  //sans ==>
   for(int i = 0; i < branch_counter; i++)
   {
     free(branches[i]);
@@ -1868,6 +2076,7 @@ int parse_liganddata(
     free(atom_rotbonds_temp[i]);
   }
   free(atom_rotbonds_temp);
+  // <== sans
   return 0;
 }
 
@@ -2021,10 +2230,16 @@ void scale_ligand(
 }
 
 double calc_rmsd(
+                 /* sans
+                 const double       atom_idxyzq_ref [MAX_NUM_OF_ATOMS][5],
+                 const double       atom_idxyzq     [MAX_NUM_OF_ATOMS][5],
+                 sans */
+                 // sans ==>
                  double     **atom_idxyzq_ref,
                  double     **atom_idxyzq,
-                 unsigned int num_atoms,
-                 const bool   handle_symmetry
+                 // <== sans
+                       unsigned int num_atoms,
+                 const bool         handle_symmetry
                 )
 // The function calculates the RMSD value (root mean square deviation of the
 // atomic distances for two conformations of the same ligand) and returns it.
@@ -2035,7 +2250,8 @@ double calc_rmsd(
 // (which is a silly method but this is applied in AutoDock, too).
 // The two positions must be given by the myligand and myligand_ref parameters.
 {
-  unsigned int i,j;
+//   int i,j; // sans
+  unsigned int i,j; // sans
   double sumdist2;
   double mindist2;
 
@@ -2108,11 +2324,20 @@ bool is_H_bond(
 // otherwise it returns False.
 {
   if ( // H-bond
+    /* sans dna/rna
+      (((strcmp(atype1, "HD") == 0) || (strcmp(atype1, "HS") == 0)) && // HD or HS
+                is_H_acceptor(atype2))
+      ||
+      (((strcmp(atype2, "HD") == 0) || (strcmp(atype2, "HS") == 0)) && // HD or HS
+                is_H_acceptor(atype1))
+    sans dna/rna */
+    // sans dna/rna ==>
       (((strcmp(atype1, "HD") == 0) || (strcmp(atype1, "HS") == 0) || (strcmp(atype1, "D") == 0)) && // HD or HS or D
                 is_H_acceptor(atype2))
       ||
       (((strcmp(atype2, "HD") == 0) || (strcmp(atype2, "HS") == 0) || (strcmp(atype1, "D") == 0)) && // HD or HS or D
                 is_H_acceptor(atype1))
+    // <== sans dna/rna
      )
     return true;
   else
@@ -2154,7 +2379,8 @@ void calc_distdep_tables_f(
 void calc_q_tables_f(
                      const Liganddata* myligand,
                            float       qasp,
-                           float     **q1q2,
+//                            float       q1q2 [][MAX_NUM_OF_ATOMS], // sans
+                           float     **q1q2, // sans
                            float       qasp_mul_absq []
                     )
 // The function calculates q1*q2 and qasp*abs(q) values
@@ -2180,6 +2406,8 @@ void change_conform_f(
 // The function changes the conformation of myligand according to
 // the floating point genotype from GPU
 {
+//   double genotype [ACTUAL_GENOTYPE_LENGTH]; // sans
+  // sans ==>
   int actual_genotype_length = myligand->num_of_rotbonds + 6;
   double *genotype;
   genotype = (double *) malloc(actual_genotype_length * sizeof(double));
@@ -2188,10 +2416,12 @@ void change_conform_f(
     printf("ERROR: Cannot allocate memory for genotype of change_conform_f() on main memory.\n");
     exit(1);
   }
-  for(int i=0; i<actual_genotype_length; i++)
+  // <== sans
+//   for (unsigned int i=0; i<ACTUAL_GENOTYPE_LENGTH; i++) // sans
+  for(int i=0; i<actual_genotype_length; i++) // sans
     genotype [i] = genotype_f [i];
   change_conform(myligand,mygrid,genotype,NULL,debug);
-  free(genotype);
+  free(genotype); // sans
 }
 
 void change_conform(
@@ -2383,10 +2613,12 @@ std::vector<AnalysisData> analyze_ligand_receptor(
 float calc_interE_f(
                     const Gridinfo*   mygrid,
                     const Liganddata* myligand,
+                          // sans ==>
                           bool        ligandOnly,
                           bool        cautionOn,
                           float       shakingRadius,
                           float     **shakingGridE,
+                          // <== sans
                           float       outofgrid_tolerance,
                           int         debug,
                           float&      intraflexE,
@@ -2401,24 +2633,42 @@ float calc_interE_f(
 // outofgrid_tolerance, if it remains outside, a very large value will be added to the current
 // energy as a penality.
 {
+// printf("sans calc_interE_f S\n");fflush(stdout);
   float interE;
   int atom_cnt;
   float x, y, z;
+//   int atom_typeid; // sans useless
   int x_low, x_high, y_low, y_high, z_low, z_high;
   float q, x_frac, y_frac, z_frac;
+  // sans useless ?? ==>
+  // x_high = 0.0;
+  // y_high = 0.0;
+  // z_high = 0.0;
+  // x_frac = 0.0;
+  // y_frac = 0.0;
+  // z_frac = 0.0;
+  // <== sans useless ??
+//   float dx, dy, dz; // sans useless
+
+  // sans ==>
   float x0, y0, z0;
   int caution;
   int shakingGridRadiusInNum; // this is not radius, but the half of (shakingGridEdgeLenInNum - 1)
   int shakingGridEdgeLenInNum;
   int shakingGridNum;
   float shakingGridRadius;
-  
+
   shakingGridRadiusInNum  = (int) ceil(shakingRadius / mygrid->spacing);
   shakingGridEdgeLenInNum = shakingGridRadiusInNum * 2 + 1;
   shakingGridNum          = shakingGridEdgeLenInNum * shakingGridEdgeLenInNum * shakingGridEdgeLenInNum;
   shakingGridRadius       = shakingGridRadiusInNum * mygrid->spacing;
+  // <== sans
 
   float v, e, val;
+// float e1, e2, e3;
+// e1 = 0;
+// e2 = 0;
+// e3 = 0;
   interE = 0;
   intraflexE = 0;
   bool peratom = false;
@@ -2435,15 +2685,19 @@ float calc_interE_f(
   float cube[8];
   unsigned long mul_tmp;
 
+// printf("sans calc_interE_f 1\n");fflush(stdout);
   for(atom_cnt = 0; atom_cnt < myligand->num_of_atoms; atom_cnt++) // for each atom
   {
+// printf("sans calc_interE_f 1-1\n");fflush(stdout);
+    // sans ==>
     if(shakingGridE[atom_cnt] != NULL)
     {
       printf("ERROR: BUG!!! The shakingGridE[atom_cnt] should point to NULL\n");
       exit(1);
     }
     shakingGridE[atom_cnt] = (float *) calloc(shakingGridNum, sizeof(float));
-    
+    // <== sans
+
     if (ligandOnly || myligand->ignore_inter[atom_cnt]){
       if(peratom){
         peratom_vdw[atom_cnt] = 0;
@@ -2451,13 +2705,15 @@ float calc_interE_f(
       }
       continue;
     }
+    // sans ==>
     caution = 0;
     mul_tmp = myligand->atom_map_to_fgrids[atom_cnt] * g3_4;
     x0 = myligand->atom_idxyzq [atom_cnt][1] - shakingGridRadius;
     y0 = myligand->atom_idxyzq [atom_cnt][2] - shakingGridRadius;
     z0 = myligand->atom_idxyzq [atom_cnt][3] - shakingGridRadius;
     q  = myligand->atom_idxyzq [atom_cnt][4];
-    
+// printf("sans calc_interE_f XYZ2:%f %f %f\n", x0, y0, z0);fflush(stdout);
+
     int shakingGridIndex = 0;
     for(int shakingGridIndexX = 0; shakingGridIndexX < shakingGridEdgeLenInNum; shakingGridIndexX++)
     {
@@ -2465,12 +2721,15 @@ float calc_interE_f(
       {
         for(int shakingGridIndexZ = 0; shakingGridIndexZ < shakingGridEdgeLenInNum; shakingGridIndexZ++)
         {
+// printf("sans calc_interE_f s1-2\n");fflush(stdout);
+// printf("sans calc_interE_f XYZ1:%d %d %d\n", shakingGridIndexX, shakingGridIndexY, shakingGridIndexZ);fflush(stdout);
           val = 0.0;
-          
+
           // Getting coordinates
           x = x0 + shakingGridIndexX * mygrid->spacing;
           y = y0 + shakingGridIndexY * mygrid->spacing;
           z = z0 + shakingGridIndexZ * mygrid->spacing;
+// printf("sans calc_interE_f XYZ2:%f %f %f\n", x, y, z);fflush(stdout);
           if ((x < 0) || (x >= mygrid->size_xyz [0]-1) ||
               (y < 0) || (y >= mygrid->size_xyz [1]-1) ||
               (z < 0) || (z >= mygrid->size_xyz [2]-1)) // if the shaking point is outside of the grid
@@ -2478,21 +2737,21 @@ float calc_interE_f(
             caution = 1;
             continue;
           }
-          
+
           x_low  = floor(x);
           y_low  = floor(y);
           z_low  = floor(z);
-          
+
           // Grid value at 000
           const float* grid_value_000 = mygrid->grids.data() + ((unsigned long)(x_low  + y_low*g1  + z_low*g2)<<2);
-          
+
           float dx = x - x_low;
           float omdx = 1.0f - dx;
           float dy = y - y_low;
           float omdy = 1.0f - dy;
           float dz = z - z_low;
           float omdz = 1.0f - dz;
-          
+
           // Calculating interpolation weights
           weights [idx_000] = omdx*omdy*omdz;
           weights [idx_010] = omdx*dy*omdz;
@@ -2502,7 +2761,8 @@ float calc_interE_f(
           weights [idx_110] = dx*dy*omdz;
           weights [idx_101] = dx*omdy*dz;
           weights [idx_111] = dx*dy*dz;
-          
+
+// printf("sans calc_interE_f s1-3\n");fflush(stdout);
           if (debug == 1)
           {
             printf("\n\nPartial results for atom with id %d:\n", atom_cnt);
@@ -2518,7 +2778,7 @@ float calc_interE_f(
             printf("coeff(0,1,1) = %f\n", weights [idx_011]);
             printf("coeff(1,1,1) = %f\n", weights [idx_111]);
           }
-          
+
           cube[0] = *(grid_value_000+mul_tmp);
           cube[1] = *(grid_value_000+mul_tmp+1);
           cube[2] = *(grid_value_000+mul_tmp+2);
@@ -2527,7 +2787,8 @@ float calc_interE_f(
           cube[5] = *(grid_value_000+mul_tmp+5);
           cube[6] = *(grid_value_000+mul_tmp+6);
           cube[7] = *(grid_value_000+mul_tmp+7);
-          
+
+// printf("sans calc_interE_f s1-4\n");fflush(stdout);
           if (debug == 1)
           {
             printf("Interpolation of van der Waals map:\n");
@@ -2540,14 +2801,16 @@ float calc_interE_f(
             printf("cube(0,1,1) = %f\n", cube [idx_011]);
             printf("cube(1,1,1) = %f\n", cube [idx_111]);
           }
-          
+
           // energy contribution of the current grid type
           v = cube[0]*weights[0] + cube[1]*weights[1] + cube[2]*weights[2] + cube[3]*weights[3] + cube[4]*weights[4] + cube[5]*weights[5] + cube[6]*weights[6] + cube[7]*weights[7];
           val += v;
+// e1 += v;
 
+// printf("sans calc_interE_f s1-5\n");fflush(stdout);
           if (debug == 1)
             printf("interpolated value = %f\n\n", v);
-          
+
           // energy contribution of the electrostatic grid
           mul_tmp = mygrid->num_of_map_atypes*g3_4; // relative address of electrostatics map
           cube[0] = *(grid_value_000+mul_tmp);
@@ -2558,7 +2821,8 @@ float calc_interE_f(
           cube[5] = *(grid_value_000+mul_tmp+5);
           cube[6] = *(grid_value_000+mul_tmp+6);
           cube[7] = *(grid_value_000+mul_tmp+7);
-          
+
+// printf("sans calc_interE_f s1-6\n");fflush(stdout);
           if (debug == 1)
           {
             printf("Interpolation of electrostatic map:\n");
@@ -2571,13 +2835,28 @@ float calc_interE_f(
             printf("cube(0,1,1) = %f\n", cube [idx_011]);
             printf("cube(1,1,1) = %f\n", cube [idx_111]);
           }
-          
+
           // Calculating affinity energy
           e = q * (cube[0]*weights[0] + cube[1]*weights[1] + cube[2]*weights[2] + cube[3]*weights[3] + cube[4]*weights[4] + cube[5]*weights[5] + cube[6]*weights[6] + cube[7]*weights[7]);
+// printf("SANS atomID: %d, q: %f, e: %f\n", atom_cnt, q, e);fflush(stdout);
+// printf("SANS atomID2\n");fflush(stdout);
           val += e;
+// printf("SANS atomID3\n");fflush(stdout);
+// e2 += e;
+// printf("SANS atomID4\n");fflush(stdout);
+// printf("peratom: %d\n", peratom);fflush(stdout);
+//       if(peratom){
+// #ifndef AD4_desolv_peratom_vdW
+//         peratom_vdw[atom_cnt] = v;
+// #endif
+//         peratom_elec[atom_cnt] = e;
+//         *elecE += e;
+// printf(" elecE: %f\n", *elecE);fflush(stdout);
+//       }
+
           if (debug == 1)
             printf("interpolated value = %f (multiplied by q = %f)\n\n", e, q);
-          
+
           // Capturing desolvation values (next map compared to above => mul_tmp += g3*4)
           mul_tmp += g3_4;
           cube[0] = *(grid_value_000+mul_tmp);
@@ -2588,7 +2867,7 @@ float calc_interE_f(
           cube[5] = *(grid_value_000+mul_tmp+5);
           cube[6] = *(grid_value_000+mul_tmp+6);
           cube[7] = *(grid_value_000+mul_tmp+7);
-          
+
           if (debug == 1)
           {
             printf("Interpolation of desolvation map:\n");
@@ -2601,11 +2880,20 @@ float calc_interE_f(
             printf("cube(0,1,1) = %f\n", cube [idx_011]);
             printf("cube(1,1,1) = %f\n", cube [idx_111]);
           }
-          
+
           // Calculating affinity energy
           e = fabs(q) * (cube[0]*weights[0] + cube[1]*weights[1] + cube[2]*weights[2] + cube[3]*weights[3] + cube[4]*weights[4] + cube[5]*weights[5] + cube[6]*weights[6] + cube[7]*weights[7]);
           val += e;
+// e3 += e;
+// #ifdef AD4_desolv_peratom_vdW
+//       if(peratom) peratom_vdw[atom_cnt] = v + e;
+// #endif
+
           shakingGridE[atom_cnt][shakingGridIndex] = val;
+// if(atom_cnt < 3)
+// {
+// printf("!!! INTER atom_cnt shakingGridIndex shakingGridE[atom_cnt][shakingGridIndex]: %d %d %f\n", atom_cnt, shakingGridIndex, shakingGridE[atom_cnt][shakingGridIndex]);
+// }
           shakingGridIndex++;
         } // End of for(int shakingGridIndexZ = 0
       } // End of for(int shakingGridIndexY = 0
@@ -2614,7 +2902,16 @@ float calc_interE_f(
     {
       printf("CAUTION: At least one shaking point for calculating entropy of atom serial %d is outside of grid. If the grid is build to cover all molecules, this is not a problem.\n", atom_cnt + 1);
     }
-    
+    // <== sans
+
+
+
+
+
+
+
+
+
     val = 0.0;
     if (myligand->ignore_inter[atom_cnt]){
       if(peratom){
@@ -2628,7 +2925,8 @@ float calc_interE_f(
     y = myligand->atom_idxyzq [atom_cnt][2];
     z = myligand->atom_idxyzq [atom_cnt][3];
     q = myligand->atom_idxyzq [atom_cnt][4];
-    
+
+// printf("sans calc_interE_f 1-2\n");fflush(stdout);
     if ((x < 0) || (x >= mygrid->size_xyz [0]-1) ||
         (y < 0) || (y >= mygrid->size_xyz [1]-1) ||
         (z < 0) || (z >= mygrid->size_xyz [2]-1)) // if the atom is outside of the grid
@@ -2662,14 +2960,15 @@ float calc_interE_f(
       {
         //interE = HIGHEST_ENERGY; // return maximal value
         //return interE;
-        val += 65536; // penalty is 2^16 for each atom outside the grid
+        // val += 16777216; // penalty is 2^24 for each atom outside the grid // sans
+        val += 65536; // sans penalty is 2^16 for each atom outside the grid
         if (atom_cnt < myligand->true_ligand_atoms)
           interE += val;
         else
           intraflexE += val;
         if(peratom){
-          peratom_vdw[atom_cnt] = 100000;
-          peratom_elec[atom_cnt] = 100000;
+          peratom_vdw[atom_cnt] = 100000; // sans ???
+          peratom_elec[atom_cnt] = 100000; // sans ???
         }
         continue;
       }
@@ -2706,6 +3005,7 @@ float calc_interE_f(
     weights [idx_101] = dx*omdy*dz;
     weights [idx_111] = dx*dy*dz;
 
+// printf("sans calc_interE_f 1-3\n");fflush(stdout);
     if (debug == 1)
     {
       printf("\n\nPartial results for atom with id %d:\n", atom_cnt);
@@ -2731,6 +3031,7 @@ float calc_interE_f(
     cube[6] = *(grid_value_000+mul_tmp+6);
     cube[7] = *(grid_value_000+mul_tmp+7);
 
+// printf("sans calc_interE_f 1-4\n");fflush(stdout);
     if (debug == 1)
     {
       printf("Interpolation of van der Waals map:\n");
@@ -2747,7 +3048,9 @@ float calc_interE_f(
     // energy contribution of the current grid type
     v = cube[0]*weights[0] + cube[1]*weights[1] + cube[2]*weights[2] + cube[3]*weights[3] + cube[4]*weights[4] + cube[5]*weights[5] + cube[6]*weights[6] + cube[7]*weights[7];
     val += v;
-    
+// e1 += v;
+
+// printf("sans calc_interE_f 1-5\n");fflush(stdout);
     if (debug == 1)
       printf("interpolated value = %f\n\n", v);
 
@@ -2762,6 +3065,7 @@ float calc_interE_f(
     cube[6] = *(grid_value_000+mul_tmp+6);
     cube[7] = *(grid_value_000+mul_tmp+7);
 
+// printf("sans calc_interE_f 1-6\n");fflush(stdout);
     if (debug == 1)
     {
       printf("Interpolation of electrostatic map:\n");
@@ -2777,13 +3081,20 @@ float calc_interE_f(
 
     // Calculating affinity energy
     e = q * (cube[0]*weights[0] + cube[1]*weights[1] + cube[2]*weights[2] + cube[3]*weights[3] + cube[4]*weights[4] + cube[5]*weights[5] + cube[6]*weights[6] + cube[7]*weights[7]);
+// printf("SANS atomID: %d, q: %f, e: %f\n", atom_cnt, q, e);fflush(stdout);
+// printf("SANS atomID2\n");fflush(stdout);
     val += e;
+// printf("SANS atomID3\n");fflush(stdout);
+// e2 += e;
+// printf("SANS atomID4\n");fflush(stdout);
+// printf("peratom: %d\n", peratom);fflush(stdout);
     if(peratom){
 #ifndef AD4_desolv_peratom_vdW
       peratom_vdw[atom_cnt] = v;
 #endif
       peratom_elec[atom_cnt] = e;
       *elecE += e;
+// printf(" elecE: %f\n", *elecE);fflush(stdout);
     }
 
     if (debug == 1)
@@ -2816,6 +3127,7 @@ float calc_interE_f(
     // Calculating affinity energy
     e = fabs(q) * (cube[0]*weights[0] + cube[1]*weights[1] + cube[2]*weights[2] + cube[3]*weights[3] + cube[4]*weights[4] + cube[5]*weights[5] + cube[6]*weights[6] + cube[7]*weights[7]);
     val += e;
+// e3 += e;
 #ifdef AD4_desolv_peratom_vdW
     if(peratom) peratom_vdw[atom_cnt] = v + e;
 #endif
@@ -2829,16 +3141,21 @@ float calc_interE_f(
       printf("Current value of intermolecular energy = %f, intramolecular flex res energy = %f\n\n\n", interE, intraflexE);
     }
   }
+// printf("SANS_CPUE interE: %.4f, INTER_interpolation: %.4f, INTER_elec: %.4f, INTER_desolvation: %.4f \n", interE, e1, e2, e3);fflush(stdout);
+// printf("!!! shakingGridE[0][0]: %f\n", shakingGridE[0][0]);
+// printf("sans calc_interE_f L\n");fflush(stdout);
   return interE;
 }
 
 // Corrected host "calc_intraE_f" function after smoothing was added
 float calc_intraE_f(
                     const Liganddata*               myligand,
+                          // sans ==>
                     const Gridinfo*                 mygrid,
                           float                     shakingRadius,
                           float                   **shakingGridE,
                           float                   **shakingGridEL,
+                          // <== sans
                           float                     dcutoff,
                           float                     smooth,
                           bool                      ignore_desolv,
@@ -2877,10 +3194,11 @@ float calc_intraE_f(
   el = 0.0f;
   desolv = 0.0f;
   interflexE = 0.0f;
-  
+
   if (debug == 1)
     printf("\n\n\nINTRAMOLECULAR ENERGY CALCULATION\n\n");
 
+  // sans ==>
   float  coor0[3];
   double coor[3];
   int caution;
@@ -2888,47 +3206,60 @@ float calc_intraE_f(
   int shakingGridEdgeLenInNum;
   int shakingGridNum;
   float shakingGridRadius;
-  
+
   shakingGridRadiusInNum  = (int) ceil(shakingRadius / mygrid->spacing);
   shakingGridEdgeLenInNum = shakingGridRadiusInNum * 2 + 1;
   shakingGridNum          = shakingGridEdgeLenInNum * shakingGridEdgeLenInNum * shakingGridEdgeLenInNum;
   shakingGridRadius       = shakingGridRadiusInNum * mygrid->spacing;
-  
+
+// float TE, TEVW, TEE, TES, TENA;
+// TE = 0.0;
+// TEVW = 0.0;
+// TEE = 0.0;
+// TES = 0.0;
+// TENA = 0.0;
+// int shakingGridCenterIndex = (shakingGridNum -1)/2;
   for(atom_id1 = 0; atom_id1 < myligand->num_of_atoms; atom_id1++) // for each atom pair
   {
+    // sans ==>
     if(shakingGridEL[atom_id1] != NULL)
     {
       printf("ERROR: BUG!!! The shakingGridEL[atom_id1] should point to NULL\n");
       exit(1);
     }
     shakingGridEL[atom_id1] = (float *) calloc(shakingGridNum, sizeof(float));
-    
+    // <== sans
+
     type_id1 = myligand->atom_idxyzq [atom_id1][0];
     unsigned int atom1_type_vdw_hb = myligand->atom_types_reqm [type_id1];
     a_flex = (atom_id1 >= myligand->true_ligand_atoms);
-    
+
     if(shakingGridE[atom_id1] == NULL)
     {
       printf("ERROR: BUG!!! The shakingGridE[atom_id1] should not point to NULL\n");
       exit(1);
     }
-    
+
     coor0[0] = myligand->atom_idxyzq[atom_id1][1] - shakingGridRadius;
     coor0[1] = myligand->atom_idxyzq[atom_id1][2] - shakingGridRadius;
     coor0[2] = myligand->atom_idxyzq[atom_id1][3] - shakingGridRadius;
-    
+
     for(atom_id2 = 0; atom_id2 < myligand->num_of_atoms; atom_id2++)
     {
       if(myligand->intraE_contributors [atom_id1][atom_id2] != 1)
       // if they have not to be included in intramolecular energy calculation
       {
+// if(atom_id1 < 1)
+// {
+// printf("!!! INTRA1 atom_id1,atom_id2/myligand->num_of_atoms shakingGridIndex shakingGridE[atom_id1][shakingGridIndex]: %d,%d/%d %d %f\n", atom_id1, atom_id2, myligand->num_of_atoms, 0, shakingGridE[atom_id1][0]);
+// }
         continue;
       }
-      
+
       type_id2 = myligand->atom_idxyzq [atom_id2][0];
       unsigned int atom2_type_vdw_hb = myligand->atom_types_reqm [type_id2];
       b_flex = (atom_id2>=myligand->true_ligand_atoms);
-      
+
       if(
           (
             (
@@ -2957,9 +3288,13 @@ float calc_intraE_f(
           )
         )
       {
+// // if(atom_id1 < 1)
+// // {
+// printf("!!! INTRA2 atom_id1,atom_id2/myligand->num_of_atoms shakingGridIndex shakingGridE[atom_id1][shakingGridIndex]: %d,%d/%d %d %f\n", atom_id1, atom_id2, myligand->num_of_atoms, 0, shakingGridE[atom_id1][0]);
+// // }
         continue;
       }
-      
+
       int shakingGridIndex = 0;
       for(int shakingGridIndexX = 0; shakingGridIndexX < shakingGridEdgeLenInNum; shakingGridIndexX++)
       {
@@ -2971,27 +3306,33 @@ float calc_intraE_f(
             el = 0.0f;
             desolv = 0.0f;
             interflexE = 0.0f;
-            
+
             coor[0] = coor0[0] + shakingGridIndexX * mygrid->spacing;
             coor[1] = coor0[1] + shakingGridIndexY * mygrid->spacing;
             coor[2] = coor0[2] + shakingGridIndexZ * mygrid->spacing;
             dist = distance((const double*) coor, &(myligand->atom_idxyzq [atom_id2][1]));
+// if(atom_id1 < 8 && shakingGridIndex == (shakingGridNum-1)/2)
+// if(atom_id1 < 8)
+// {
+//   DIST = dist;
+//   printf("atom_id1 atom_id2 shakingGridIndex DIST: %d %d %d %f %f %f %f\n", atom_id1, atom_id2, shakingGridIndex, DIST, coor[0], coor[1], coor[2]);
+// }
             distance_id = (int) floor((100.0f*dist) + 0.5f) - 1; // +0.5: rounding, -1: r_xx_table [0] corresponds to r=0.01
             if (distance_id < 0) {
               distance_id = 0;
             }
-            
+
             // ------------------------------------------------
             if(dist < dcutoff) // but only if the distance is less than distance cutoff value
             {
               // Getting optimum pair distance (opt_distance) from reqm and reqm_hbond
               float opt_distance = myligand->reqm_AB [type_id1][type_id2];
-            
+
               // Getting smoothed distance
               // smoothed_distance = function(dist, opt_distance)
               float smoothed_distance;
               float delta_distance = 0.5f*smooth;
-            
+
               if (dist <= (opt_distance - delta_distance)) {
                 smoothed_distance = dist + delta_distance;
               }
@@ -3001,12 +3342,12 @@ float calc_intraE_f(
               else { // else if (dist >= (opt_distance + delta_distance))
                 smoothed_distance = dist - delta_distance;
               }
-            
+
               smoothed_distance_id = (int) floor((100.0f*smoothed_distance) + 0.5f) - 1; // +0.5: rounding, -1: r_xx_table [0] corresponds to r=0.01
               if (smoothed_distance_id < 0) {
                 smoothed_distance_id = 0;
               }
-            
+
               pair_mod* pm = tables->mod_pair [type_id1][type_id2];
               if (tables->is_HB [type_id1][type_id2] && !pm) //H-bond
               {
@@ -3109,11 +3450,11 @@ float calc_intraE_f(
               s2 = (myligand->solpar [type_id2] + tables->qasp_mul_absq [atom_id2]);
               v1 = myligand->volume [type_id1];
               v2 = myligand->volume [type_id2];
-            
+
               if (debug == 1)
                 printf(" %f, electrostatic = %f, desolv = %f\n", (vdW1 - vdW2), tables->q1q2[atom_id1][atom_id2] * tables->r_epsr_table [distance_id],
                      (s1*v2 + s2*v1) * tables->desolv_table [distance_id]);
-            
+
               if ((a_flex + b_flex) & 1)
               // if both atoms are of either a ligand or a flex res it's intra
               {
@@ -3121,18 +3462,61 @@ float calc_intraE_f(
                               (s1*v2 + s2*v1) * tables->desolv_table [distance_id];
               } else{
                 el += tables->q1q2[atom_id1][atom_id2] * tables->r_epsr_table [distance_id];
+// if(shakingGridIndex == shakingGridCenterIndex)
+// {
+// printf("FRatom_id1 atom_i2 tables->q1q2[atom_id1][atom_id2] tables->r_epsr_table [distance_id] %d %d %f %f\n", atom_id1, atom_id2, tables->q1q2[atom_id1][atom_id2], tables->r_epsr_table [distance_id]);
+// }
                 desolv += (s1*v2 + s2*v1) * tables->desolv_table [distance_id];
               }
             }
+
+// if(shakingGridIndex == shakingGridCenterIndex)
+// {
+// TE += vW + el + desolv + interflexE;
+// TEVW += vW;
+// TEE += el;
+// TES += desolv;
+// TENA += interflexE;
+// }
             shakingGridE[atom_id1][shakingGridIndex] += vW + el + desolv + interflexE;
             shakingGridEL[atom_id1][shakingGridIndex] += vW + el + desolv;
+// if(atom_id1 < 8 && shakingGridE[atom_id1][shakingGridIndex] > 100000.0)
+// {
+// printf("!!! INTRA3 atom_id1,atom_id2/myligand->num_of_atoms shakingGridIndex shakingGridE[atom_id1][shakingGridIndex]: %d,%d/%d %d %f\n", atom_id1, atom_id2, myligand->num_of_atoms, shakingGridIndex, shakingGridE[atom_id1][shakingGridIndex]);
+// printf("!!! 3energies: van der Waals = %f, electrostatic = %f, desolvation = %f, interflexE = %f, total = %f\n\n", vW, el, desolv, interflexE, vW + el + desolv + interflexE);
+// }
             shakingGridIndex++;
           } // End of for(int shakingGridIndexZ = 0
         } // End of for(int shakingGridIndexY = 0
       } // End of for(int shakingGridIndexX = 0
     } // End of for(atom_id2 =0
+// if(atom_id1 < 8)
+// {
+// printf("!!! INTRA3-2 atom_id1,atom_id2/myligand->num_of_atoms shakingGridNum (shakingGridNum-1/2) E: %d,%d/%d %d %f\n", atom_id1, atom_id2, myligand->num_of_atoms, (shakingGridNum-1) / 2, shakingGridE[atom_id1][(shakingGridNum-1) / 2]);
+// }
   }
-  
+// printf("TE: %f\n", TE/2);
+// printf("TEVW: %f\n", TEVW/2);
+// printf("TEE: %f\n", TEE/2);
+// printf("TES: %f\n", TES/2);
+// printf("TENA: %f\n", TENA/2);
+  // <== sans
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   vW = 0.0f;
   el = 0.0f;
   desolv = 0.0f;
@@ -3175,7 +3559,12 @@ float calc_intraE_f(
         // This interaction is evaluated at any distance,
         // so no cuttoffs considered here!
         // FIXME: accumulated into vW ... is that correct?
-        if(
+        /* sans dna/rna
+        if (((atom1_type_vdw_hb == ATYPE_CG_IDX) && (atom2_type_vdw_hb == ATYPE_G0_IDX)) ||
+            ((atom1_type_vdw_hb == ATYPE_G0_IDX) && (atom2_type_vdw_hb == ATYPE_CG_IDX))) {
+        sans dna/rna */
+        // sans dna/rna ==>
+        if( /// 問題在這裏？ 無論是誰 跟 G0 都應該沒有作用力，對吧？
             (
               (
                 (atom1_type_vdw_hb == ATYPE_CG_IDX) ||
@@ -3203,7 +3592,18 @@ float calc_intraE_f(
             )
           )
         {
-          continue;
+        // <== sans dna/rna
+          /* sans
+          if (((atom_id1<myligand->true_ligand_atoms) && (atom_id2<myligand->true_ligand_atoms)) ||
+              ((atom_id1>=myligand->true_ligand_atoms) && (atom_id2>=myligand->true_ligand_atoms))) // if both atoms are of either a ligand or a flex res it's intra
+          {
+            vW += G * dist;
+          }
+          else
+            interflexE += G * dist;
+          //printf("OpenCL host - calc_intraE_f: CG-G0 pair found!\n");
+          sans */
+          continue; // sans
         }
         // ------------------------------------------------
         if (dist < dcutoff) // but only if the distance is less than distance cutoff value
@@ -3340,15 +3740,26 @@ float calc_intraE_f(
                           (s1*v2 + s2*v1) * tables->desolv_table [distance_id];
           } else{
             el += tables->q1q2[atom_id1][atom_id2] * tables->r_epsr_table [distance_id];
+// printf("LAatom_id1 atom_i2 tables->q1q2[atom_id1][atom_id2] tables->r_epsr_table [distance_id] %d %d %f %f\n", atom_id1, atom_id2, tables->q1q2[atom_id1][atom_id2], tables->r_epsr_table [distance_id]);
             desolv += (s1*v2 + s2*v1) * tables->desolv_table [distance_id];
           }
         }
       }
+// if(atom_id1 < 8)
+// {
+// printf("!!! INTRA4 atom_id1,atom_id2/myligand->num_of_atoms dist x y z: %d,%d/%d %f %f %f %f\n", atom_id1, atom_id2, myligand->num_of_atoms, dist, myligand->atom_idxyzq [atom_id1][1], myligand->atom_idxyzq [atom_id1][2], myligand->atom_idxyzq [atom_id1][3]);
+// }
     }
+// if(atom_id1 < 8)
+// {
+// printf("!!! 4energies: van der Waals = %f, electrostatic = %f, desolvation = %f, interflexE = %f, total = %f\n\n", vW, el, desolv, interflexE, vW + el + desolv + interflexE);
+// }
   }
 
   if (debug == 1)
     printf("\nFinal energies: van der Waals = %f, electrostatic = %f, desolvation = %f, total = %f\n\n", vW, el, desolv, vW + el + desolv);
+// if (1)
+// printf("\nFinal energies: van der Waals = %f, electrostatic = %f, desolvation = %f, interflexE = %f, total = %f\n\n", vW, el, desolv,  interflexE, vW + el + desolv + interflexE);
 
   if (!ignore_desolv)
     return (vW + el + desolv);
@@ -3356,6 +3767,7 @@ float calc_intraE_f(
     return (vW + el);
 }
 
+// sans ==>
 void LiganddataCopy(Liganddata* dstLigand, const Liganddata* srcLigand)
 {
   if(srcLigand == NULL)
@@ -3421,7 +3833,7 @@ void LiganddataCopy(Liganddata* dstLigand, const Liganddata* srcLigand)
   }
   for(int i = 0; i < srcLigand->num_of_atypes; i++)
   {
-    dstLigand->atom_types[i] = (char *) calloc(7, 1); // for CGXXXX GXXXX
+    dstLigand->atom_types[i] = (char *) calloc(7, 1); // sans for CGXXXX GXXXX
     if(dstLigand->atom_types[i] == NULL)
     {
       printf("ERROR: Cannot allocate enough memory for dstLigand->atom_types[i].\n");
@@ -3444,7 +3856,7 @@ void LiganddataCopy(Liganddata* dstLigand, const Liganddata* srcLigand)
   }
   for(int i = 0; i < srcLigand->num_of_atypes; i++)
   {
-    dstLigand->base_atom_types[i] = (char *) calloc(7, 1); // for CGXXXX GXXXX
+    dstLigand->base_atom_types[i] = (char *) calloc(7, 1); // sans for CGXXXX GXXXX
     if(dstLigand->base_atom_types[i] == NULL)
     {
       printf("ERROR: Cannot allocate enough memory for dstLigand->base_atom_types[i].\n");
@@ -3484,7 +3896,7 @@ void LiganddataCopy(Liganddata* dstLigand, const Liganddata* srcLigand)
   }
   for(int i = 0; i < num_ligand_grid_types; i++)
   {
-    dstLigand->ligand_grid_types[i] = (char *) calloc(7, 1); // for CGXXXX GXXXX
+    dstLigand->ligand_grid_types[i] = (char *) calloc(7, 1); // sans for CGXXXX GXXXX
     if(dstLigand->ligand_grid_types[i] == NULL)
     {
       printf("ERROR: Cannot allocate enough memory for dstLigand->ligand_grid_types[i].\n");
@@ -4041,3 +4453,4 @@ void LiganddataFree(Liganddata* ligand)
 
   free(ligand);
 }
+// <== sans

@@ -38,7 +38,8 @@ int get_gridinfo(
   char   tempstr [256];
   int    gpoints_even[3];
   double center[3];
-  long unsigned int grid_types=0;
+//   int grid_types=0; // sans
+  long unsigned int grid_types=0; // sans
 
   // ----------------------------------------------------
   // Getting full path fo the grid file
@@ -144,7 +145,8 @@ int get_gridinfo(
   }
   
   if(mygrid->grid_mapping.size() != 2*grid_types){
-    printf("Error: Number of grid map labels (%ld) and filenames (%ld) mismatched in fld file.\n", grid_types, mygrid->grid_mapping.size()-grid_types);
+//     printf("Error: Number of grid map labels (%d) and filenames (%d) mismatched in fld file.\n", grid_types, (int)mygrid->grid_mapping.size()-grid_types); // sans
+    printf("Error: Number of grid map labels (%ld) and filenames (%ld) mismatched in fld file.\n", grid_types, mygrid->grid_mapping.size()-grid_types); // sans
     return 1;
   }
   if(!have_e){
@@ -193,8 +195,9 @@ int get_gridvalues(Gridinfo* mygrid)
                         (mygrid->size_xyz[0])*
                         (mygrid->size_xyz[1])*
                         (mygrid->size_xyz[2]));
-  int x, y, z;
-  long unsigned int t, ti;
+//   int t, ti, x, y, z; // sans
+  int x, y, z; // sans
+  long unsigned int t, ti; // sans
   std::ifstream fp;
   std::string fn, line;
   float* mypoi = mygrid->grids.data();

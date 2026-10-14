@@ -23,8 +23,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 __global__ void
 __launch_bounds__(NUM_OF_THREADS_PER_BLOCK, 1024 / NUM_OF_THREADS_PER_BLOCK)
 gpu_sum_evals_kernel(
+                    // sans ==>
                      int *pMem_evals_of_new_entities,
                      int  run_id
+                     // <== sans
                     )
 // The GPU global function sums the evaluation counter states
 // which are stored in evals_of_new_entities array foreach entity,
@@ -34,7 +36,8 @@ gpu_sum_evals_kernel(
 {
   __shared__ int sSum_evals;
   int partsum_evals = 0;
-  int* pEvals_of_new_entities = pMem_evals_of_new_entities;
+//   int* pEvals_of_new_entities = cData.pMem_evals_of_new_entities + blockIdx.x * cData.dockpars.pop_size; // sans
+  int* pEvals_of_new_entities = pMem_evals_of_new_entities; // sans
   for (int entity_counter = threadIdx.x;
            entity_counter < cData.dockpars.pop_size;
            entity_counter += blockDim.x) 
@@ -47,13 +50,16 @@ gpu_sum_evals_kernel(
   REDUCEINTEGERSUM(partsum_evals, &sSum_evals);
   if (threadIdx.x == 0)
   {
-      cData.pMem_gpu_evals_of_runs[run_id] += sSum_evals;
+//       cData.pMem_gpu_evals_of_runs[blockIdx.x] += sSum_evals; // sans
+      cData.pMem_gpu_evals_of_runs[run_id] += sSum_evals; // sans
   }
 }
 
 void gpu_sum_evals(uint32_t blocks, uint32_t threadsPerBlock,
+                   // sans ==>
                    int    **pMem_evals_of_new_entities,
                    int      run_id)
+                   // <== sans
 {
   gpu_sum_evals_kernel<<<blocks, threadsPerBlock>>>(pMem_evals_of_new_entities[run_id], run_id);
   LAUNCHERROR("gpu_sum_evals_kernel");

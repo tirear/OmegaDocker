@@ -52,11 +52,30 @@ __launch_bounds__(NUM_OF_THREADS_PER_BLOCK, 1024 / NUM_OF_THREADS_PER_BLOCK)
 gpu_gradient_minAdam_kernel(
                             float* pMem_conformations_next,
                             float* pMem_energies_next,
+                            // sans ==>
                             int   *pMem_evals_of_new_entities,
                             float *gFloatBuff,
                             size_t elemNum_gFloatBuffBase,
                             int    run_win_id,
                             int    run_id
+
+//                             float    *atom_charges_const,
+//                             uint32_t *atom_types_const,
+//                             uint32_t *atom_types_map_const,
+//                             char     *ignore_inter_const,
+//
+//                             uint32_t *intraE_contributors_const,
+
+//                             int      *rotlist_const,
+//
+//                             float    *ref_coords_const,
+//                             float    *rotbonds_moving_vectors_const,
+//                             float    *rotbonds_unit_vectors_const,
+//
+//                             int      *rotbonds,
+//                             int      *rotbonds_atoms,
+//                             int      *num_rotating_atoms_per_rotbond
+                            // <== sans
                            )
 // The GPU global function performs gradient-based minimization on (some) entities of conformations_next.
 // The number of OpenCL compute units (CU) which should be started equals to num_of_minEntities*num_of_runs.
@@ -71,6 +90,7 @@ gpu_gradient_minAdam_kernel(
   // -----------------------------------------------------------------------------
 
   // Determining entity, and its run, energy, and genotype
+//   int   run_id = blockIdx.x / cData.dockpars.num_of_lsentities; // sans
   float energy;
   // Energy may go up, so we keep track of the best energy ever calculated.
   // Then, we return the genotype corresponding
@@ -79,7 +99,11 @@ gpu_gradient_minAdam_kernel(
   __shared__ float best_energy;
   __shared__ float sFloatAccumulator;
 
+//   volatile __shared__ float sFloatBuff[6 * MAX_NUM_OF_ATOMS + 5 * ACTUAL_GENOTYPE_LENGTH]; // sans
+
   // Ligand-atom position and partial energies
+//   float3* calc_coords = (float3*)sFloatBuff; // sans
+  // sans ==>
   int actual_genotype_length = cData.dockpars.num_of_genes;
   int genotype_length_in_globmem = actual_genotype_length + 1;
   float3 *calc_coords;
@@ -109,20 +133,32 @@ gpu_gradient_minAdam_kernel(
 #endif
     genotype = (float*)(cartesian_gradient + cData.dockpars.num_of_atoms);
   }
+  // <== sans
 
   // Gradient of the intermolecular energy per each ligand atom
   // Also used to store the accummulated gradient per each ligand atom
+// #ifdef FLOAT_GRADIENTS
+//   float3* cartesian_gradient = (float3*)(calc_coords + MAX_NUM_OF_ATOMS); // sans
+// #else
+//   int3* cartesian_gradient = (int3*)(calc_coords + MAX_NUM_OF_ATOMS); // sans
+// #endif
+
   // Genotype pointers
-  float* best_genotype = genotype + actual_genotype_length;
+//   float* genotype = (float*)(cartesian_gradient + MAX_NUM_OF_ATOMS); // sans
+//   float* best_genotype = genotype + ACTUAL_GENOTYPE_LENGTH; // sans
+  float* best_genotype = genotype + actual_genotype_length; // sans
 
   // Partial results of the gradient step
-  float* gradient = best_genotype + actual_genotype_length;
+//   float* gradient = best_genotype + ACTUAL_GENOTYPE_LENGTH; // sans
+  float* gradient = best_genotype + actual_genotype_length; // sans
 
   // Adam mt parameter
-  float* mt = gradient + actual_genotype_length;
+//   float* mt = gradient + ACTUAL_GENOTYPE_LENGTH; // sans
+  float* mt = gradient + actual_genotype_length; // sans
 
   // Adam vt parameter
-  float* vt = mt + actual_genotype_length;
+//   float* vt = mt + ACTUAL_GENOTYPE_LENGTH; // sans
+  float* vt = mt + actual_genotype_length; // sans
 
   // Iteration counter for the minimizer
   uint32_t iteration_cnt = 0;
@@ -131,11 +167,12 @@ gpu_gradient_minAdam_kernel(
   {
     // Since entity 0 is the best one due to elitism,
     // it should be subjected to random selection
-    entity_id = blockIdx.x % cData.dockpars.num_of_lsentities;
+    entity_id = blockIdx.x % cData.dockpars.num_of_lsentities; // sans this should always be equal to blockIdx.x
     if (entity_id == 0) {
       // If entity 0 is not selected according to LS-rate,
       // choosing another entity
-      if (100.0f*gpu_randf(cData.pMem_prng_states, (gridDim.x * run_id + blockIdx.x) * blockDim.x + threadIdx.x) > cData.dockpars.lsearch_rate) {
+//       if (100.0f*gpu_randf(cData.pMem_prng_states) > cData.dockpars.lsearch_rate) { // sans check
+      if (100.0f*gpu_randf(cData.pMem_prng_states, (gridDim.x * run_id + blockIdx.x) * blockDim.x + threadIdx.x) > cData.dockpars.lsearch_rate) { // sans check
         entity_id = cData.dockpars.num_of_lsentities; // AT - Should this be (uint)(dockpars_pop_size * gpu_randf(dockpars_prng_states))?
       }
     }
@@ -151,9 +188,11 @@ gpu_gradient_minAdam_kernel(
     #endif
   }
   __syncthreads();
-  energy = pMem_energies_next[entity_id];
+//   energy = pMem_energies_next[run_id * cData.dockpars.pop_size + entity_id]; // sans
+  energy = pMem_energies_next[entity_id]; // sans
 
-  int offset = entity_id * genotype_length_in_globmem;
+//   int offset = (run_id * cData.dockpars.pop_size + entity_id) * GENOTYPE_LENGTH_IN_GLOBMEM; // sans
+  int offset = entity_id * genotype_length_in_globmem; // sans
   for (int i = threadIdx.x ; i < cData.dockpars.num_of_genes; i += blockDim.x)
   {
     genotype[i] = pMem_conformations_next[offset + i];
@@ -234,6 +273,7 @@ gpu_gradient_minAdam_kernel(
     gpu_calc_energrad(
                       genotype,
                       energy,
+//                       run_id, // sans useless
                       calc_coords,
                       #if defined (DEBUG_ENERGY_KERNEL)
                       interE,
@@ -243,6 +283,24 @@ gpu_gradient_minAdam_kernel(
                       cartesian_gradient,
                       gradient,
                       &sFloatAccumulator
+                      // sans ==>
+//                       atom_charges_const,
+//                       atom_types_const,
+//                       atom_types_map_const,
+//                       ignore_inter_const,
+//
+//                       intraE_contributors_const,
+
+//                       rotlist_const,
+//
+//                       ref_coords_const,
+//                       rotbonds_moving_vectors_const,
+//                       rotbonds_unit_vectors_const,
+//
+//                       rotbonds,
+//                       rotbonds_atoms,
+//                       num_rotating_atoms_per_rotbond
+                      // <== sans
                      );
 
     // =============================================================
@@ -393,7 +451,8 @@ gpu_gradient_minAdam_kernel(
   // Updating old offspring in population
   __syncthreads();
 
-  offset = entity_id * genotype_length_in_globmem;
+//   offset = (run_id * cData.dockpars.pop_size + entity_id) * GENOTYPE_LENGTH_IN_GLOBMEM; // sans
+  offset = entity_id * genotype_length_in_globmem; // sans
   for (uint gene_counter = threadIdx.x;
             gene_counter < cData.dockpars.num_of_genes;
             gene_counter+= blockDim.x)
@@ -403,8 +462,14 @@ gpu_gradient_minAdam_kernel(
 
   // Updating eval counter and energy
   if (threadIdx.x == 0) {
+    /* sans
+    cData.pMem_evals_of_new_entities[run_id * cData.dockpars.pop_size + entity_id] += iteration_cnt;
+    pMem_energies_next[run_id * cData.dockpars.pop_size + entity_id] = best_energy;
+    sans */
+    // sans ==>
     pMem_evals_of_new_entities[entity_id] += iteration_cnt;
     pMem_energies_next[entity_id] = best_energy;
+    // <== sans
 
     #if defined (DEBUG_ADADELTA_MINIMIZER) || defined (PRINT_ADADELTA_MINIMIZER_ENERGY_EVOLUTION)
     printf("\n");
@@ -418,6 +483,11 @@ gpu_gradient_minAdam_kernel(
 void gpu_gradient_minAdam(
                           uint32_t blocks,
                           uint32_t threads,
+                          /* sans
+                          float*   pMem_conformations_next,
+                          float*   pMem_energies_next
+                          sans */
+                          // sans ==>
                           float  **pMem_conformations_next,
                           float  **pMem_energies_next,
                           int    **pMem_evals_of_new_entities,
@@ -425,8 +495,12 @@ void gpu_gradient_minAdam(
                           size_t   elemNum_gFloatBuffBase,
                           int      run_id_init,
                           int      run_id_end
+//                           GpuData& cData
+                          // <== sans
 )
 {
+//   gpu_gradient_minAdam_kernel<<<blocks, threads>>>(pMem_conformations_next, pMem_energies_next); // sans
+  // sans ==>
   int run_win_id = 0;
   for(int i = run_id_init; i < run_id_end; i++)
   {
@@ -438,8 +512,26 @@ void gpu_gradient_minAdam(
       elemNum_gFloatBuffBase,
       run_win_id,
       i
+//       cData.pKerconst_interintra->atom_charges_const,
+//       cData.pKerconst_interintra->atom_types_const,
+//       cData.pKerconst_interintra->atom_types_map_const,
+//       cData.pKerconst_interintra->ignore_inter_const,
+//
+//       cData.pKerconst_intracontrib->intraE_contributors_const,
+
+//       cData.pKerconst_rotlist->rotlist_const,
+//
+//       cData.pKerconst_conform->ref_coords_const,
+//       cData.pKerconst_conform->rotbonds_moving_vectors_const,
+//       cData.pKerconst_conform->rotbonds_unit_vectors_const,
+//
+//       cData.pKerconst_grads->rotbonds,
+//       cData.pKerconst_grads->rotbonds_atoms,
+//       cData.pKerconst_grads->num_rotating_atoms_per_rotbond
     );
+    // run_win_id++; // sans force run_window = 1 from v.0.17
   }
+  // <== sans
   LAUNCHERROR("gpu_gradient_minAdam_kernel");
 #if 0
   cudaError_t status;

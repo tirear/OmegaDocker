@@ -25,8 +25,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include "defines.h"
 #include "calcenergy.h"
 #include "GpuData.h"
-#include <thrust/sort.h>
-#include <thrust/device_ptr.h>
+#include <thrust/sort.h>       // sans
+#include <thrust/device_ptr.h> // sans
 
 __device__ inline uint64_t llitoulli(int64_t l)
 {
@@ -125,6 +125,8 @@ static GpuData cpuData;
 void SetKernelsGpuData(GpuData* pData)
 {
   cudaError_t status;
+//   printf("sans kernels sizeof(GpuData): %zu\n", sizeof(GpuData));;fflush(stdout);
+//   printf("sans kernels sizeof(pData): %zu\n", sizeof(pData));;fflush(stdout);
   status = cudaMemcpyToSymbol(cData, pData, sizeof(GpuData));
   RTERROR(status, "SetKernelsGpuData copy to cData failed");
   memcpy(&cpuData, pData, sizeof(GpuData));
@@ -137,6 +139,7 @@ void GetKernelsGpuData(GpuData* pData)
   RTERROR(status, "GetKernelsGpuData copy From cData failed");
 }
 
+// sans ==>
 void cudaSortArray(long unsigned int runNum, float **pMem_energies_current, unsigned long pop_size, int **pMem_energyToConforIndex)
 {
   thrust::device_ptr<float> dev_fptr;
@@ -148,18 +151,21 @@ void cudaSortArray(long unsigned int runNum, float **pMem_energies_current, unsi
     thrust::sort_by_key(dev_fptr, dev_fptr + pop_size, dev_iptr);
   }
 }
+// <== sans
 
 
 // Kernel files
 #include "calcenergy.cu"
-#include "calcLigandEne.cu"
+#include "calcAllAndLigandEne.cu"// sans all and ligand
+#include "calcLigandEne.cu"      // sans ligand
 #include "calcMergeEneGra.cu"
-#include "calcLigandEneGra.cu"
-#include "calcLigandEneGra2.cu"
+#include "calcLigandEneGra.cu"   // sans ligand
+#include "calcLigandEneGra2.cu"  // sans ligand
 #include "auxiliary_genetic.cu"
 #include "kernel1.cu"
 #include "kernel2.cu"
 #include "kernel3.cu"
 #include "kernel4.cu"
 #include "kernel_ad.cu"
+#include "kernel_ad_coorOut.cu"  // sans coorOut
 #include "kernel_adam.cu"

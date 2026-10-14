@@ -29,9 +29,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
 #include <stdlib.h>
 #include <string>
 #include "miscellaneous.h"
-
+// sans ==>
 #include <limits>
 #include <gmp.h>
+// <== sans
 
 class AutoStop{
         bool               first_time;
@@ -72,11 +73,15 @@ class AutoStop{
     return sqrt(sq)/average_sd2_N[2];
   }
 
-  inline void tabulate_energies(float **energies){
-    overall_best_energy = std::numeric_limits<float>::infinity();
+//   inline void tabulate_energies(const float* energies){ // sans
+  inline void tabulate_energies(float **energies){ // sans
+//     overall_best_energy = 1<<24; // sans
+    overall_best_energy = std::numeric_limits<float>::infinity(); // sans
     for (int run_cnt=0; run_cnt < num_of_runs; run_cnt++) {
       for (unsigned int i=0; i<pop_size; i++) {
-        float energy = energies[run_cnt][i];
+//         float energy = energies[run_cnt*pop_size + i]; // sans
+        float energy = energies[run_cnt][i]; // sans
+        // printf("sans autostop energy run_id/entity_id/energy: %d/%u/%f\n",run_cnt, i, energy); // sans check
         if(energy < overall_best_energy)
           overall_best_energy = energy;
         if(energy < threshold) {
@@ -142,15 +147,19 @@ class AutoStop{
   {
     first_time = true;
     autostopped = false;
-    threshold = std::numeric_limits<float>::infinity();
+//     threshold = 1<<24; // sans
+    threshold = std::numeric_limits<float>::infinity(); // sans
     threshold_used = threshold;
-    thres_stddev = 0.0;
-    curr_avg = std::numeric_limits<float>::infinity();
+//     thres_stddev = threshold; // sans
+    thres_stddev = 0.0; // sans
+//     curr_avg = -(1<<24); // sans
+    curr_avg = std::numeric_limits<float>::infinity(); // sans
     curr_std = thres_stddev;
     roll_count = 0;
     bestN = 1;
     delta_energy = 2.0 * thres_stddev / Ntop;
-    overall_best_energy = std::numeric_limits<float>::infinity();
+//     overall_best_energy = 1<<24; // sans
+    overall_best_energy = std::numeric_limits<float>::infinity(); // sans
     if(output!=NULL) outbuf = (char*)malloc(256*sizeof(char));
   }
 
@@ -158,7 +167,16 @@ class AutoStop{
   {
     if(output!=NULL) free(outbuf);
   }
-  inline void print_intro(mpz_t num_of_generations, mpz_t num_of_energy_evals)
+  /* sans
+  inline void print_intro(unsigned long num_of_generations, unsigned long num_of_energy_evals)
+  {
+    para_printf("\nExecuting docking runs, stopping automatically after either reaching %.2f kcal/mol standard deviation of\nthe best molecules of the last 4 * %u generations, %lu generations, or %lu evaluations:\n\n",stopstd,as_frequency,num_of_generations,num_of_energy_evals);
+    para_printf("Generations |  Evaluations |     Threshold    |  Average energy of best 10%%  | Samples |    Best energy\n");
+    para_printf("------------+--------------+------------------+------------------------------+---------+-------------------\n");
+  }
+  sans */
+  // sans ==>
+  inline void print_intro(mpz_t num_of_generations, mpz_t num_of_energy_evals) // sans
   {
     char *num_of_generations_str;
     char *num_of_energy_evals_str;
@@ -172,9 +190,12 @@ class AutoStop{
     free(num_of_generations_str);
     free(num_of_energy_evals_str);
   }
+  // <== sans
 
-  inline bool check_if_satisfactory(mpz_t generation_cnt, float **energies, mpz_t total_evals)
+//   inline bool check_if_satisfactory(int generation_cnt, const float* energies, unsigned long total_evals) // sans
+  inline bool check_if_satisfactory(mpz_t generation_cnt, float **energies, mpz_t total_evals) // sans
   {
+//     for(unsigned int count=0; (count<1+8*(generation_cnt==0)) && (fabs(curr_avg)>0.00001); count++) // sans what is "(count<1+8*(generation_cnt==0)) && (fabs(curr_avg)>0.00001)" for?
     for(unsigned int count=0; count < 1; count++)
     {
       threshold_used = threshold;
@@ -184,10 +205,12 @@ class AutoStop{
       {
         curr_avg = average(&average_sd2_N[0]);
         curr_std = stddev(&average_sd2_N[0]);
+        // sans ==>
         if(curr_std == 0.0)
         {
           curr_avg = overall_best_energy;
         }
+        // <== sans
         bestN = average_sd2_N[2];
         thres_stddev = curr_std;
         threshold = curr_avg + thres_stddev;
@@ -205,12 +228,15 @@ class AutoStop{
         threshold = curr_avg + Ncream * thres_stddev / bestN;
         delta_energy = 2.0 * thres_stddev / (Ntop-1);
       }
+      // sans ==>
       if(bestN <= num_of_runs)
       {
         threshold = std::numeric_limits<float>::infinity();
       }
+      // <== sans
     }
-
+//     para_printf("%11u | %12lu |%8.2f kcal/mol |%8.2f +/-%8.2f kcal/mol |%8i |%8.2f kcal/mol\n",generation_cnt,total_evals/num_of_runs,threshold_used,curr_avg,curr_std,bestN,overall_best_energy); // sans
+    // sans ==>
     mpz_t Evaluations;
     char *Evaluations_str;
     char *generation_cnt_str;
@@ -224,7 +250,7 @@ class AutoStop{
     
     free(generation_cnt_str);
     free(Evaluations_str);
-
+    // <== sans
     fflush(stdout);
     rolling[4*roll_count] = curr_avg * bestN;
     rolling[4*roll_count+1] = (curr_std*curr_std + curr_avg*curr_avg)*bestN;
@@ -241,13 +267,15 @@ class AutoStop{
     best_var -= best_avg*best_avg;
 
     // Finish when the std.dev. of the last 4 rounds is below -stopstd kcal/mol and are at (essentially) the same best energy
-    if((stddev(&average_sd2_N[0])<stopstd) && (mpz_cmp_si(generation_cnt, (long) (4*as_frequency)) >= 0) && (best_var<=0.00002f))
+//     if((stddev(&average_sd2_N[0])<stopstd) && (generation_cnt>=(int)(4*as_frequency)) && (best_var<=0.00002f)) // sans
+    if((stddev(&average_sd2_N[0])<stopstd) && (mpz_cmp_si(generation_cnt, (long) (4*as_frequency)) >= 0) && (best_var<=0.00002f)) // sans
       autostopped = true;
 
     return autostopped;
   }
 
-  inline void output_final_stddev(mpz_t generation_cnt, float **energies, mpz_t total_evals){
+//   inline void output_final_stddev(int generation_cnt, const float* energies, unsigned long total_evals){ // sans
+  inline void output_final_stddev(mpz_t generation_cnt, float **energies, mpz_t total_evals){ // sans
     if (autostopped){
       para_printf("------------+--------------+--------------------------+----------------------------------------------+---------+-------------------\n");
       para_printf("\n%43s evaluation after reaching\n%40.2f +/-%8.2f kcal/mol combined.\n%34i samples, best energy %8.2f kcal/mol.\n","Finished",average(&average_sd2_N[0]),stddev(&average_sd2_N[0]),(unsigned int)average_sd2_N[2],overall_best_energy);
@@ -257,6 +285,8 @@ class AutoStop{
       tabulate_energies(energies);  // Fills average_sd2_N and overall_best_energy
       set_stats(); // set curr_avg, curr_std, bestN, average_sd2_N
 
+//       para_printf("%11u | %12lu |%8.2f kcal/mol |%8.2f +/-%8.2f kcal/mol |%8i |%8.2f kcal/mol\n",generation_cnt,total_evals/num_of_runs,threshold,curr_avg,curr_std,bestN,overall_best_energy); // sans
+      // sans ==>
       mpz_t Evaluations;
       char *Evaluations_str;
       char *generation_cnt_str;
@@ -266,11 +296,15 @@ class AutoStop{
       Evaluations_str = mpz_get_str(NULL, 10, Evaluations);
       generation_cnt_str = mpz_get_str(NULL, 10, generation_cnt);
       para_printf("%11s | %12s |%16.2f kcal/mol |%16.2f +/-%16.2f kcal/mol |%8i |%8.2f kcal/mol\n",generation_cnt_str,Evaluations_str,threshold,curr_avg,curr_std,bestN,overall_best_energy);
+      // <== sans
       para_printf("------------+--------------+--------------------------+----------------------------------------------+---------+-------------------\n");
+//       para_printf("\n%43s evaluation after reaching\n%33lu evaluations. Best energy %8.2f kcal/mol.\n","Finished",total_evals/num_of_runs,overall_best_energy); // sans
+      // sans ==>
       para_printf("\n%43s evaluation after reaching\n%33s evaluations. Best energy %8.2f kcal/mol.\n","Finished",Evaluations_str,overall_best_energy);
       mpz_clear(Evaluations);
       free(Evaluations_str);
       free(generation_cnt_str);
+      // <== sans
     }
     fflush(stdout);
   }
