@@ -170,3 +170,13 @@ By default the output log file is written in the current working folder. Example
 # Documentation
 
 # Contributing
+
+# License
+
+OmegaDocker is licensed under the GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later); see [LICENSE](LICENSE).
+
+OmegaDocker is modified from [AutoDock-GPU](https://github.com/ccsb-scripps/AutoDock-GPU) v1.5.2, which is licensed under LGPL-2.1-or-later:
+* Copyright (C) 2017 TU Darmstadt, Embedded Systems and Applications Group, Germany.
+* For some of the code, Copyright (C) 2019 Computational Structural Biology Center, the Scripps Research Institute.
+
+AutoDock is a Trade Mark of the Scripps Research Institute.
