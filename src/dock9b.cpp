@@ -41,7 +41,7 @@ Dock9bStats& Dock9bStats::operator+=(const Dock9bStats& o) {
   far += o.far;
   outsideBox += o.outsideBox;
   l2 += o.l2;
-  startOutsideGrid += o.startOutsideGrid;
+  leftGrid += o.leftGrid;
   steps += o.steps;
   evaluations += o.evaluations;
   return *this;
@@ -329,7 +329,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
   stats.steps += r.steps;
   stats.evaluations += r.evaluations;
   if (r.aborted) {
-    ++stats.startOutsideGrid;
+    ++stats.leftGrid;
     return false;
   }
   const PoseEnergy& pe = accepted.pe;
@@ -378,7 +378,7 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
     for (std::size_t i = 0; i < l2.size(); ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[i]), res[i], st);
 #pragma omp critical
     {
-      total.startOutsideGrid += st.startOutsideGrid;
+      total.leftGrid += st.leftGrid;
       total.steps += st.steps;
       total.evaluations += st.evaluations;
     }

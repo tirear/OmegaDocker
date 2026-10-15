@@ -127,7 +127,10 @@ LbfgsResult minimizeLbfgs(const VecObjective& f, std::vector<double>& x, const L
     for (int b = 0; b < kMaxBacktrack; ++b, a *= 0.5) {
       for (std::size_t i = 0; i < n; ++i) xNew[i] = x[i] + a * d[i];
       ++r.evaluations;
-      if (!f(xNew, eNew, gNew)) continue;  // infeasible trial point: rejected like an Armijo failure
+      if (!f(xNew, eNew, gNew)) {
+        r.aborted = true;
+        return r;
+      }
       if (eNew <= e + kArmijo * a * slope) {
         accepted = true;
         break;

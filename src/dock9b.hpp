@@ -67,7 +67,7 @@ struct Dock9bStats {
   long long far = 0;
   long long outsideBox = 0;  // posm1: sampled orientation does not fit in the box
   long long l2 = 0;          // minimized
-  long long startOutsideGrid = 0;  // L2pos with a probe atom outside the grid at the start (not expected)
+  long long leftGrid = 0;    // removed during minimization (spec 8.6)
   long long steps = 0;
   long long evaluations = 0;
   Dock9bStats& operator+=(const Dock9bStats& o);
@@ -120,7 +120,7 @@ class MobmDocker {
   PoseEnergy evaluateDouble(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
                             std::vector<double>* grad = nullptr) const;
 
-  // 9b minimization of one pose; false when the starting pose is outside the grid.
+  // 9b minimization of one pose; false when the pose left the grid.
   // out holds the float pose, angles and energies of the last accepted point.
   bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const;
 
