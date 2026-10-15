@@ -21,6 +21,7 @@
 #include "energy.hpp"
 #include "grid.hpp"
 #include "grow.hpp"
+#include "orient.hpp"
 #include "molconfig.hpp"
 #include "topology.hpp"
 #include "version.hpp"
@@ -326,6 +327,11 @@ int run(int argc, char** argv) {
     runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, od::SampleSet::MobM, seed, 1 + i);
   }
 
+  {
+    const int level = od::hopfLevelForStep(opt.rotStep);
+    od::logInfo(std::format("9b orientations: Hopf level {}, {} orientations, spacing {} deg (--rotStep {})", level,
+                            72LL << (3 * level), od::hopfSpacingDeg(level), opt.rotStep));
+  }
   od::logInfo("9b grids of the input StaM conformation:");
   {
     std::vector<od::EnergyPart> parts;

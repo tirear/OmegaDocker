@@ -31,6 +31,7 @@
 #include "energy.hpp"
 #include "grid.hpp"
 #include "grow.hpp"
+#include "orient.hpp"
 #include "molconfig.hpp"
 #include "rama.hpp"
 #include "read_input.hpp"
@@ -1815,4 +1816,56 @@ TEST_CASE("grid: energy and distance grids (2KJJ, 1L2Y)") {
   const auto e = od::gridEnergy(grids, far);
   CHECK(e.outside == static_cast<int>(far.size()));
   CHECK(e.energy == 0);
+}
+
+TEST_CASE("orient: quaternions, Shoemake and Hopf grid") {
+  // Rotation vector, composition and rotation angle.
+  const od::Quat a = od::fromRotationVector({0, 0, std::numbers::pi / 2});
+  const od::Vec3 v = od::rotate(a, {1, 0, 0});
+  CHECK(v[0] == doctest::Approx(0).scale(1));
+  CHECK(v[1] == doctest::Approx(1));
+  const od::Quat b = od::fromRotationVector({0.3, -0.2, 0.5});
+  const od::Vec3 w = od::rotate(a * b, {0.2, 1.1, -0.7});
+  const od::Vec3 w2 = od::rotate(a, od::rotate(b, {0.2, 1.1, -0.7}));
+  for (int k = 0; k < 3; ++k) CHECK(w[k] == doctest::Approx(w2[k]));
+  CHECK(od::rotationAngle(od::Quat{}, b) == doctest::Approx(std::sqrt(0.09 + 0.04 + 0.25)));
+  CHECK(od::rotationAngle(b, od::Quat{-b.w, -b.x, -b.y, -b.z}) == doctest::Approx(0).scale(1));
+
+  CHECK(od::hopfLevelForStep(7.5) == 3);
+  CHECK(od::hopfLevelForStep(10) == 3);
+  CHECK(od::hopfLevelForStep(50) == 0);
+  CHECK(od::hopfLevelForStep(0.1) == 6);
+
+  // Random orientations: unit and uniform (mean of |w| on S3 is 4 / (3 pi)).
+  double meanW = 0;
+  const int nr = 20000;
+  std::vector<od::Quat> rnd;
+  for (int i = 0; i < nr; ++i) {
+    od::Rng rng(7, 0, i);
+    const od::Quat q = od::randomQuat(rng);
+    CHECK(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z == doctest::Approx(1));
+    meanW += std::abs(q.w) / nr;
+    rnd.push_back(q);
+  }
+  CHECK(meanW == doctest::Approx(4 / (3 * std::numbers::pi)).epsilon(0.01));
+
+  for (int level = 0; level <= 2; ++level) {
+    const auto g = od::hopfGrid(level);
+    REQUIRE(g.size() == static_cast<std::size_t>(72) << (3 * level));
+    double minPair = 10, cover = 0;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+      CHECK(g[i].w * g[i].w + g[i].x * g[i].x + g[i].y * g[i].y + g[i].z * g[i].z == doctest::Approx(1));
+      for (std::size_t j = 0; j < i; ++j) minPair = std::min(minPair, od::rotationAngle(g[i], g[j]));
+    }
+    for (std::size_t r = 0; r < rnd.size(); r += 4) {
+      double best = 10;
+      for (const auto& q : g) best = std::min(best, od::rotationAngle(rnd[r], q));
+      cover = std::max(cover, best);
+    }
+    const double s = od::hopfSpacingDeg(level) * std::numbers::pi / 180;
+    MESSAGE("level ", level, ": min pair ", minPair * 180 / std::numbers::pi, " deg, covering ",
+            cover * 180 / std::numbers::pi, " deg");
+    CHECK(minPair > 0.3 * s);
+    CHECK(cover < 1.0 * s);
+  }
 }

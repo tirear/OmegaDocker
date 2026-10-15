@@ -58,6 +58,7 @@ struct Options {
   ConfSampleOpts mobm;  // --mobm*ConfSampleNum: shared by all MobM
   double gridSpacing = 0.375;
   double maxNearDistance = 6.0;
+  double rotStep = 7.5;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;

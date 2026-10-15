@@ -170,6 +170,8 @@ const std::vector<OptionDef>& optionTable() {
        }},
       {"gridSpacing", Kind::Value, "<dist>", "0.375", "9b: spacing of the energy and distance grids (Å)",
        [](Options& o, const std::string& v) { o.gridSpacing = parseDouble("gridSpacing", v); }},
+      {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
+       [](Options& o, const std::string& v) { o.rotStep = parseDouble("rotStep", v); }},
       {"maxNearDistance", Kind::Value, "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
        [](Options& o, const std::string& v) { o.maxNearDistance = parseDouble("maxNearDistance", v); }},
       {"clashDistance", Kind::Value, "<dist>", "1.8", "Heavy-atom pairs closer than this clash (Å)",
@@ -292,6 +294,7 @@ void validateOptions(const Options& o) {
   if (!(o.clashDistance > 0)) fail("--clashDistance must be > 0");
   if (!(o.gridSpacing > 0)) fail("--gridSpacing must be > 0");
   if (!(o.maxNearDistance > 0)) fail("--maxNearDistance must be > 0");
+  if (!(o.rotStep > 0)) fail("--rotStep must be > 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {
