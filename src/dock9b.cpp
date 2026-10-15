@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <type_traits>
 
@@ -347,6 +348,13 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
 
 Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream,
                                  std::vector<DockSample>& out) const {
+  return dockPair(mobAnglesDeg, stream, std::numeric_limits<std::size_t>::max(), [&](std::vector<DockSample>& chunk) {
+    out.insert(out.end(), std::make_move_iterator(chunk.begin()), std::make_move_iterator(chunk.end()));
+  });
+}
+
+Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
+                                 const std::function<void(std::vector<DockSample>&)>& sink) const {
   const Conf c = conformation(mobAnglesDeg);
   const long long n = l1Count(c);
   Dock9bStats total;
@@ -370,22 +378,28 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
   }
   std::sort(l2.begin(), l2.end());
   total.l2 = static_cast<long long>(l2.size());
-  std::vector<DockSample> res(l2.size());
-  std::vector<char> ok(l2.size(), 0);
+  chunkSize = std::max<std::size_t>(chunkSize, 1);
+  for (std::size_t begin = 0; begin < l2.size(); begin += chunkSize) {
+    const std::size_t m = std::min(chunkSize, l2.size() - begin);
+    std::vector<DockSample> res(m);
+    std::vector<char> ok(m, 0);
 #pragma omp parallel
-  {
-    Dock9bStats st;
-#pragma omp for schedule(dynamic, 1) nowait
-    for (std::size_t i = 0; i < l2.size(); ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[i]), res[i], st);
-#pragma omp critical
     {
-      total.leftGrid += st.leftGrid;
-      total.steps += st.steps;
-      total.evaluations += st.evaluations;
+      Dock9bStats st;
+#pragma omp for schedule(dynamic, 1) nowait
+      for (std::size_t i = 0; i < m; ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[begin + i]), res[i], st);
+#pragma omp critical
+      {
+        total.leftGrid += st.leftGrid;
+        total.steps += st.steps;
+        total.evaluations += st.evaluations;
+      }
     }
+    std::vector<DockSample> chunk;
+    for (std::size_t i = 0; i < m; ++i)
+      if (ok[i]) chunk.push_back(std::move(res[i]));
+    sink(chunk);
   }
-  for (std::size_t i = 0; i < res.size(); ++i)
-    if (ok[i]) out.push_back(std::move(res[i]));
   return total;
 }
 

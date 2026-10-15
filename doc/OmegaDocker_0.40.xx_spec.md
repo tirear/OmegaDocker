@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.24 |
+| 文件版本 | 1.25 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -855,6 +855,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    - 相同位置、不同定向的樣本因 RMSD 大，會被保留。
    - 依序檢查到保留 `topSampleNum` 個為止；只計算被檢查樣本的座標。
    - `diversityRmsd` 預設 2.0 Å；設為 0 表示關閉。
+
+**分批（sampleBuffer）**：
+- 9b 產生的對接樣本先放入每個 MobM 各自的 sampleBuffer；每當其中的樣本數 ≥ `sampleBufferNum`，就先對「目前的 topSampleSet ∪ sampleBuffer」執行步驟 1–4（合併時 topSampleSet 在前），清空 sampleBuffer 後回到 9b 繼續；本輪全部對接完後，再對剩下的樣本執行一次步驟 1–4，然後做步驟 5。
+- `sampleBufferNum` 預設 65536；實際值 = max(`sampleBufferNum`, 4 × `topSampleNum`)。
+- 9b 在一個構型配對內也分批最佳化：每批 `sampleBufferNum` 個 L2pos（依 L1pos 序號），每批結束後把對接樣本放入 sampleBuffer 並檢查是否達到上限。批次邊界只由對接順序決定，與執行緒數無關。
+- 分批的結果與一次做完不一定相同：多樣性篩選中，先前批次被截掉的樣本，在後來的批次中可能本應因其他樣本被跳過而入選。不使用多樣性篩選時兩者相同。
+- 步驟 5 的本輪最低能量跨批累計，不受分批影響。
+- `sampleBufferNum` 太小時，每批可平行處理的樣本少，平行效率較差。
 4. **取前 `topSampleNum` 個** 為新的 topSampleSet。
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
@@ -863,7 +871,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    - `E_top_max` = topSampleSet 中的最高能量。
    - MobM dcss 與 StaM dcss 中，本輪最低能量 > `E_top_max` 的樣本移除。
    - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低能量；不重做的配對（決定性 posm）使用先前記錄的值。
-   - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除）一律移除；topSampleSet 為空時，dcss 全部移除。
+   - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除），本輪最低能量記為 +∞，因此一律移除；topSampleSet 為空時，dcss 全部移除。
    - 無可動兩面角的分子（只有輸入結構）不篩選。
 6. 下一輪的 9a 補滿 dcss。
 
@@ -955,7 +963,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - `--gpuMemLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
 - L2 pool、topSampleSet 存在主機記憶體；L2 pool 不設容量上限。
-- 目前 CPU 版在 9c 之前保留本輪所有對接樣本（每個含 pose 與兩面角）；posm2 下一輪可達數百萬個，記憶體用量隨之增加。
+- 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `topSampleNum` 個；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
 - csgm2、csgm3 的一批樣本即使 L2 pool 已達 `minL2confSampleNum`，仍處理完整批。
 
 ---
@@ -1030,6 +1038,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--dockMinDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
 | `--topSampleNum` | eliteStaM × eliteMobM | 9 |
 | `--diversityRmsd` | 2.0 Å | 9 |
+| `--sampleBufferNum` | 65536（至少 4 × `topSampleNum`） | 9 |
 | `--lbfgsMemory` | 7 | 12 |
 | `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
 | `--maxTransStep` | 0.5 Å | 12 |
@@ -1238,6 +1247,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | `--gridSpacing` 預設維持 0.375 Å（8.1） |
 | — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
 | — | 9c：穩定排序、AutoDock 式最近配對 RMSD（不用質心距離加速）；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，只有 StaM 完全不可動時跨輪快取（6、9） |
+| — | 沒有對接樣本的 dcss 樣本，本輪最低能量記為 +∞（不用 `E_max − 1`）；9b／9c 以 `--sampleBufferNum` 分批，接受分批與一次做完結果不同（9） |
 
 ### 17.2 待確認
 - loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
@@ -1284,3 +1294,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.22 | 2026-10-15 | 9b 最佳化中有探針原子移出網格（含 line search 試探點）時改回移除該 pos（1.17 的做法），取消 1.20 的拒絕試探點（8.1、8.6、12） |
 | 1.23 | 2026-10-15 | 實作輪次流程與 9c（CPU 參考版）：補滿 dcss 的順序與樣本 ID、每輪的網格建立、合併順序與穩定排序、RMSD 的原子與配對方向、移除質心距離加速（與最近配對不相容）、dcss 的本輪最低能量與無對接樣本的處理；csgm2／csgm3 尚未實作前一律用 csgm1；新增 `--maxRound`、`--topSampleNum`、`--diversityRmsd`（6、7.3、8.4、9、10、13） |
 | 1.24 | 2026-10-15 | StaM 群完全不可動時，網格與距離網格跨輪快取；其他情況每輪重建（6） |
+| 1.25 | 2026-10-15 | 新增 sampleBuffer：9b 在構型配對內分批最佳化，對接樣本每達 `sampleBufferNum`（至少 4 × `topSampleNum`）就先執行 9c 步驟 1–4；無對接樣本的本輪最低能量記為 +∞；新增 `--sampleBufferNum`（9、13、14） |

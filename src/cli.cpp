@@ -206,6 +206,8 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.topSampleNum = parseInt32("topSampleNum", v); }},
       {"diversityRmsd", Kind::Value, "<dist>", "2.0", "9c: samples with the same StaM conformation closer than this RMSD to a kept sample are skipped (Å; 0 disables)",
        [](Options& o, const std::string& v) { o.diversityRmsd = parseDouble("diversityRmsd", v); }},
+      {"sampleBufferNum", Kind::Value, "<n>", "65536", "9b/9c: run 9c whenever this many docking samples are waiting (at least 4 x topSampleNum)",
+       [](Options& o, const std::string& v) { o.sampleBufferNum = parseInt32("sampleBufferNum", v); }},
       {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
        [](Options& o, const std::string& v) { o.rotStep = parseDouble("rotStep", v); }},
       {"maxNearDistance", Kind::Value, "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -345,6 +347,7 @@ void validateOptions(const Options& o) {
   if (o.maxRound < 1) fail("--maxRound must be >= 1");
   if (o.topSampleNum && *o.topSampleNum < 1) fail("--topSampleNum must be >= 1");
   if (!(o.diversityRmsd >= 0)) fail("--diversityRmsd must be >= 0");
+  if (o.sampleBufferNum < 1) fail("--sampleBufferNum must be >= 1");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {

@@ -44,6 +44,7 @@ TEST_CASE("cli: required options and values") {
   CHECK(o.maxRound == 10);
   CHECK_FALSE(o.topSampleNum);
   CHECK(o.diversityRmsd == doctest::Approx(2.0));
+  CHECK(o.sampleBufferNum == 65536);
   CHECK_NOTHROW(od::validateOptions(o));
 
   auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--stamFlexMargin=6.5"});
@@ -91,6 +92,10 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.topSampleNum.reset();
   o.diversityRmsd = -1;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.diversityRmsd = 2;
+  CHECK(parse({"--sampleBufferNum", "100"}).sampleBufferNum == 100);
+  o.sampleBufferNum = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 }
 

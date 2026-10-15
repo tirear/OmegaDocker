@@ -5,6 +5,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -128,6 +129,10 @@ class MobmDocker {
   // All of 9b for one conformation pair: L1poss -> 8.5 -> minimization.
   // Appends the docking samples to out (in L1poss order).
   Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::vector<DockSample>& out) const;
+  // Same, minimizing the L2poss in chunks of chunkSize (in L1poss order); after each
+  // chunk, sink receives the docking samples of the chunk.
+  Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
+                       const std::function<void(std::vector<DockSample>&)>& sink) const;
 
   long long l1Count(const Conf& c) const;  // L1poss per conformation pair
 

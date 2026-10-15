@@ -2279,6 +2279,30 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   REQUIRE(top.size() == 1);
   CHECK(top[0].mobm == 1);
 
+  // Chunked dockPair: the same docking samples in the same order.
+  std::vector<od::DockSample> chunked;
+  std::vector<std::size_t> sizes;
+  const auto stc = dk.dockPair(angles, 9, 7, [&](std::vector<od::DockSample>& c) {
+    sizes.push_back(c.size());
+    chunked.insert(chunked.end(), c.begin(), c.end());
+  });
+  REQUIRE(chunked.size() == out.size());
+  CHECK(sizes.size() == static_cast<std::size_t>((stc.l2 + 6) / 7));
+  for (std::size_t k = 0; k < out.size(); ++k) {
+    CHECK(chunked[k].energy == out[k].energy);
+    CHECK(chunked[k].pose.t == out[k].pose.t);
+  }
+  // 9c in batches without the diversity filter: the same topSampleSet as at once.
+  std::vector<od::RoundSample> inc;
+  for (std::size_t b = 0; b < merged.size(); b += 20) {
+    std::vector<od::RoundSample> m2 = inc;
+    m2.insert(m2.end(), merged.begin() + b, merged.begin() + std::min(merged.size(), b + 20));
+    inc = od::selectTopSamples(m2, heavy, 5, 0);
+  }
+  const auto once = od::selectTopSamples(merged, heavy, 5, 0);
+  REQUIRE(inc.size() == once.size());
+  for (std::size_t k = 0; k < once.size(); ++k) CHECK(inc[k].s.energy == once[k].s.energy);
+
   // dcss filter.
   std::vector<int> dcss{1, 2, 3, 4};
   const std::unordered_map<int, float> lowest{{1, -5.f}, {2, -2.f}, {4, -3.f}};

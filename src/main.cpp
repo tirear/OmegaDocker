@@ -285,6 +285,7 @@ struct MobState {
   std::unordered_map<std::uint64_t, float> pairLowest;  // (StaM id, MobM id) -> lowest docking energy, +inf if none
   std::vector<od::RoundSample> top;
   int topNum = 0;
+  std::size_t bufferNum = 0;  // sampleBufferNum
   std::unique_ptr<od::MobmHeavyAtoms> heavy;
 };
 
@@ -326,6 +327,9 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
+    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, 4 * static_cast<std::size_t>(ms[i].topNum));
+    od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}", mobSets[i]->name(), ms[i].topNum,
+                            ms[i].bufferNum));
   }
 
   for (int round = 1; round <= opt.maxRound; ++round) {
@@ -352,8 +356,16 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::sort(stamIds.begin(), stamIds.end());
     stamIds.erase(std::unique(stamIds.begin(), stamIds.end()), stamIds.end());
     std::vector<od::Dock9bStats> st(ms.size());
-    std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0);
-    std::vector<std::vector<od::RoundSample>> roundSamples(ms.size());
+    std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0), sampleNum(ms.size(), 0), partial(ms.size(), 0);
+    std::vector<std::vector<od::RoundSample>> buffer(ms.size());
+    // 9c steps 1-4 on the topSampleSet and the waiting docking samples (spec 9).
+    auto select = [&](std::size_t i) {
+      MobState& m = ms[i];
+      std::vector<od::RoundSample> merged = std::move(m.top);
+      merged.insert(merged.end(), std::make_move_iterator(buffer[i].begin()), std::make_move_iterator(buffer[i].end()));
+      buffer[i].clear();
+      m.top = od::selectTopSamples(std::move(merged), *m.heavy, m.topNum, opt.diversityRmsd);
+    };
     double gridSec = 0;
     bool gridsReused = false;
     const auto d0 = std::chrono::steady_clock::now();
@@ -393,14 +405,20 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           const auto& ma = mob.sample(mid).angles;
           const std::vector<double> mobAngles =
               mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles();
-          std::vector<od::DockSample> out;
-          st[i] += dk.dockPair(mobAngles, od::dockStream(round, i, sid, mid), out);
-          ++docked[i];
           float lowest = std::numeric_limits<float>::infinity();
-          for (auto& s : out) {
-            lowest = std::min(lowest, s.energy);
-            roundSamples[i].push_back({sid, mid, std::move(s)});
-          }
+          st[i] += dk.dockPair(mobAngles, od::dockStream(round, i, sid, mid), ms[i].bufferNum,
+                               [&](std::vector<od::DockSample>& chunk) {
+                                 sampleNum[i] += static_cast<long long>(chunk.size());
+                                 for (auto& s : chunk) {
+                                   lowest = std::min(lowest, s.energy);
+                                   buffer[i].push_back({sid, mid, std::move(s)});
+                                 }
+                                 if (buffer[i].size() >= ms[i].bufferNum) {
+                                   select(i);
+                                   ++partial[i];
+                                 }
+                               });
+          ++docked[i];
           ms[i].pairLowest[key] = lowest;
         }
       }
@@ -418,7 +436,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       od::logInfo(std::format("  9b {:<37} pairs docked {}  skipped {}  L1poss {}  removed (outside box {}, overlap {}, "
                               "far {})  L2poss {}  left grid {}  docking samples {}  steps/pose {:.1f}",
                               mobSets[i]->name(), docked[i], skipped[i], s.l1, s.outsideBox, s.overlap, s.far, s.l2,
-                              s.leftGrid, roundSamples[i].size(),
+                              s.leftGrid, sampleNum[i],
                               s.l2 > 0 ? static_cast<double>(s.steps) / static_cast<double>(s.l2) : 0.0));
       if (s.l1 > 0 && s.l1 == s.outsideBox)
         od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger --boxSize",
@@ -435,15 +453,13 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           upd(stamLowest, a);
           upd(mobLowest, b);
         }
-      std::vector<od::RoundSample> merged = std::move(m.top);
-      merged.insert(merged.end(), std::make_move_iterator(roundSamples[i].begin()),
-                    std::make_move_iterator(roundSamples[i].end()));
-      m.top = od::selectTopSamples(std::move(merged), *m.heavy, m.topNum, opt.diversityRmsd);
+      select(i);
       const float eTop = od::topMaxEnergy(m.top);
       const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
       const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
-      od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}",
-                              mobSets[i]->name(), m.top.size(), m.topNum, eTop, rmStam, rmMob));
+      od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}  "
+                              "9c runs {}",
+                              mobSets[i]->name(), m.top.size(), m.topNum, eTop, rmStam, rmMob, partial[i] + 1));
       if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5));
     }
     od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));
