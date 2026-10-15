@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <format>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <span>
 
@@ -18,6 +19,7 @@
 #include "csgm1.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
+#include "grow.hpp"
 #include "molconfig.hpp"
 #include "topology.hpp"
 #include "version.hpp"
@@ -150,7 +152,7 @@ void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>
 // First 9a refill of the L2 pool with csgm1 (spec 7.3).
 void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& parts,
                 const std::vector<const od::MolSettings*>& settings, const od::MolConfig& cfg, const od::Options& opt,
-                std::uint64_t seed, std::uint64_t stream) {
+                od::SampleSet set, std::uint64_t seed, std::uint64_t stream) {
   const od::EnergySystem sys(parts, energyParams(opt));
   if (sys.torsionCount() == 0) {
     od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", name));
@@ -161,7 +163,7 @@ void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& part
   cp.ramaFloor = opt.ramaFloor;
   od::Csgm1GroupSampler sampler;
   for (std::size_t k = 0; k < parts.size(); ++k) sampler.add(od::Csgm1Sampler(*parts[k].mol, *settings[k], cfg, cp));
-  const od::ConfSampleNums n = od::confSampleNums(opt);
+  const od::ConfSampleNums n = od::confSampleNums(opt, set);
   od::Fill9aParams p;
   p.minL2 = n.minL2;
   p.maxL1Batch = opt.maxL1BatchNum;
@@ -171,19 +173,33 @@ void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& part
   p.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep};
   p.seed = seed;
   p.stream = stream;
+  std::optional<od::GrowBuilder> grow;
+  if (opt.csgmGrow) {
+    std::vector<const od::Topology*> topos;
+    for (const auto* s : settings) topos.push_back(&s->topology);
+    grow.emplace(sys, parts, topos, sampler.segments(),
+                 od::GrowParams{opt.growMaxRetry, opt.clashDistance, opt.reachProtein, opt.reachNucleic});
+    od::logInfo(std::format("  {:<40} grow: {} segments, {} reach checks", name, grow->stepCount(),
+                            grow->reachCheckCount()));
+  }
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { sampler.sampleSegment(r, seg, a); };
+  const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) {
+    sampler.sample(r, a);
+    return !grow || grow->build(r, a, resample).ok;
+  };
   std::uint64_t counter = 0;
   std::vector<od::ConfSample> pool;
   const auto t0 = std::chrono::steady_clock::now();
-  const auto st = od::fillL2Pool(sys, [&](od::Rng& r, std::span<double> a) { sampler.sample(r, a); }, n.initL1, p,
-                                 counter, pool);
+  const auto st = od::fillL2Pool(sys, gen, n.initL1, p, counter, pool);
   const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::vector<float> e;
   for (const auto& s : pool) e.push_back(s.energy);
   std::sort(e.begin(), e.end());
-  od::logInfo(std::format("  {:<40} L1 {:>9} in {} batch(es)  -> L2 {:>7}  (rejected: E >= Emax {}, not closed {})  "
-                          "steps/sample {:.1f}  {:.2f} s",
-                          name, st.l1, st.batches, st.added, st.overEmax, st.notClosed,
-                          static_cast<double>(st.minSteps) / static_cast<double>(st.l1), sec));
+  const long long minimized = st.l1 - st.growFailed;
+  od::logInfo(std::format("  {:<40} L1 {:>9} in {} batch(es)  -> L2 {:>7}  (rejected: grow {}, E >= Emax {}, "
+                          "not closed {})  steps/sample {:.1f}  {:.2f} s",
+                          name, st.l1, st.batches, st.added, st.growFailed, st.overEmax, st.notClosed,
+                          minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   od::logInfo(std::format("    L2 energies: min {:.3f}  median {:.3f}  max {:.3f}", e.front(), e[e.size() / 2], e.back()));
 }
 
@@ -275,6 +291,14 @@ int run(int argc, char** argv) {
     printTree(*inputs[i].mol, s);
   }
 
+  {
+    std::size_t staTorsions = 0, mobTorsions = 0;
+    for (std::size_t i = 0; i < inputs.size(); ++i)
+      (i < sta.size() ? staTorsions : mobTorsions) += cfg->molecules[i].tree.torsions.size();
+    if (staTorsions > 0) od::requireConfSampleNums(opt, od::SampleSet::StaM);
+    if (mobTorsions > 0) od::requireConfSampleNums(opt, od::SampleSet::MobM);
+  }
+
   od::logInfo("9a energy:");
   {
     std::vector<od::EnergyPart> parts;
@@ -293,11 +317,11 @@ int run(int argc, char** argv) {
       parts.push_back({&sta[i], &cfg->molecules[i].tree});
       settings.push_back(&cfg->molecules[i]);
     }
-    runFirst9a("StaM group", parts, settings, *cfg, opt, seed, 0);
+    runFirst9a("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0);
   }
   for (std::size_t i = 0; i < mobs.size(); ++i) {
     const auto& s = cfg->molecules[sta.size() + i];
-    runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, seed, 1 + i);
+    runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, od::SampleSet::MobM, seed, 1 + i);
   }
   return 0;
 }

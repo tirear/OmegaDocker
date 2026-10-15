@@ -88,6 +88,7 @@ add_library(od_core STATIC
   src/csgm1.cpp
   src/minimize.cpp
   src/conf9a.cpp
+  src/grow.cpp
   ${OD_CCD_EMBED}
   ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)

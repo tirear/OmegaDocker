@@ -41,6 +41,13 @@ class Csgm1Sampler {
   int size() const { return static_cast<int>(input_.size()); }
   void sample(Rng& rng, std::span<double> anglesDeg) const;
 
+  // Torsions sampled together (csgmBuild = grow, spec 7.8): a phi/psi pair of
+  // csgm1b (with the cisTrans omega before it for RAMA_AUTO), otherwise one
+  // torsion. Sorted by first index; members in increasing order.
+  const std::vector<std::vector<int>>& segments() const { return segments_; }
+  // Resamples the angles of one segment; the other angles are kept.
+  void sampleSegment(Rng& rng, int segment, std::span<double> anglesDeg) const;
+
  private:
   enum class Kind : std::uint8_t { Uniform, CisTrans, PairPhi, PairPsi };
   enum class Rule : std::uint8_t { R, O, Custom, Rama, RamaAuto };
@@ -54,6 +61,7 @@ class Csgm1Sampler {
     int omegaBefore = -1;    // tree index of a cisTrans omega before the residue, -1 if none
     bool cisBefore = false;  // fixed omega before the residue is cis
   };
+  void initPairs(const Molecule& m, const MolSettings& s, const std::vector<int>& treeOf);
   double uniformAngle(Rng& rng, int i) const;
   void samplePair(Rng& rng, const Pair& p, std::span<double> a) const;
   const RamaSampler& rama(RamaClass c) const;
@@ -61,6 +69,8 @@ class Csgm1Sampler {
   std::vector<double> input_;
   std::vector<Kind> kind_;
   std::vector<Pair> pairs_;
+  std::vector<std::vector<int>> segments_;
+  std::vector<int> segmentPair_;  // per segment: index into pairs_, -1 if none
   std::vector<SsType> ssTypes_;
   double halfWidth_ = 15.0, originalProb_ = 0.9;
   Csgm1Params params_;
@@ -74,6 +84,9 @@ class Csgm1GroupSampler {
   void add(Csgm1Sampler s) { parts_.push_back(std::move(s)); }
   int size() const;
   void sample(Rng& rng, std::span<double> anglesDeg) const;
+  // Segments of all parts, with indices into the concatenated angles.
+  std::vector<std::vector<int>> segments() const;
+  void sampleSegment(Rng& rng, int segment, std::span<double> anglesDeg) const;
 
  private:
   std::vector<Csgm1Sampler> parts_;

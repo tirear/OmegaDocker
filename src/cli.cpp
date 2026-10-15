@@ -65,6 +65,15 @@ bool parseBool(const std::string& opt, const std::string& s) {
   fail("--{}: expected true or false but got '{}'", opt, s);
 }
 
+// --<set><Name>ConfSampleNum, e.g. --stamDockingConfSampleNum, --mobmMinL2confSampleNum.
+OptionDef sampleOption(const std::string& set, const std::string& name, std::optional<int> ConfSampleOpts::* field,
+                       const std::string& defaultText, const std::string& help) {
+  const std::string opt = set + name + (name == "MinL2" || name == "InitL1" ? "confSampleNum" : "ConfSampleNum");
+  return {opt, Kind::Value, "<n>", defaultText, help, [opt, set, field](Options& o, const std::string& v) {
+            (set == "stam" ? o.stam : o.mobm).*field = parseInt32(opt, v);
+          }};
+}
+
 const std::vector<OptionDef>& optionTable() {
   static const std::vector<OptionDef> table = {
       {"sta", Kind::Value, "<file>", "required", "Stationary molecules (StaM); may be given once",
@@ -105,6 +114,15 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.maxBreakDist = parseDouble("maxBreakDist", v); }},
       {"closureG", Kind::Value, "<k>", "200", "Closure constraint stiffness G (kcal/mol/Å²)",
        [](Options& o, const std::string& v) { o.closureG = parseDouble("closureG", v); }},
+      {"reachPerRes", Kind::Value, "<p>,<n>", "3.8,7.0",
+       "csgmBuild = grow: reach per residue of protein / nucleic-acid chains toward a closure (Å)",
+       [](Options& o, const std::string& v) {
+         const auto comma = v.find(',');
+         if (comma == std::string::npos || v.find(',', comma + 1) != std::string::npos)
+           fail("--reachPerRes: expected <protein>,<nucleic> but got '{}'", v);
+         o.reachProtein = parseDouble("reachPerRes", v.substr(0, comma));
+         o.reachNucleic = parseDouble("reachPerRes", v.substr(comma + 1));
+       }},
       {"clashDistance", Kind::Value, "<dist>", "1.8", "Heavy-atom pairs closer than this clash (Å)",
        [](Options& o, const std::string& v) { o.clashDistance = parseDouble("clashDistance", v); }},
       {"Emax", Kind::Value, "<E>", "1000", "9a: conformations with energy below this enter the L2 pool (kcal/mol)",
@@ -113,18 +131,31 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.EclashBase = parseDouble("EclashBase", v); }},
       {"Kclash", Kind::Value, "<k>", "1000", "Quadratic part of the clash penalty (kcal/mol/Å²)",
        [](Options& o, const std::string& v) { o.Kclash = parseDouble("Kclash", v); }},
-      {"dockingConfSampleNum", Kind::Value, "<n>", "required", "Conformation samples docked per round (dcss size, >= 4)",
-       [](Options& o, const std::string& v) { o.dockingConfSampleNum = parseInt32("dockingConfSampleNum", v); }},
-      {"minL2confSampleNum", Kind::Value, "<n>", "2 x docking", "9a: refill the L2 pool to at least this many samples",
-       [](Options& o, const std::string& v) { o.minL2confSampleNum = parseInt32("minL2confSampleNum", v); }},
-      {"initL1confSampleNum", Kind::Value, "<n>", "minL2", "9a: samples generated in the first batch",
-       [](Options& o, const std::string& v) { o.initL1confSampleNum = parseInt32("initL1confSampleNum", v); }},
-      {"eliteConfSampleNum", Kind::Value, "<n>", "max(2, ceil(docking/4))", "csgm1 is used while the dcss has fewer samples",
-       [](Options& o, const std::string& v) { o.eliteConfSampleNum = parseInt32("eliteConfSampleNum", v); }},
+      sampleOption("stam", "Docking", &ConfSampleOpts::docking, "required if rotatable",
+                   "StaM group: conformation samples docked per round (dcss size, >= 4)"),
+      sampleOption("stam", "MinL2", &ConfSampleOpts::minL2, "2 x docking",
+                   "StaM group, 9a: refill the L2 pool to at least this many samples"),
+      sampleOption("stam", "InitL1", &ConfSampleOpts::initL1, "minL2", "StaM group, 9a: samples generated in the first batch"),
+      sampleOption("stam", "Elite", &ConfSampleOpts::elite, "max(2, ceil(docking/4))",
+                   "StaM group: csgm1 is used while the dcss has fewer samples"),
+      sampleOption("mobm", "Docking", &ConfSampleOpts::docking, "required if rotatable",
+                   "Every MobM: conformation samples docked per round (dcss size, >= 4)"),
+      sampleOption("mobm", "MinL2", &ConfSampleOpts::minL2, "2 x docking",
+                   "Every MobM, 9a: refill the L2 pool to at least this many samples"),
+      sampleOption("mobm", "InitL1", &ConfSampleOpts::initL1, "minL2", "Every MobM, 9a: samples generated in the first batch"),
+      sampleOption("mobm", "Elite", &ConfSampleOpts::elite, "max(2, ceil(docking/4))",
+                   "Every MobM: csgm1 is used while the dcss has fewer samples"),
       {"maxL1TotalNum", Kind::Value, "<n>", "1000000000", "9a: largest number of samples generated in one refill",
        [](Options& o, const std::string& v) { o.maxL1TotalNum = parseInt("maxL1TotalNum", v); }},
       {"maxL1BatchNum", Kind::Value, "<n>", "65536", "9a: largest number of samples processed at once",
        [](Options& o, const std::string& v) { o.maxL1BatchNum = parseInt("maxL1BatchNum", v); }},
+      {"csgmBuild", Kind::Value, "whole|grow", "whole", "9a: apply all torsions at once, or build segment by segment",
+       [](Options& o, const std::string& v) {
+         if (v != "whole" && v != "grow") fail("--csgmBuild: expected whole or grow but got '{}'", v);
+         o.csgmGrow = v == "grow";
+       }},
+      {"growMaxRetry", Kind::Value, "<n>", "16", "csgmBuild = grow: resamplings of a failing segment before discarding",
+       [](Options& o, const std::string& v) { o.growMaxRetry = parseInt32("growMaxRetry", v); }},
       {"csgm1AngleStep", Kind::Value, "<deg>", "1", "csgm1a: angle changes are multiples of this",
        [](Options& o, const std::string& v) { o.csgm1AngleStep = parseDouble("csgm1AngleStep", v); }},
       {"ramaFloor", Kind::Value, "<w>", "1e-4", "csgm1b: weight added to every Ramachandran cell",
@@ -178,13 +209,37 @@ Options parseCommandLine(int argc, const char* const* argv) {
   return o;
 }
 
-ConfSampleNums confSampleNums(const Options& o) {
+ConfSampleNums confSampleNums(const Options& o, SampleSet set) {
+  const ConfSampleOpts& s = set == SampleSet::StaM ? o.stam : o.mobm;
   ConfSampleNums n;
-  n.docking = o.dockingConfSampleNum.value_or(0);
-  n.minL2 = o.minL2confSampleNum.value_or(2 * n.docking);
-  n.initL1 = o.initL1confSampleNum.value_or(n.minL2);
-  n.elite = o.eliteConfSampleNum.value_or(std::max(2, (n.docking + 3) / 4));
+  n.docking = s.docking.value_or(0);
+  n.minL2 = s.minL2.value_or(2 * n.docking);
+  n.initL1 = s.initL1.value_or(n.minL2);
+  n.elite = s.elite.value_or(std::max(2, (n.docking + 3) / 4));
   return n;
+}
+
+namespace {
+
+void checkConfSampleNums(const Options& o, SampleSet set) {
+  const std::string p = set == SampleSet::StaM ? "stam" : "mobm";
+  const ConfSampleNums n = confSampleNums(o, set);
+  if (n.docking < 4) fail("--{}DockingConfSampleNum must be >= 4", p);
+  if (n.minL2 < 2 * n.docking)
+    fail("--{0}MinL2confSampleNum must be >= 2 x --{0}DockingConfSampleNum ({1})", p, 2 * n.docking);
+  if (n.initL1 < n.minL2) fail("--{0}InitL1confSampleNum must be >= --{0}MinL2confSampleNum ({1})", p, n.minL2);
+  if (n.elite < 2 || n.elite > n.docking / 2)
+    fail("--{0}EliteConfSampleNum must be within [2, --{0}DockingConfSampleNum / 2] = [2, {1}]", p, n.docking / 2);
+}
+
+}  // namespace
+
+void requireConfSampleNums(const Options& o, SampleSet set) {
+  const bool stam = set == SampleSet::StaM;
+  if (!(stam ? o.stam : o.mobm).docking)
+    fail("{}", stam ? "--stamDockingConfSampleNum is required: the StaM group has rotatable torsions"
+                    : "--mobmDockingConfSampleNum is required: a MobM has rotatable torsions");
+  checkConfSampleNums(o, set);
 }
 
 void validateOptions(const Options& o) {
@@ -199,16 +254,18 @@ void validateOptions(const Options& o) {
   if (!(o.staFlexMargin >= 0)) fail("--staFlexMargin must be >= 0");
   if (!(o.maxBreakDist > 0)) fail("--maxBreakDist must be > 0");
   if (!(o.closureG > 0)) fail("--closureG must be > 0");
+  if (!(o.reachProtein > 0 && o.reachNucleic > 0)) fail("--reachPerRes values must be > 0");
+  if (o.growMaxRetry < 0) fail("--growMaxRetry must be >= 0");
   if (!(o.clashDistance > 0)) fail("--clashDistance must be > 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
-  if (!o.dockingConfSampleNum) fail("--dockingConfSampleNum is required");
-  const ConfSampleNums n = confSampleNums(o);
-  if (n.docking < 4) fail("--dockingConfSampleNum must be >= 4");
-  if (n.minL2 < 2 * n.docking) fail("--minL2confSampleNum must be >= 2 x --dockingConfSampleNum ({})", 2 * n.docking);
-  if (n.initL1 < n.minL2) fail("--initL1confSampleNum must be >= --minL2confSampleNum ({})", n.minL2);
-  if (n.elite < 2 || n.elite > n.docking / 2)
-    fail("--eliteConfSampleNum must be within [2, --dockingConfSampleNum / 2] = [2, {}]", n.docking / 2);
+  for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {
+    const ConfSampleOpts& s = set == SampleSet::StaM ? o.stam : o.mobm;
+    if (s.docking) checkConfSampleNums(o, set);
+    else if (s.minL2 || s.initL1 || s.elite)
+      fail("--{}DockingConfSampleNum is required when other --{}*ConfSampleNum options are given",
+           set == SampleSet::StaM ? "stam" : "mobm", set == SampleSet::StaM ? "stam" : "mobm");
+  }
   if (o.maxL1TotalNum < 1) fail("--maxL1TotalNum must be >= 1");
   if (o.maxL1BatchNum < 1) fail("--maxL1BatchNum must be >= 1");
   if (!(o.csgm1AngleStep > 0 && o.csgm1AngleStep <= 180)) fail("--csgm1AngleStep must be within (0, 180]");

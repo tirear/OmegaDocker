@@ -29,6 +29,7 @@
 #include "minimize.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
+#include "grow.hpp"
 #include "molconfig.hpp"
 #include "rama.hpp"
 #include "read_input.hpp"
@@ -1461,7 +1462,10 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
   const od::Molecule& m = x.m();
   const od::EnergySystem sys({{&m, &x.s().tree}}, {});
   const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
-  const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) { smp.sample(r, a); };
+  const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) {
+    smp.sample(r, a);
+    return true;
+  };
   od::Fill9aParams p;
   p.minL2 = 24;
   p.maxL1Batch = 10;
@@ -1509,4 +1513,161 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
   std::uint64_t counter = 0;
   CHECK_THROWS_AS(od::fillL2Pool(sys, gen, 6, p, counter, c), od::Error);
   CHECK(counter == 30);
+}
+
+namespace {
+
+double maxCoordDiff(const std::vector<od::Vec3>& a, const std::vector<od::Vec3>& b) {
+  REQUIRE(a.size() == b.size());
+  double d = 0;
+  for (std::size_t i = 0; i < a.size(); ++i)
+    for (int k = 0; k < 3; ++k) d = std::max(d, std::abs(a[i][k] - b[i][k]));
+  return d;
+}
+
+}  // namespace
+
+TEST_CASE("csgm1: segments") {
+  Csgm1Fixture x;
+  auto& s = x.s();
+  s.csgm1 = od::Csgm1::B;
+  s.ssType[x.unitOf(5)] = "RAMA_GENERAL";
+  s.ssType[x.unitOf(12)] = "RAMA_AUTO";
+  const od::Csgm1Sampler smp(x.m(), s, *x.cfg, {});
+  const auto& segs = smp.segments();
+  std::vector<int> seen(smp.size(), 0);
+  for (std::size_t k = 0; k < segs.size(); ++k) {
+    CHECK(std::is_sorted(segs[k].begin(), segs[k].end()));
+    if (k > 0) CHECK(segs[k - 1].front() < segs[k].front());
+    for (int i : segs[k]) ++seen[i];
+  }
+  CHECK(std::count(seen.begin(), seen.end(), 1) == smp.size());
+  auto segOf = [&](int i) {
+    for (std::size_t k = 0; k < segs.size(); ++k)
+      if (std::find(segs[k].begin(), segs[k].end(), i) != segs[k].end()) return static_cast<int>(k);
+    return -1;
+  };
+  const int phi5 = x.treeIndex(5, od::BackboneAngle::Phi), psi5 = x.treeIndex(5, od::BackboneAngle::Psi);
+  const int phi12 = x.treeIndex(12, od::BackboneAngle::Phi), psi12 = x.treeIndex(12, od::BackboneAngle::Psi);
+  const int omega = x.treeIndex(11, od::BackboneAngle::Omega);
+  CHECK(segs[segOf(phi5)].size() == 2);
+  CHECK(segOf(phi5) == segOf(psi5));
+  CHECK(segs[segOf(phi12)].size() == 3);
+  CHECK(segOf(phi12) == segOf(omega));
+  CHECK(segOf(psi12) == segOf(omega));
+
+  // sampleSegment changes only the angles of the segment.
+  std::vector<double> a(smp.size());
+  od::Rng rng(3, 4, 5);
+  smp.sample(rng, a);
+  for (int seg : {segOf(phi12), segOf(phi5), 0}) {
+    const auto before = a;
+    for (int k = 0; k < 20; ++k) smp.sampleSegment(rng, seg, a);
+    for (int i = 0; i < smp.size(); ++i) {
+      const bool member = std::find(segs[seg].begin(), segs[seg].end(), i) != segs[seg].end();
+      if (!member) CHECK(a[i] == before[i]);
+      else CHECK(a[i] != before[i]);
+    }
+  }
+  od::Csgm1GroupSampler g;
+  g.add(smp);
+  g.add(smp);
+  const auto gs = g.segments();
+  CHECK(gs.size() == 2 * segs.size());
+  CHECK(gs[segs.size()].front() == smp.size());
+}
+
+TEST_CASE("grow: coordinates, clashes and retries (1L2Y)") {
+  Csgm1Fixture x;
+  const od::Molecule& m = x.m();
+  const std::vector<od::EnergyPart> parts{{&m, &x.s().tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+
+  // Without checks every sample is built, with the coordinates of buildCoordinates.
+  const od::GrowBuilder open(sys, parts, {&x.s().topology}, smp.segments(), {0, 0.0, 1e9, 1e9});
+  CHECK(open.stepCount() == static_cast<int>(smp.segments().size()));
+  std::vector<double> a(smp.size());
+  for (int k = 0; k < 50; ++k) {
+    od::Rng rng(21, 0, k);
+    smp.sample(rng, a);
+    std::vector<od::Vec3> grown, ref;
+    REQUIRE(open.build(rng, a, resample, &grown).ok);
+    sys.evaluate(a, nullptr, &ref);
+    CHECK(maxCoordDiff(grown, ref) < 1e-9);
+  }
+
+  // Default checks: built samples have no clash; retries resample whole segments.
+  const od::GrowBuilder grow(sys, parts, {&x.s().topology}, smp.segments(), {});
+  int ok = 0, retried = 0;
+  for (int k = 0; k < 300; ++k) {
+    od::Rng rng(22, 0, k);
+    smp.sample(rng, a);
+    const auto r = grow.build(rng, a, resample);
+    CHECK(r.reachFails == 0);
+    retried += r.retries > 0;
+    if (!r.ok) {
+      CHECK(r.clashFails == r.retries + 1);
+      CHECK(r.retries >= 16);  // the last segment failed its first try and 16 retries
+      continue;
+    }
+    ++ok;
+    CHECK(r.clashFails == r.retries);
+    CHECK(sys.evaluate(a).clashPairs == 0);
+  }
+  CHECK(ok > 0);
+  CHECK(retried > 0);
+  // No retries: a sample is either built at once or discarded.
+  const od::GrowBuilder noRetry(sys, parts, {&x.s().topology}, smp.segments(), {0});
+  for (int k = 0; k < 100; ++k) {
+    od::Rng rng(22, 0, k);
+    smp.sample(rng, a);
+    const auto r = noRetry.build(rng, a, resample);
+    CHECK(r.retries == 0);
+    CHECK(r.clashFails == (r.ok ? 0 : 1));
+  }
+}
+
+TEST_CASE("grow: reach toward a loop closure (2KJJ)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 10, 14));
+  const od::MolSettings& s = cfg.molecules[0];
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &s.tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  const od::GrowBuilder reachOnly(sys, parts, {&s.topology}, smp.segments(), {0, 0.0});
+  CHECK(reachOnly.reachCheckCount() > 0);
+
+  // The input conformation and closed minimized conformations pass the reach checks.
+  std::vector<double> a = sys.inputAngles();
+  od::Rng rng(1, 0, 0);
+  CHECK(reachOnly.build(rng, a, resample).ok);
+  int closed = 0;
+  for (int k = 0; k < 10; ++k) {
+    auto x = perturbed(sys.inputAngles(), 30, 100 + k);
+    const auto e = od::minimizeConf(sys, x, {});
+    if (e.closureMaxDeviation > 0.5) continue;
+    ++closed;
+    CHECK(reachOnly.build(rng, x, resample).ok);
+  }
+  CHECK(closed > 0);
+
+  // Random loops: some fail the reach checks; a tiny reach rejects every sample.
+  int reachFails = 0;
+  for (int k = 0; k < 200; ++k) {
+    od::Rng r(3, 0, k);
+    smp.sample(r, a);
+    reachFails += reachOnly.build(r, a, resample).reachFails > 0;
+  }
+  CHECK(reachFails > 0);
+  const od::GrowBuilder tiny(sys, parts, {&s.topology}, smp.segments(), {0, 0.0, 0.01, 0.01});
+  for (int k = 0; k < 20; ++k) {
+    od::Rng r(4, 0, k);
+    smp.sample(r, a);
+    const auto res = tiny.build(r, a, resample);
+    CHECK_FALSE(res.ok);
+    CHECK(res.reachFails == 1);
+  }
 }

@@ -21,7 +21,8 @@ struct ConfSample {
   float energy = 0;           // EnergyTerms::filterEnergy after 9a minimization
 };
 
-using ConfGenerator = std::function<void(Rng& rng, std::span<double> anglesDeg)>;
+// Writes one sample to anglesDeg; false: discarded before minimization (csgmBuild = grow).
+using ConfGenerator = std::function<bool(Rng& rng, std::span<double> anglesDeg)>;
 
 struct Fill9aParams {
   int minL2 = 0;                       // minL2confSampleNum
@@ -39,6 +40,7 @@ struct Fill9aStats {
   long long added = 0;      // samples added to the pool
   long long overEmax = 0;   // rejected: filterEnergy >= Emax
   long long notClosed = 0;  // rejected: closure deviation > maxBreakDist (energy below Emax)
+  long long growFailed = 0; // discarded by the generator (csgmBuild = grow)
   int batches = 0;
   long long minSteps = 0;   // minimization steps over all samples
   long long nextL1 = 0;     // L1 count of a following refill (spec 7.4)

@@ -51,8 +51,37 @@ Csgm1Sampler::Csgm1Sampler(const Molecule& m, const MolSettings& s, const MolCon
     input_.push_back(tree[i].inputAngle);
     kind_.push_back(s.mode[tree[i].torsion] == TorsionMode::CisTrans ? Kind::CisTrans : Kind::Uniform);
   }
-  if (t.backboneType != BackboneType::Protein || s.csgm1 != Csgm1::B) return;
+  if (t.backboneType == BackboneType::Protein && s.csgm1 == Csgm1::B) initPairs(m, s, treeOf);
+  std::vector<int> pairOf(input_.size(), -1);
+  for (std::size_t k = 0; k < pairs_.size(); ++k) {
+    const Pair& p = pairs_[k];
+    std::vector<int> seg{p.phi, p.psi};
+    if (p.rule == Rule::RamaAuto && p.omegaBefore >= 0) seg.push_back(p.omegaBefore);
+    std::sort(seg.begin(), seg.end());
+    for (int i : seg) pairOf[i] = static_cast<int>(k);
+    segments_.push_back(std::move(seg));
+    segmentPair_.push_back(static_cast<int>(k));
+  }
+  for (std::size_t i = 0; i < input_.size(); ++i)
+    if (pairOf[i] < 0) {
+      segments_.push_back({static_cast<int>(i)});
+      segmentPair_.push_back(-1);
+    }
+  std::vector<std::size_t> order(segments_.size());
+  for (std::size_t k = 0; k < order.size(); ++k) order[k] = k;
+  std::sort(order.begin(), order.end(), [&](auto x, auto y) { return segments_[x].front() < segments_[y].front(); });
+  std::vector<std::vector<int>> seg;
+  std::vector<int> pair;
+  for (auto k : order) {
+    seg.push_back(std::move(segments_[k]));
+    pair.push_back(segmentPair_[k]);
+  }
+  segments_ = std::move(seg);
+  segmentPair_ = std::move(pair);
+}
 
+void Csgm1Sampler::initPairs(const Molecule& m, const MolSettings& s, const std::vector<int>& treeOf) {
+  const Topology& t = s.topology;
   std::vector<int> phiOf(t.units.size(), -1), psiOf(t.units.size(), -1), omegaOf(t.units.size(), -1);
   for (std::size_t i = 0; i < t.torsions.size(); ++i) {
     const auto& tor = t.torsions[i];
@@ -160,6 +189,14 @@ void Csgm1Sampler::samplePair(Rng& rng, const Pair& p, std::span<double> a) cons
   }
 }
 
+void Csgm1Sampler::sampleSegment(Rng& rng, int segment, std::span<double> a) const {
+  for (int i : segments_[segment]) {
+    if (kind_[i] == Kind::Uniform) a[i] = uniformAngle(rng, i);
+    else if (kind_[i] == Kind::CisTrans) a[i] = rng.uniform() < 0.5 ? 0.0 : 180.0;
+  }
+  if (const int k = segmentPair_[segment]; k >= 0) samplePair(rng, pairs_[k], a);
+}
+
 void Csgm1Sampler::sample(Rng& rng, std::span<double> a) const {
   for (std::size_t i = 0; i < kind_.size(); ++i) {
     if (kind_[i] == Kind::Uniform) a[i] = uniformAngle(rng, static_cast<int>(i));
@@ -172,6 +209,29 @@ int Csgm1GroupSampler::size() const {
   int n = 0;
   for (const auto& p : parts_) n += p.size();
   return n;
+}
+
+std::vector<std::vector<int>> Csgm1GroupSampler::segments() const {
+  std::vector<std::vector<int>> all;
+  int o = 0;
+  for (const auto& p : parts_) {
+    for (auto seg : p.segments()) {
+      for (int& i : seg) i += o;
+      all.push_back(std::move(seg));
+    }
+    o += p.size();
+  }
+  return all;
+}
+
+void Csgm1GroupSampler::sampleSegment(Rng& rng, int segment, std::span<double> a) const {
+  int o = 0;
+  for (const auto& p : parts_) {
+    const int n = static_cast<int>(p.segments().size());
+    if (segment < n) return p.sampleSegment(rng, segment, a.subspan(o, p.size()));
+    segment -= n;
+    o += p.size();
+  }
 }
 
 void Csgm1GroupSampler::sample(Rng& rng, std::span<double> a) const {

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.11 |
+| 文件版本 | 1.12 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -258,7 +258,12 @@
 - 金屬配位斷鍵（`auto-metal`）：配位角度變化大，**只約束距離**——金屬 M 與配位原子 L 的距離維持輸入值 `r₀`：`E = G·(|M−L| − r₀)²`。閉合失敗篩選以 `||M−L| − r₀| > maxBreakDist` 判斷。
 
 - 閉合失敗篩選：9a 最佳化後，任一約束原子對距離 > `maxBreakDist`（預設 0.5 Å）→ 捨棄該樣本。
-- 可達距離篩選（`csgmBuild = grow` 時）：每建一個殘基，若目前末端到閉合目標的距離 > 剩餘殘基數 × `reachPerRes`（蛋白質預設 3.8 Å；核酸預設 7.0 Å），即依 7.8 的規則重抽或捨棄。
+- 可達距離篩選（`csgmBuild = grow` 時）：每建一段，若目前末端到閉合目標的距離 > 剩餘殘基數 × `reachPerRes`（蛋白質預設 3.8 Å；核酸預設 7.0 Å），即依 7.8 的規則重抽或捨棄。
+  - 只用於主鏈連接鍵（蛋白質 C–N、核酸 O3′–P）的斷鍵；交聯斷鍵與金屬配位不檢查。
+  - 斷鍵 A–B 的兩端各檢查一次：往 A 建構時目標為 B，往 B 建構時目標為 A；目標原子尚未建構時不檢查。
+  - 目前末端：扭轉樹中通往該端的路徑上、本段所含最深的兩面角的移動側鍵原子。
+  - 剩餘殘基數：從目前末端所在殘基到目標原子所在殘基（同一條鏈上，含兩端）的殘基數；不在同一條鏈時不檢查。
+  - 命令列：`--reachPerRes <蛋白質>,<核酸>`。
 
 ---
 
@@ -447,14 +452,19 @@ flowchart TD
 
 ### 7.2 樣本數參數
 
-每個 MobM 各一組；StaM 群一組（套用到每個 MobM 的 StaM dcss）。
+兩組命令列參數：StaM 群一組（前綴 `stam`，套用到每個 MobM 的 StaM dcss），所有 MobM 共用一組（前綴 `mobm`）；不提供個別 MobM 的覆寫。
 
-| 參數 | 預設 | 限制 |
+| 參數（StaM 群／MobM） | 預設 | 限制 |
 |---|---|---|
-| `dockingConfSampleNum` | **必填** | ≥ 4 |
-| `minL2confSampleNum` | `2 × dockingConfSampleNum` | ≥ `2 × dockingConfSampleNum` |
-| `initL1confSampleNum` | `minL2confSampleNum` | ≥ `minL2confSampleNum` |
-| `eliteConfSampleNum` | `max(2, ceil(0.25 × dockingConfSampleNum))` | 2 ≤ 值 ≤ `dockingConfSampleNum / 2` |
+| `stamDockingConfSampleNum`／`mobmDockingConfSampleNum` | 有可動兩面角時**必填** | ≥ 4 |
+| `stamMinL2confSampleNum`／`mobmMinL2confSampleNum` | `2 × dockingConfSampleNum` | ≥ `2 × dockingConfSampleNum` |
+| `stamInitL1confSampleNum`／`mobmInitL1confSampleNum` | `minL2confSampleNum` | ≥ `minL2confSampleNum` |
+| `stamEliteConfSampleNum`／`mobmEliteConfSampleNum` | `max(2, ceil(0.25 × dockingConfSampleNum))` | 2 ≤ 值 ≤ `dockingConfSampleNum / 2` |
+
+- 本節其他段落中不帶前綴的名稱（`dockingConfSampleNum` 等）指該分子所屬的一組。
+- StaM 群有可動兩面角 → `stamDockingConfSampleNum` 必填；任一 MobM 有可動兩面角 → `mobmDockingConfSampleNum` 必填。是否有可動兩面角在讀取分子設定檔後判斷。
+- 只給 `MinL2`／`InitL1`／`Elite` 而未給同組的 `DockingConfSampleNum` → 報錯。
+- 第一批之後的 L1 數量由 7.4 計算，沒有對應的參數。
 
 違反限制 → 報錯並結束。
 
@@ -575,10 +585,16 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `grow` | 沿扭轉樹由根部逐段建構，每加一段檢查新原子與已建原子的碰撞 |
 
 `grow` 細節：
+- 一段：一起取值的兩面角。csgm1b 的 φ/ψ 配對為一段（`RAMA_AUTO` 且前一個 ω 為 `cisTrans` 時，該 ω 也在同一段）；其餘每個兩面角各為一段。
+- 建構順序：依各段第一個兩面角在扭轉樹中的順序；某段只在其所有兩面角的父兩面角都已建構（或在同一段內）時才建構。
+- 每建一段，檢查「兩原子都已建構、且其中一個由本段建構」的重原子對；先檢查碰撞，再檢查可達距離（4.8）。
+- 兩面角移動側的鍵原子（如 χ1 的 CB、φ 的 CA）位於旋轉軸上，位置由父兩面角決定，因此歸屬父兩面角所在的段建構與檢查（否則碰撞會晚一段才發現，重抽本段無法排除）。
 - 碰撞判定同 7.9（重原子、排除 1-2/1-3/1-4、距離 < `clashDistance`）。
 - csgm1：碰撞時重新抽該段的兩面角，最多 `growMaxRetry` 次（預設 16），仍失敗則捨棄該樣本。
 - csgm2、csgm3：兩面角已決定，碰撞即捨棄（不重抽）。
 - 搭配 `confMinMaxStep = 0` 時，9a 最佳化只計算能量。
+- 第一次嘗試的取值與 `whole` 相同（先產生完整樣本）；重抽只改變該段的兩面角，已建構的段不變。
+- 捨棄的樣本計入 L1，但不進行 9a 最佳化。
 
 ### 7.9 9a 能量與最佳化
 
@@ -785,7 +801,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
    - `diversityRmsd` 預設 2.0 Å；設為 0 表示關閉。
 4. **取前 `topSampleNum` 個** 為新的 topSampleSet。
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
-   - StaM 無可動兩面角時，StaM 的 elite 視為 1。
+   - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
    - 保存：StaM 構型、MobM 構型、位置、定向、最佳化後兩面角、能量。
 5. **篩選 dcss**：
    - `E_top_max` = topSampleSet 中的最高能量。
@@ -881,13 +897,13 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--staFixedResMovable` | false | 4.7 |
 | `--maxBreakDist` | 0.5 Å | 4.8 |
 | `--closureG` | 200 | 4.5 |
-| `--reachPerRes` | 蛋白質 3.8 Å／核酸 7.0 Å | 4.8 |
+| `--reachPerRes` | `3.8,7.0`（蛋白質,核酸；Å） | 4.8 |
 | `--staFlexMargin` | 4 Å | 4.4 |
 | `--acceptNonPlanarOmega` | 關閉 | 4.3 |
-| `dockingConfSampleNum` | 必填（StaM 有可動兩面角時 StaM 也必填） | 7.2 |
-| `minL2confSampleNum` | 2 × docking | 7.2 |
-| `initL1confSampleNum` | minL2 | 7.2 |
-| `eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
+| `--stamDockingConfSampleNum`、`--mobmDockingConfSampleNum` | 有可動兩面角時必填 | 7.2 |
+| `--stamMinL2confSampleNum`、`--mobmMinL2confSampleNum` | 2 × docking | 7.2 |
+| `--stamInitL1confSampleNum`、`--mobmInitL1confSampleNum` | minL2 | 7.2 |
+| `--stamEliteConfSampleNum`、`--mobmEliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
 | `--maxL1TotalNum` | 10⁹ | 7.4 |
 | `--maxL1BatchNum` | 65536（CPU 版；GPU 版由 `--gpuMemLimit` 推算） | 7.4 |
 | `--seed` | 隨機（寫入執行紀錄） | 7.9 |
@@ -933,7 +949,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--diversityRmsd` | 2.0 Å | 9 |
 | `--lbfgsMemory` | 7 | 12 |
 
-每個 MobM 的樣本數參數（`dockingConfSampleNum` 等）的指定方式：命令列為全部 MobM 的共同值；個別 MobM 可在分子設定檔覆寫。
+樣本數參數（7.2）：StaM 群用 `--stam*`，所有 MobM 共用 `--mobm*`，不提供個別 MobM 的覆寫。
 
 ---
 
@@ -1124,9 +1140,11 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | 原子對排除 1-2/1-3/1-4 與距離固定的原子對；碰撞懲罰只用於參與計算的重原子對（7.9） |
 | — | 距離固定的重原子對在輸入結構中若碰撞，報錯結束（7.9） |
 | — | csgm1 取值方式、FIRE 細節（dt₀ 0.1、dt_max 1.0、整步等比例縮小、回傳最低能量點）、計數式亂數（7.5、7.9） |
+| — | 樣本數參數分為 StaM 群（`--stam*`）與所有 MobM 共用（`--mobm*`），不提供個別 MobM 覆寫（7.2） |
+| — | `grow` 的段、建構順序與可達距離檢查的細節；可達距離只用於主鏈連接鍵的斷鍵（4.8、7.8） |
 
 ### 17.2 待確認
-- StaM 群的樣本數參數（7.2）的指定方式：目前命令列的 `--dockingConfSampleNum` 等同時套用到 StaM 群與所有 MobM；分子設定檔的個別覆寫尚未實作。
+（目前無）
 
 ---
 
@@ -1157,3 +1175,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.9 | 2026-10-14 | 實作 9a 能量：AD4 原子類型、參數、原子對能量與梯度、參與計算的原子對、碰撞懲罰（7.9）；新增 `--clashDistance`、`--Emax`、`--EclashBase`、`--Kclash` |
 | 1.10 | 2026-10-15 | 輸入結構中距離固定的重原子對碰撞時報錯結束；記錄 AD4 類型與 Meeko 0.8.0 的比對（7.9） |
 | 1.11 | 2026-10-15 | 實作 csgm1a、csgm1b、FIRE 與 9a 的 L2 pool 補充（7.3–7.5、7.9）；新增 `--dockingConfSampleNum` 等樣本數參數、`--maxL1BatchNum`、`--csgm1AngleStep`、`--ramaFloor`、`--confMinMaxStep`、`--confMinDeltaE`、`--confMaxDihedralStep`、`--seed` |
+| 1.12 | 2026-10-15 | 樣本數參數分為 `--stam*` 與 `--mobm*` 兩組（7.2）；實作 `csgmBuild = grow`（7.8）與可達距離檢查（4.8）；新增 `--csgmBuild`、`--growMaxRetry`、`--reachPerRes` |

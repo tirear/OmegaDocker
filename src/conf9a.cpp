@@ -32,16 +32,21 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
       std::vector<double> angles(static_cast<std::size_t>(n) * d);
       std::vector<EnergyTerms> terms(n);
       std::vector<int> steps(n);
+      std::vector<char> built(n);
 #pragma omp parallel for schedule(dynamic, 1)
       for (long long i = 0; i < n; ++i) {
         Rng rng(p.seed, p.stream, counter + done + i);
         std::span<double> a(angles.data() + i * d, d);
-        gen(rng, a);
-        terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
+        built[i] = gen(rng, a);
+        if (built[i]) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
       }
       for (long long i = 0; i < n; ++i) {
-        st.minSteps += steps[i];
         const EnergyTerms& e = terms[i];
+        if (!built[i]) {
+          ++st.growFailed;
+          continue;
+        }
+        st.minSteps += steps[i];
         if (!(e.filterEnergy() < p.Emax)) {
           ++st.overEmax;
         } else if (e.closureMaxDeviation > p.maxBreakDist) {
@@ -68,8 +73,8 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
     if (nowL2 >= p.minL2) break;
     if (st.l1 >= p.maxL1Total)
       fail("9a: {} samples generated (--maxL1TotalNum) but only {} of {} passed the filters "
-           "(energy >= --Emax: {}, closure deviation > --maxBreakDist: {})",
-           st.l1, nowL2, p.minL2, st.overEmax, st.notClosed);
+           "(discarded while growing: {}, energy >= --Emax: {}, closure deviation > --maxBreakDist: {})",
+           st.l1, nowL2, p.minL2, st.growFailed, st.overEmax, st.notClosed);
     l1 = std::min(next, p.maxL1Total - st.l1);
   }
   return st;
