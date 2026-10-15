@@ -19,8 +19,11 @@ struct ConfSampleOpts {
   std::optional<int> docking, minL2, initL1, elite;
 };
 
-// csgm parameters of spec 7.5 and 7.8, one set for the StaM group and one shared by all MobM.
+// 9a batch limits (spec 7.4) and csgm parameters (spec 7.5, 7.8), one set for
+// the StaM group and one shared by all MobM.
 struct CsgmOpts {
+  long long maxL1TotalNum = 1000000000;
+  long long maxL1BatchNum = 65536;
   bool grow = false;  // --<set>CsgmBuild grow
   int growMaxRetry = 16;
   double csgm1AngleStep = 1.0;
@@ -28,8 +31,8 @@ struct CsgmOpts {
 };
 
 struct Options {
-  std::string sta;
-  std::vector<std::string> mob;
+  std::string stamFile;                // --stam
+  std::vector<std::string> mobmFiles;  // --mobm
   std::string molConfig;
   std::vector<std::string> ccd;
   std::optional<Vec3> boxCenter;
@@ -53,8 +56,6 @@ struct Options {
   double Kclash = 1000.0;
   ConfSampleOpts stam;  // --stam*ConfSampleNum: the StaM group
   ConfSampleOpts mobm;  // --mobm*ConfSampleNum: shared by all MobM
-  long long maxL1TotalNum = 1000000000;
-  long long maxL1BatchNum = 65536;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;

@@ -72,7 +72,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
     st.nextL1 = next;
     if (nowL2 >= p.minL2) break;
     if (st.l1 >= p.maxL1Total)
-      fail("9a: {} samples generated (--maxL1TotalNum) but only {} of {} passed the filters "
+      fail("9a: {} samples generated (--stamMaxL1TotalNum / --mobmMaxL1TotalNum) but only {} of {} passed the filters "
            "(discarded while growing: {}, energy >= --Emax: {}, closure deviation > --maxBreakDist: {})",
            st.l1, nowL2, p.minL2, st.growFailed, st.overEmax, st.notClosed);
     l1 = std::min(next, p.maxL1Total - st.l1);

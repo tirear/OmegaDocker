@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.13 |
+| 文件版本 | 1.14 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -86,8 +86,8 @@
 ### 3.2 分子的劃分與角色指定
 
 - 一個 **分子** = 鍵結圖中的一個連通元件（connected component）。
-- `--sta <file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
-- `--mob <file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
+- `--stam <file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
+- `--mobm <file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
 - 每個 MobM 視為獨立的對接任務（見第 11 節）。
 
 ### 3.3 對接範圍
@@ -303,8 +303,8 @@ flowchart TD
 - `metalBond` 只在金屬配位鍵位於環內的分子寫出（4.7），預設檔的值為 `"keep"`，並以註解列出選項 B 的 `auto-metal` 斷鍵。檔案開頭的註解說明兩個選項與改選方式。
 
 分子 `id`：
-- 有殘基與鏈資訊：`<sta|mob>:<檔名>:<鏈名稱，多條以 + 連接>`；同一檔案中有重複時，再加上 `:<第一個殘基名稱><序號><插入碼>`（例如水分子 `sta:r.cif:A:HOH501`）。
-- 沒有殘基或鏈資訊：`<sta|mob>:<檔名>:<k>`，`k` 為該分子在檔案中的順序（1 起算）。
+- 有殘基與鏈資訊：`<stam|mobm>:<檔名>:<鏈名稱，多條以 + 連接>`；同一檔案中有重複時，再加上 `:<第一個殘基名稱><序號><插入碼>`（例如水分子 `stam:r.cif:A:HOH501`）。
+- 沒有殘基或鏈資訊：`<stam|mobm>:<檔名>:<k>`，`k` 為該分子在檔案中的順序（1 起算）。
 
 ```toml
 formatVersion = 1
@@ -334,7 +334,7 @@ name = "A"                       # 自訂範例：alpha
 
 # ---------- 蛋白質分子 ----------
 [[molecule]]
-id           = "sta:receptor.cif:A"
+id           = "stam:receptor.cif:A"
 role         = "StaM"            # StaM | MobM（由命令列決定，僅供參考）
 file         = "receptor.cif"
 chain        = "A"
@@ -368,7 +368,7 @@ metalBond    = "keep"            # 只在金屬配位鍵位於環內時：keep |
 
 # ---------- 核酸分子 ----------
 [[molecule]]
-id           = "mob:rna.cif:A"
+id           = "mobm:rna.cif:A"
 role         = "MobM"
 file         = "rna.cif"
 chain        = "A"
@@ -388,7 +388,7 @@ backboneType = "nucleic"
 
 # ---------- 無主鏈分子 ----------
 [[molecule]]
-id           = "mob:lig1.sdf:1"
+id           = "mobm:lig1.sdf:1"
 role         = "MobM"
 file         = "lig1.sdf"
 backboneType = "none"
@@ -446,7 +446,7 @@ flowchart TD
 
 ### 7.0 csgm 參數的分組
 
-7.3–7.8 的 csgm 參數與 7.2 相同分為兩組：StaM 群一組（前綴 `stam`），所有 MobM 共用一組（前綴 `mobm`）。本章中以大寫開頭、不帶前綴的名稱（如 `CsgmBuild`、`GrowMaxRetry`）指該分子所屬的一組，例如 `--stamCsgmBuild`、`--mobmCsgmBuild`。
+7.4 的批次與上限（`MaxL1TotalNum`、`MaxL1BatchNum`）及 7.3–7.8 的 csgm 參數與 7.2 相同分為兩組：StaM 群一組（前綴 `stam`），所有 MobM 共用一組（前綴 `mobm`）。本章中以大寫開頭、不帶前綴的名稱（如 `CsgmBuild`、`GrowMaxRetry`）指該分子所屬的一組，例如 `--stamCsgmBuild`、`--mobmCsgmBuild`。
 
 ### 7.1 樣本表示
 
@@ -498,14 +498,14 @@ if addedL2 > 0:
     nextL1 = 2 × ceil((minL2confSampleNum − nowL2) × L1 / addedL2)
 else:
     nextL1 = L1 × 1024
-nextL1 = min(nextL1, maxL1BatchNum)
+nextL1 = min(nextL1, MaxL1BatchNum)
 ```
 
 - `nowL2`：加入後 L2 pool 的樣本數；`addedL2`：本批新增數；`L1`：本批產生數。
-- `maxL1BatchNum`：由 `--gpuMemLimit` 推算的單批上限；超過時分批處理。CPU 版以 `--maxL1BatchNum`（預設 65536）指定。
+- `MaxL1BatchNum`：由 `--gpuMemLimit` 推算的單批上限；超過時分批處理。CPU 版以 `--stamMaxL1BatchNum`／`--mobmMaxL1BatchNum`（預設 65536）指定。
 - 一批（L1 個）全部處理完才檢查是否達到 `minL2confSampleNum`，因此 L2 pool 可能超過該數。
-- 單次補充的累計 L1 達 `maxL1TotalNum` 仍未達到 `minL2confSampleNum` → 報錯並結束；最後一批的數量不超過剩餘額度。
-- `maxL1TotalNum`（預設 10⁹）：單次補充的累計 L1 上限；達到時報錯並結束（避免產率為 0 時無限迴圈）。
+- 單次補充的累計 L1 達 `MaxL1TotalNum` 仍未達到 `minL2confSampleNum` → 報錯並結束；最後一批的數量不超過剩餘額度。
+- `MaxL1TotalNum`（`--stamMaxL1TotalNum`／`--mobmMaxL1TotalNum`，預設 10⁹）：單次補充的累計 L1 上限；達到時報錯並結束（避免產率為 0 時無限迴圈）。
 
 ### 7.5 csgm1：憑空產生
 
@@ -668,6 +668,12 @@ nextL1 = min(nextL1, maxL1BatchNum)
 - 所有 StaM 兩面角皆不可動 → StaM dcss 只有輸入結構。
 - StaM 的 L2 pool 只依分子內能量，與 MobM 無關，所有 MobM 共用。
 - StaM 的 dcss 每個 MobM 各一份（適應度依該 MobM 的對接結果）。
+
+### 7.11 loop 閉合演算法（待實作）
+
+- 兩種都實作：CCD（cyclic coordinate descent，先做）與 KIC（kinematic closure）。
+- 位置：csgm 產生樣本之後、9a 最佳化之前；用於主鏈連接鍵的斷鍵（4.8）。
+- 細節見 17.2。
 
 ---
 
@@ -886,7 +892,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 
 | 參數 | 預設 | 節 |
 |---|---|---|
-| `--sta`、`--mob` | 必填 | 3.2 |
+| `--stam`、`--mobm` | 必填 | 3.2 |
 | `--molConfig` | 無 | 5 |
 | `--ccd` | 無 | 3.1 |
 | `--boxCenter`、`--boxSize` | 必填 | 3.3 |
@@ -909,8 +915,8 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--stamMinL2confSampleNum`、`--mobmMinL2confSampleNum` | 2 × docking | 7.2 |
 | `--stamInitL1confSampleNum`、`--mobmInitL1confSampleNum` | minL2 | 7.2 |
 | `--stamEliteConfSampleNum`、`--mobmEliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
-| `--maxL1TotalNum` | 10⁹ | 7.4 |
-| `--maxL1BatchNum` | 65536（CPU 版；GPU 版由 `--gpuMemLimit` 推算） | 7.4 |
+| `--stamMaxL1TotalNum`、`--mobmMaxL1TotalNum` | 10⁹ | 7.4 |
+| `--stamMaxL1BatchNum`、`--mobmMaxL1BatchNum` | 65536（CPU 版；GPU 版由 `--gpuMemLimit` 推算） | 7.4 |
 | `--seed` | 隨機（寫入執行紀錄） | 7.9 |
 | `--stamCsgmGA`、`--mobmCsgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
 | `--stamCsgmBuild`、`--mobmCsgmBuild` | `whole` | 7.8 |
@@ -1093,7 +1099,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 |---|---|
 | Q1 | 新架構；能量 kernel 取自 AutoDock-GPU 1.6，移植 OmegaDocker 修改 |
 | Q2 | 版本號 0.40.0 |
-| Q3 | `--sta` 檔案內全部為 StaM；`--mob` 每個檔案只有一個分子，可多次指定 |
+| Q3 | `--stam` 檔案內全部為 StaM；`--mobm` 每個檔案只有一個分子，可多次指定 |
 | Q4 | 樣本數參數：命令列共同值 + 分子設定檔覆寫 |
 | Q5 | StaM 依 `stamFixedResMovable`（預設 false）：固定殘基主鏈不動、loop 由固定端建構並在另一端斷鍵；true 時錨點為最靠近質心的殘基（4.7） |
 | Q6 | 9b 不調整 StaM 兩面角 |
@@ -1107,7 +1113,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | Q14 | 超過 PDB 上限時輸出 mmCIF |
 | Q15 | 核酸 δ 預設不可動（除非斷環） |
 | Q16 | 寫出檢查點，並支援從中斷處接續（第 16 節） |
-| R1 | `--sta` 只能指定一次 |
+| R1 | `--stam` 只能指定一次 |
 | R2 | Top8000 數值直接作為抽樣權重 |
 | R3 | 檢查點僅在 9c 結束時寫出；SIGINT / SIGTERM 直接結束 |
 | — | 開發順序：CPU 版 → CUDA 版 → OpenCL 版 |
@@ -1148,10 +1154,12 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | 樣本數參數分為 StaM 群（`--stam*`）與所有 MobM 共用（`--mobm*`），不提供個別 MobM 覆寫（7.2） |
 | — | `grow` 的段、建構順序與可達距離檢查的細節；可達距離只用於主鏈連接鍵的斷鍵（4.8、7.8） |
 | — | 參數前綴統一為 `stam`／`mobm`；csgm 參數分為 StaM 群與 MobM 兩組（7.0） |
-| — | 加入 loop 閉合演算法（演算法待定，見 17.2） |
+| — | 9a 的批次與上限分為兩組；9a 最佳化、可達距離與能量相關參數兩組共用（7.0） |
+| — | 輸入參數改為 `--stam`／`--mobm`，分子 id 前綴改為 `stam:`／`mobm:`（3.2、5.2） |
+| — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
 
 ### 17.2 待確認
-- loop 閉合演算法的選擇（CCD 或 KIC）、在 9a 中的位置（csgm 產生後、9a 最佳化前）與對應參數。
+- loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
 
 ---
 
@@ -1184,3 +1192,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.11 | 2026-10-15 | 實作 csgm1a、csgm1b、FIRE 與 9a 的 L2 pool 補充（7.3–7.5、7.9）；新增 `--dockingConfSampleNum` 等樣本數參數、`--maxL1BatchNum`、`--csgm1AngleStep`、`--ramaFloor`、`--confMinMaxStep`、`--confMinDeltaE`、`--confMaxDihedralStep`、`--seed` |
 | 1.12 | 2026-10-15 | 樣本數參數分為 `--stam*` 與 `--mobm*` 兩組（7.2）；實作 `csgmBuild = grow`（7.8）與可達距離檢查（4.8）；新增 `--csgmBuild`、`--growMaxRetry`、`--reachPerRes` |
 | 1.13 | 2026-10-15 | `--staFlexMargin`、`--staFixedResMovable` 改名為 `--stamFlexMargin`、`--stamFixedResMovable`；csgm 參數分為 `--stam*`／`--mobm*` 兩組（7.0、14）；決定加入 loop 閉合演算法（17） |
+| 1.14 | 2026-10-15 | 輸入參數 `--sta`、`--mob` 改為 `--stam`、`--mobm`，分子 id 前綴改為 `stam:`、`mobm:`；`--maxL1TotalNum`、`--maxL1BatchNum` 分為 `--stam*`／`--mobm*`（7.0、7.4）；新增 7.11 loop 閉合（CCD、KIC） |

@@ -78,7 +78,7 @@ bool isMetalBond(const Molecule& m, const Bond& b);
 // Splits a structure into connected components, preserving atom order.
 std::vector<Molecule> splitMolecules(const RawStructure& s);
 
-// "sta" / "mob"
+// "stam" / "mobm"
 const char* roleTag(Role r);
 
 }  // namespace od

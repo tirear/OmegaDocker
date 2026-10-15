@@ -167,8 +167,8 @@ void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& part
   const od::ConfSampleNums n = od::confSampleNums(opt, set);
   od::Fill9aParams p;
   p.minL2 = n.minL2;
-  p.maxL1Batch = opt.maxL1BatchNum;
-  p.maxL1Total = opt.maxL1TotalNum;
+  p.maxL1Batch = csgm.maxL1BatchNum;
+  p.maxL1Total = csgm.maxL1TotalNum;
   p.Emax = opt.Emax;
   p.maxBreakDist = opt.maxBreakDist;
   p.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep};
@@ -230,8 +230,8 @@ int run(int argc, char** argv) {
   od::CcdLibrary ccd;
   for (const auto& f : opt.ccd) ccd.addFile(f);
 
-  auto sta = od::loadMolecules(opt.sta, od::Role::StaM, ccd);
-  od::logInfo(std::format("StaM group from {}: {} molecule(s)", opt.sta, sta.size()));
+  auto sta = od::loadMolecules(opt.stamFile, od::Role::StaM, ccd);
+  od::logInfo(std::format("StaM group from {}: {} molecule(s)", opt.stamFile, sta.size()));
   std::vector<od::Topology> staTopo;
   for (const auto& m : sta) {
     printMolecule(m);
@@ -249,9 +249,9 @@ int run(int argc, char** argv) {
   }
   std::vector<od::Molecule> mobs;
   std::vector<od::Topology> mobTopo;
-  for (const auto& f : opt.mob) {
+  for (const auto& f : opt.mobmFiles) {
     auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
-    if (mob.size() != 1) od::fail("{}: --mob file must contain exactly one molecule, found {}", f, mob.size());
+    if (mob.size() != 1) od::fail("{}: --mobm file must contain exactly one molecule, found {}", f, mob.size());
     od::logInfo(std::format("MobM from {}:", f));
     printMolecule(mob.front());
     od::Topology t = analyze(mob.front(), opt);

@@ -19,12 +19,12 @@ od::Options parse(std::vector<const char*> args) {
 }  // namespace
 
 TEST_CASE("cli: required options and values") {
-  auto o = parse({"--sta", "r.cif", "--mob", "a.sdf", "--mob=b.mol2", "--boxCenter", "1,-2.5,3",
+  auto o = parse({"--stam", "r.cif", "--mobm", "a.sdf", "--mobm=b.mol2", "--boxCenter", "1,-2.5,3",
                   "--boxSize", "20,20,30", "--outPrefix", "out", "--outCif", "true", "--outPdb=false",
                   "--mobmDockingConfSampleNum", "8"});
-  CHECK(o.sta == "r.cif");
-  REQUIRE(o.mob.size() == 2);
-  CHECK(o.mob[1] == "b.mol2");
+  CHECK(o.stamFile == "r.cif");
+  REQUIRE(o.mobmFiles.size() == 2);
+  CHECK(o.mobmFiles[1] == "b.mol2");
   CHECK((*o.boxCenter)[1] == doctest::Approx(-2.5));
   CHECK((*o.boxSize)[2] == doctest::Approx(30));
   CHECK(o.outCif);
@@ -41,7 +41,7 @@ TEST_CASE("cli: required options and values") {
 }
 
 TEST_CASE("cli: errors") {
-  CHECK_THROWS_AS(parse({"--sta", "a", "--sta", "b"}), od::Error);
+  CHECK_THROWS_AS(parse({"--stam", "a", "--stam", "b"}), od::Error);
   CHECK_THROWS_AS(parse({"--unknown"}), od::Error);
   CHECK_THROWS_AS(parse({"--boxCenter", "1,2"}), od::Error);
   CHECK_THROWS_AS(parse({"--boxCenter", "1,2,x"}), od::Error);
@@ -49,7 +49,7 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(parse({"--outPrefix"}), od::Error);
   CHECK_THROWS_AS(parse({"--help=1"}), od::Error);
 
-  auto o = parse({"--sta", "r.cif", "--mob", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
+  auto o = parse({"--stam", "r.cif", "--mobm", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
                   "--outPrefix", "o", "--outPdb", "false", "--mobmDockingConfSampleNum", "8"});
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);  // all output formats disabled
   o.outMol2 = true;
@@ -65,7 +65,7 @@ TEST_CASE("cli: errors") {
 }
 
 TEST_CASE("cli: 9a sample numbers and minimization") {
-  auto o = parse({"--sta", "r.cif", "--mob", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
+  auto o = parse({"--stam", "r.cif", "--mobm", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
   CHECK_NOTHROW(od::validateOptions(o));  // required only with rotatable torsions
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::StaM), od::Error);
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::MobM), od::Error);
@@ -123,11 +123,13 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   o.confMaxDihedralStep = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 
-  auto t = parse({"--seed", "42", "--confMinMaxStep", "50", "--maxL1BatchNum=1000", "--mobmRamaFloor", "0",
+  auto t = parse({"--seed", "42", "--confMinMaxStep", "50", "--mobmMaxL1BatchNum=1000", "--mobmRamaFloor", "0",
                   "--stamCsgmBuild", "grow", "--mobmCsgm1AngleStep=5", "--stamGrowMaxRetry", "3"});
   CHECK(*t.seed == 42);
   CHECK(t.confMinMaxStep == 50);
-  CHECK(t.maxL1BatchNum == 1000);
+  CHECK(t.mobmCsgm.maxL1BatchNum == 1000);
+  CHECK(t.stamCsgm.maxL1BatchNum == 65536);
+  CHECK_THROWS_AS(parse({"--maxL1BatchNum", "10"}), od::Error);
   CHECK(t.mobmCsgm.ramaFloor == 0);
   CHECK(t.stamCsgm.ramaFloor == doctest::Approx(1e-4));
   CHECK(t.stamCsgm.grow);

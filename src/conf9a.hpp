@@ -26,8 +26,8 @@ using ConfGenerator = std::function<bool(Rng& rng, std::span<double> anglesDeg)>
 
 struct Fill9aParams {
   int minL2 = 0;                       // minL2confSampleNum
-  long long maxL1Batch = 65536;        // maxL1BatchNum
-  long long maxL1Total = 1000000000;   // maxL1TotalNum
+  long long maxL1Batch = 65536;        // --stamMaxL1BatchNum / --mobmMaxL1BatchNum
+  long long maxL1Total = 1000000000;   // --stamMaxL1TotalNum / --mobmMaxL1TotalNum
   double Emax = 1000.0;
   double maxBreakDist = 0.5;
   MinParams min;

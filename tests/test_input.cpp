@@ -95,7 +95,7 @@ TEST_CASE("mmCIF: Trp-cage 1L2Y") {
   auto mols = od::loadMolecules(kData + "/1L2Y.cif", od::Role::StaM, ccd());
   REQUIRE(mols.size() == 1);
   const auto& m = mols[0];
-  CHECK(m.id == "sta:1L2Y.cif:A");
+  CHECK(m.id == "stam:1L2Y.cif:A");
   CHECK(m.atoms.size() == 304);
   CHECK(m.bonds.size() == 310);  // 303 tree bonds + 7 rings (TYR 1, TRP 2, PRO 4)
   CHECK(m.residues.size() == 20);
@@ -117,7 +117,7 @@ TEST_CASE("mmCIF: HIS tautomers and charged HIS") {
 
   auto ins = od::loadMolecules(kData + "/2KJJ.cif", od::Role::StaM, ccd());
   REQUIRE(ins.size() == 1);  // chains A and B joined by disulfides
-  CHECK(ins[0].id == "sta:2KJJ.cif:A+B");
+  CHECK(ins[0].id == "stam:2KJJ.cif:A+B");
   CHECK(atomOf(ins[0], "B", 5, "NE2").formalCharge == 0);
   CHECK(atomOf(ins[0], "B", 5, "ND1").formalCharge == 0);
 
@@ -164,7 +164,7 @@ TEST_CASE("mmCIF: reported problems") {
 TEST_CASE("SDF: biotin") {
   auto mols = od::loadMolecules(kData + "/BTN_ideal.sdf", od::Role::MobM, ccd());
   REQUIRE(mols.size() == 1);
-  CHECK(mols[0].id == "mob:BTN_ideal.sdf:1");
+  CHECK(mols[0].id == "mobm:BTN_ideal.sdf:1");
   CHECK(mols[0].atoms.size() == 32);
   CHECK(mols[0].bonds.size() == 33);
   CHECK_FALSE(mols[0].hasResidueInfo);
@@ -175,7 +175,7 @@ TEST_CASE("SDF: biotin") {
 TEST_CASE("mol2: residues, aromaticity, multiple records") {
   auto bz = od::loadMolecules(kData + "/benzene.mol2", od::Role::MobM, ccd());
   REQUIRE(bz.size() == 1);
-  CHECK(bz[0].id == "mob:benzene.mol2:1");  // no chain information
+  CHECK(bz[0].id == "mobm:benzene.mol2:1");  // no chain information
   CHECK(bz[0].hasResidueInfo);
   CHECK(bz[0].residues.size() == 1);
   CHECK(bz[0].residues[0].info.name == "BENZENE");
@@ -452,7 +452,7 @@ TEST_CASE("molconfig: validation errors") {
   auto e = f.errorsOf(replaceAfter(text, "resName = \"PRO\"", "phi     = false", "phi     = true"));
   CHECK(hasError(e, "residue A:12.phi: category 'ring' is not rotatable"));
   // Nucleic delta is in the ribose ring.
-  e = f.errorsOf(replaceAfter(text, "mob:1RNG", "delta   = false", "delta   = true"));
+  e = f.errorsOf(replaceAfter(text, "mobm:1RNG", "delta   = false", "delta   = true"));
   CHECK(hasError(e, "residue A:1.delta: category 'ring'"));
 
   e = f.errorsOf(replaceAfter(text, "resSeq  = 5", "ssType  = \"O\"", "ssType  = \"Q\""));
@@ -464,19 +464,19 @@ TEST_CASE("molconfig: validation errors") {
   CHECK(hasError(e, "psi: must be true or false"));
   e = f.errorsOf(replaceAfter(text, "resSeq  = 3", "iCode", "colour = 1\n  iCode"));
   CHECK(hasError(e, "residue A:3.colour: unknown key"));
-  e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"", "backboneType = \"none\"\ncsgm1 = \"1a\""));
+  e = f.errorsOf(replaceAfter(text, "mobm:BTN", "backboneType = \"none\"", "backboneType = \"none\"\ncsgm1 = \"1a\""));
   CHECK(hasError(e, "csgm1: only allowed for protein molecules"));
-  e = f.errorsOf(replaceAfter(text, "mob:1L2Y", "csgm1        = \"1a\"", "csgm1        = \"1c\""));
+  e = f.errorsOf(replaceAfter(text, "mobm:1L2Y", "csgm1        = \"1a\"", "csgm1        = \"1c\""));
   CHECK(hasError(e, "csgm1: must be 1a or 1b"));
-  e = f.errorsOf(replaceAfter(text, "[[molecule]]\nid           = \"mob:BTN", "mob:BTN_ideal.sdf:1", "mob:BTN_ideal.sdf:2"));
-  CHECK(hasError(e, "id 'mob:BTN_ideal.sdf:2' does not match any input molecule"));
-  CHECK(hasError(e, "molecule: id 'mob:BTN_ideal.sdf:1' is missing"));
+  e = f.errorsOf(replaceAfter(text, "[[molecule]]\nid           = \"mobm:BTN", "mobm:BTN_ideal.sdf:1", "mobm:BTN_ideal.sdf:2"));
+  CHECK(hasError(e, "id 'mobm:BTN_ideal.sdf:2' does not match any input molecule"));
+  CHECK(hasError(e, "molecule: id 'mobm:BTN_ideal.sdf:1' is missing"));
 
   // Residue and torsion lists must match the detected ones.
   e = f.errorsOf(replaceAfter(text, "resSeq  = 2", "resSeq  = 2", "resSeq  = 99"));
   CHECK(hasError(e, "residue A:99 is not a backbone residue"));
   CHECK(hasError(e, "residue A:2 is missing"));
-  e = f.errorsOf(replaceAfter(text, "mob:BTN", "[\"#2\", \"#1\", \"#4\", \"#5\"]", "[\"#2\", \"#1\", \"#4\", \"#99\"]"));
+  e = f.errorsOf(replaceAfter(text, "mobm:BTN", "[\"#2\", \"#1\", \"#4\", \"#5\"]", "[\"#2\", \"#1\", \"#4\", \"#99\"]"));
   CHECK(hasError(e, "atom '#99' not found"));
   CHECK(hasError(e, "torsion [#2, #1, #4, #5] is missing"));
 
@@ -500,7 +500,7 @@ TEST_CASE("molconfig: ringBreak makes ring bonds rotatable (biotin)") {
   setTrue("[\"#7\", \"#8\", \"#9\", \"#10\"]");
   auto e = f.errorsOf(text);
   CHECK(hasError(e, "category 'ring' is not rotatable (a ringBreak in the ring changes this)"));
-  text = replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
+  text = replaceAfter(text, "mobm:BTN", "backboneType = \"none\"",
                       "backboneType = \"none\"\n[[molecule.ringBreak]]\nbond = [\"#9\", \"#10\"]");
   CHECK(f.errorsOf(text).empty());
   setTrue("[\"#8\", \"#9\", \"#10\", \"#11\"]");  // the broken bond itself
@@ -586,7 +586,7 @@ namespace {
 
 // Sets phi of 1ZNF residue 10 to true.
 std::string phi10(std::string s) {
-  const auto r = s.find("resSeq  = 10\n", s.find("mob:1ZNF.cif:A"));
+  const auto r = s.find("resSeq  = 10\n", s.find("mobm:1ZNF.cif:A"));
   const auto p = s.find("phi     = false", r);
   REQUIRE(p < s.find("[[molecule.residue]]", r));
   return s.replace(p, 15, "phi     = true");
@@ -608,7 +608,7 @@ TEST_CASE("molconfig: metalBond") {
   f.inputs.clear();
   for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
   const std::string text = od::defaultMolConfigText(f.inputs);
-  const std::string zn = "id           = \"mob:1ZNF.cif:A\"";
+  const std::string zn = "id           = \"mobm:1ZNF.cif:A\"";
   // Default keep: the auto-metal entries are commented and the ring torsions are not rotatable.
   CHECK(text.find("metalBond    = \"keep\"") != std::string::npos);
   CHECK(text.find("  # bond   = [\"A:6:SG\", \"A:27:ZN\"]") != std::string::npos);
@@ -639,7 +639,7 @@ TEST_CASE("molconfig: metalBond") {
                  "source: must be auto-metal for a metal bond"));
   e = f.errorsOf(replaceAfter(text, zn, "metalBond    = \"keep\"", ""));
   CHECK(hasError(e, "metalBond: missing"));
-  e = f.errorsOf(replaceAfter(text, "mob:BTN", "backboneType = \"none\"",
+  e = f.errorsOf(replaceAfter(text, "mobm:BTN", "backboneType = \"none\"",
                               "backboneType = \"none\"\nmetalBond = \"keep\"\n"
                               "[[molecule.chainBreak]]\nbond = [\"#9\", \"#10\"]\nsource = \"auto-metal\"\n"
                               "[[molecule.chainBreak]]\nbond = [\"#1\", \"#2\"]\nsource = \"user\""));
@@ -798,7 +798,7 @@ struct StaFixture {
 
 // Sets phi and psi of StaM residues chain:first..last to rotatable.
 std::string freeResidues(std::string s, const std::string& chain, int first, int last) {
-  const auto start = s.find("id           = \"sta:");
+  const auto start = s.find("id           = \"stam:");
   for (int seq = first; seq <= last; ++seq) {
     auto i = s.find(std::format("chain   = \"{}\"\n  resName", chain), start);
     i = s.find(std::format("resSeq  = {}\n", seq), i);
@@ -811,7 +811,7 @@ std::string freeResidues(std::string s, const std::string& chain, int first, int
 }
 
 std::string addBreak(std::string s, const std::string& a, const std::string& b, const std::string& source) {
-  const auto i = s.find("csgm1        = \"1a\"\n", s.find("id           = \"sta:"));
+  const auto i = s.find("csgm1        = \"1a\"\n", s.find("id           = \"stam:"));
   REQUIRE(i != std::string::npos);
   return s.insert(i + 20, std::format("\n  [[molecule.chainBreak]]\n  bond   = [\"{}\", \"{}\"]\n  source = \"{}\"\n", a, b,
                                       source));
@@ -977,7 +977,7 @@ TEST_CASE("torsion tree: metal restraints (1ZNF)") {
   f.inputs.clear();
   for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
   const std::string text = od::defaultMolConfigText(f.inputs);
-  const std::string brk = setQuoted(uncommentMetal(text), "id           = \"mob:1ZNF.cif:A\"", "metalBond    = ", "break");
+  const std::string brk = setQuoted(uncommentMetal(text), "id           = \"mobm:1ZNF.cif:A\"", "metalBond    = ", "break");
   std::ofstream(f.path) << phi10(brk);
   std::vector<std::string> errors;
   auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
@@ -1220,7 +1220,7 @@ TEST_CASE("energy: metal restraints (1ZNF)") {
   f.inputs.clear();
   for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
   const std::string text = od::defaultMolConfigText(f.inputs);
-  std::ofstream(f.path) << phi10(setQuoted(uncommentMetal(text), "id           = \"mob:1ZNF.cif:A\"", "metalBond    = ", "break"));
+  std::ofstream(f.path) << phi10(setQuoted(uncommentMetal(text), "id           = \"mobm:1ZNF.cif:A\"", "metalBond    = ", "break"));
   std::vector<std::string> errors;
   auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
   REQUIRE(cfg);
@@ -1264,7 +1264,7 @@ struct Csgm1Fixture {
   std::optional<od::MolConfig> cfg;
   Csgm1Fixture() {
     std::string text = od::defaultMolConfigText(f.inputs);
-    const auto mol = text.find("id           = \"mob:1L2Y.cif:A\"");
+    const auto mol = text.find("id           = \"mobm:1L2Y.cif:A\"");
     auto i = text.find("resSeq  = 11\n", mol);
     REQUIRE(i != std::string::npos);
     i = text.find("omega   = \"fixed\"", i);

@@ -91,6 +91,10 @@ void csgmOption(std::vector<OptionDef>& table, const std::string& name, const st
 
 std::vector<OptionDef> csgmOptions() {
   std::vector<OptionDef> t;
+  csgmOption<long long>(t, "MaxL1TotalNum", "<n>", "1000000000", "9a: largest number of samples generated in one refill",
+                        parseInt, &CsgmOpts::maxL1TotalNum);
+  csgmOption<long long>(t, "MaxL1BatchNum", "<n>", "65536", "9a: largest number of samples processed at once", parseInt,
+                        &CsgmOpts::maxL1BatchNum);
   csgmOption<bool>(t, "CsgmBuild", "whole|grow", "whole", "9a: apply all torsions at once, or build segment by segment",
                    [](const std::string& opt, const std::string& v) {
                      if (v != "whole" && v != "grow") fail("--{}: expected whole or grow but got '{}'", opt, v);
@@ -106,9 +110,10 @@ std::vector<OptionDef> csgmOptions() {
   return t;
 }
 
-// Inserts the csgm options after --maxL1BatchNum.
+// Inserts the 9a batch-limit and csgm options after the sample-number options.
 std::vector<OptionDef> withCsgmOptions(std::vector<OptionDef> t) {
-  const auto at = std::find_if(t.begin(), t.end(), [](const OptionDef& d) { return d.name == "maxL1BatchNum"; });
+  const auto at =
+      std::find_if(t.begin(), t.end(), [](const OptionDef& d) { return d.name == "mobmEliteConfSampleNum"; });
   const auto c = csgmOptions();
   t.insert(at + 1, c.begin(), c.end());
   return t;
@@ -116,13 +121,13 @@ std::vector<OptionDef> withCsgmOptions(std::vector<OptionDef> t) {
 
 const std::vector<OptionDef>& optionTable() {
   static const std::vector<OptionDef> table = withCsgmOptions({
-      {"sta", Kind::Value, "<file>", "required", "Stationary molecules (StaM); may be given once",
+      {"stam", Kind::Value, "<file>", "required", "Stationary molecules (StaM); may be given once",
        [](Options& o, const std::string& v) {
-         if (!o.sta.empty()) fail("--sta may be given only once");
-         o.sta = v;
+         if (!o.stamFile.empty()) fail("--stam may be given only once");
+         o.stamFile = v;
        }},
-      {"mob", Kind::Value, "<file>", "required", "Mobile molecule (MobM), one molecule per file; repeatable",
-       [](Options& o, const std::string& v) { o.mob.push_back(v); }},
+      {"mobm", Kind::Value, "<file>", "required", "Mobile molecule (MobM), one molecule per file; repeatable",
+       [](Options& o, const std::string& v) { o.mobmFiles.push_back(v); }},
       {"molConfig", Kind::Value, "<file>", "none", "Molecule configuration file (TOML)",
        [](Options& o, const std::string& v) { o.molConfig = v; }},
       {"ccd", Kind::Value, "<file>", "none", "Additional CCD definitions (mmCIF); repeatable",
@@ -185,10 +190,6 @@ const std::vector<OptionDef>& optionTable() {
       sampleOption("mobm", "InitL1", &ConfSampleOpts::initL1, "minL2", "Every MobM, 9a: samples generated in the first batch"),
       sampleOption("mobm", "Elite", &ConfSampleOpts::elite, "max(2, ceil(docking/4))",
                    "Every MobM: csgm1 is used while the dcss has fewer samples"),
-      {"maxL1TotalNum", Kind::Value, "<n>", "1000000000", "9a: largest number of samples generated in one refill",
-       [](Options& o, const std::string& v) { o.maxL1TotalNum = parseInt("maxL1TotalNum", v); }},
-      {"maxL1BatchNum", Kind::Value, "<n>", "65536", "9a: largest number of samples processed at once",
-       [](Options& o, const std::string& v) { o.maxL1BatchNum = parseInt("maxL1BatchNum", v); }},
       {"confMinMaxStep", Kind::Value, "<n>", "100", "9a minimization: largest number of steps",
        [](Options& o, const std::string& v) { o.confMinMaxStep = parseInt32("confMinMaxStep", v); }},
       {"confMinDeltaE", Kind::Value, "<E>", "10", "9a minimization: stop when one step changes the energy by less (kcal/mol)",
@@ -272,8 +273,8 @@ void requireConfSampleNums(const Options& o, SampleSet set) {
 }
 
 void validateOptions(const Options& o) {
-  if (o.sta.empty()) fail("--sta is required");
-  if (o.mob.empty()) fail("At least one --mob is required");
+  if (o.stamFile.empty()) fail("--stam is required");
+  if (o.mobmFiles.empty()) fail("At least one --mobm is required");
   if (!o.boxCenter) fail("--boxCenter is required");
   if (!o.boxSize) fail("--boxSize is required");
   for (double v : *o.boxSize)
@@ -294,9 +295,9 @@ void validateOptions(const Options& o) {
       fail("--{}DockingConfSampleNum is required when other --{}*ConfSampleNum options are given",
            set == SampleSet::StaM ? "stam" : "mobm", set == SampleSet::StaM ? "stam" : "mobm");
   }
-  if (o.maxL1TotalNum < 1) fail("--maxL1TotalNum must be >= 1");
-  if (o.maxL1BatchNum < 1) fail("--maxL1BatchNum must be >= 1");
   for (const auto& [set, c] : {std::pair{"stam", &o.stamCsgm}, std::pair{"mobm", &o.mobmCsgm}}) {
+    if (c->maxL1TotalNum < 1) fail("--{}MaxL1TotalNum must be >= 1", set);
+    if (c->maxL1BatchNum < 1) fail("--{}MaxL1BatchNum must be >= 1", set);
     if (c->growMaxRetry < 0) fail("--{}GrowMaxRetry must be >= 0", set);
     if (!(c->csgm1AngleStep > 0 && c->csgm1AngleStep <= 180)) fail("--{}Csgm1AngleStep must be within (0, 180]", set);
     if (!(c->ramaFloor >= 0)) fail("--{}RamaFloor must be >= 0", set);
@@ -309,7 +310,7 @@ void validateOptions(const Options& o) {
 }
 
 std::string usageText() {
-  std::string s = std::format("OmegaDocker {}\n\nUsage: omegadocker --sta <file> --mob <file> [--mob <file> ...] "
+  std::string s = std::format("OmegaDocker {}\n\nUsage: omegadocker --stam <file> --mobm <file> [--mobm <file> ...] "
                               "--boxCenter x,y,z --boxSize x,y,z --outPrefix <path> [options]\n\nOptions:\n",
                               kVersion);
   for (const auto& d : optionTable()) {
