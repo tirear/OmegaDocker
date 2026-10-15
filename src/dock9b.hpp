@@ -5,6 +5,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -61,7 +62,7 @@ struct Dock9bStats {
   long long l1 = 0;          // L1poss generated
   long long overlap = 0;     // removed by 8.5
   long long far = 0;
-  long long outsideBox = 0;
+  long long outsideBox = 0;  // posm1: sampled orientation does not fit in the box
   long long l2 = 0;          // minimized
   long long leftGrid = 0;    // removed during minimization (spec 8.6)
   long long steps = 0;
@@ -74,17 +75,29 @@ class MobmDocker {
   // sys: energy system of the single MobM (parts = {mob}).
   MobmDocker(const EnergySystem& sys, const EnergyGrids& grids, const DistanceGrid& dist, const Dock9bParams& p);
 
+  // Lattice indices of the positions keeping every probe atom in the box
+  // for one orientation (spec 8.4); empty when lo > hi on an axis.
+  struct PosRange {
+    std::array<int, 3> lo{}, hi{};
+    long long count() const;
+  };
+
   // Conformation of a MobM sample in the torsion-tree frame.
   struct Conf {
     std::vector<double> anglesDeg;
     std::vector<Vec3> coords;  // all coordinates of sys.evaluate
     Vec3 center{};             // heavy-atom centre (unweighted)
+    // posm2: position range per Hopf orientation and the prefix sums of their counts.
+    std::vector<PosRange> hopfRange;
+    std::vector<long long> hopfOffset;
   };
   Conf conformation(std::span<const double> anglesDeg) const;
 
-  // L1pos k (0 <= k < l1Count()) of a conformation pair placed at center;
-  // stream: PRNG stream of the pair (posm1).
-  Pose l1Pose(std::uint64_t stream, long long k) const;
+  PosRange posRange(const Conf& c, const Quat& q) const;
+
+  // L1pos k (0 <= k < l1Count(c)); stream: PRNG stream of the pair (posm1).
+  // nullopt (posm1) when the sampled orientation does not fit in the box.
+  std::optional<Pose> l1Pose(const Conf& c, std::uint64_t stream, long long k) const;
   // 8.5 quick filter; updates the counters of stats.
   bool quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats) const;
 
@@ -106,7 +119,7 @@ class MobmDocker {
   // Appends the docking samples to out (in L1poss order).
   Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::vector<DockSample>& out) const;
 
-  long long l1Count() const;  // L1poss per conformation pair
+  long long l1Count(const Conf& c) const;  // L1poss per conformation pair
 
  private:
   const EnergySystem& sys_;

@@ -1959,71 +1959,115 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
     }
   for (int k = 0; k < 3; ++k) CHECK(c.center[k] == doctest::Approx(hc[k] / nh));
 
-  // posm1: lattice positions in the box, reproducible.
-  CHECK(dk.l1Count() == 400);
-  for (long long k = 0; k < 400; ++k) {
-    const auto a = dk.l1Pose(9, k), b = dk.l1Pose(9, k);
-    CHECK(a.q.w == b.q.w);
+  // Probe atoms (all real atoms) relative to the heavy-atom centre.
+  std::vector<od::Vec3> rel;
+  for (const auto& y : f.x.mobm.xyz) rel.push_back({y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
+  const auto allInside = [&](const od::Pose& pose, const od::Vec3& bc) {
+    for (const auto& y : rel) {
+      const auto r = od::rotate(pose.q, y);
+      for (int d = 0; d < 3; ++d)
+        if (std::abs(r[d] + pose.t[d] - bc[d]) > 24 + 1e-9) return false;
+    }
+    return true;
+  };
+  const auto onLattice = [&](const od::Pose& pose, const od::Vec3& bc) {
     for (int d = 0; d < 3; ++d) {
-      const double u = (a.t[d] - (f.p.boxCenter[d] - 24)) / f.p.posStep;
-      CHECK(u == doctest::Approx(std::round(u)).scale(1));
-      CHECK(u >= -1e-9);
-      CHECK(u <= 48 + 1e-9);
+      const double u = pose.t[d] - (bc[d] - 24);
+      if (std::abs(u - std::round(u)) > 1e-9 || u < -1e-9 || u > 48 + 1e-9) return false;
+    }
+    return true;
+  };
+
+  // posm1: lattice positions with every probe atom in the box, reproducible.
+  CHECK(dk.l1Count(c) == 400);
+  for (long long k = 0; k < 400; ++k) {
+    const auto a = dk.l1Pose(c, 9, k), b = dk.l1Pose(c, 9, k);
+    REQUIRE(a.has_value());  // 1L2Y fits in a 48 Å box in every orientation
+    CHECK(a->q.w == b->q.w);
+    CHECK(a->t == b->t);
+    CHECK(onLattice(*a, f.p.boxCenter));
+    CHECK(allInside(*a, f.p.boxCenter));
+  }
+  CHECK(dk.l1Pose(c, 9, 0)->t != dk.l1Pose(c, 10, 0)->t);
+  // The range is exact: one more lattice step leaves the box.
+  for (long long k = 0; k < 50; ++k) {
+    const auto q = dk.l1Pose(c, 9, k)->q;
+    const auto pr = dk.posRange(c, q);
+    for (int d = 0; d < 3; ++d) {
+      od::Pose lo{f.p.boxCenter, q}, hi{f.p.boxCenter, q};
+      lo.t[d] = f.p.boxCenter[d] - 24 + pr.lo[d] - 1;
+      hi.t[d] = f.p.boxCenter[d] - 24 + pr.hi[d] + 1;
+      od::Pose in = lo;
+      in.t[d] += 1;
+      CHECK(allInside(in, f.p.boxCenter) == (pr.lo[d] <= pr.hi[d]));
+      if (pr.lo[d] > 0) CHECK_FALSE(allInside(lo, f.p.boxCenter));
+      if (pr.hi[d] < 48) CHECK_FALSE(allInside(hi, f.p.boxCenter));
     }
   }
-  CHECK(dk.l1Pose(9, 0).t != dk.l1Pose(10, 0).t);
-  // posm2: positions x Hopf orientations.
+  // posm2: per Hopf orientation, exactly the lattice positions keeping the MobM in the box.
   DockFixture f2(od::Posm::Posm2);
   const od::MobmDocker dk2(*f2.x.mobSys, f2.grids, f2.dist, f2.p);
-  CHECK(dk2.l1Count() == 49LL * 49 * 49 * 72);
+  const auto c2 = dk2.conformation(angles);
   const auto hopf = od::hopfGrid(0);
-  CHECK(dk2.l1Pose(0, 73).q.x == hopf[1].x);
-  CHECK(dk2.l1Pose(0, 73).t[0] == doctest::Approx(f2.p.boxCenter[0] - 24 + 1));
+  REQUIRE(c2.hopfRange.size() == 72);
+  long long total = 0;
+  for (std::size_t j = 0; j < 72; ++j) {
+    const auto& pr = c2.hopfRange[j];
+    CHECK(pr.count() == (pr.hi[0] - pr.lo[0] + 1) * (pr.hi[1] - pr.lo[1] + 1) * (pr.hi[2] - pr.lo[2] + 1));
+    CHECK(c2.hopfOffset[j] == total);
+    total += pr.count();
+  }
+  CHECK(dk2.l1Count(c2) == total);
+  CHECK(total < 49LL * 49 * 49 * 72);
+  for (long long k = 0; k < total; k += 997) {
+    const auto pose = dk2.l1Pose(c2, 0, k);
+    REQUIRE(pose.has_value());
+    CHECK(onLattice(*pose, f2.p.boxCenter));
+    CHECK(allInside(*pose, f2.p.boxCenter));
+  }
+  const auto first1 = dk2.l1Pose(c2, 0, c2.hopfOffset[1]);
+  CHECK(first1->q.x == hopf[1].x);
+  for (int d = 0; d < 3; ++d) CHECK(first1->t[d] == doctest::Approx(f2.p.boxCenter[d] - 24 + c2.hopfRange[1].lo[d]));
+  const auto last0 = dk2.l1Pose(c2, 0, c2.hopfOffset[1] - 1);
+  CHECK(last0->q.x == hopf[0].x);
+  for (int d = 0; d < 3; ++d) CHECK(last0->t[d] == doctest::Approx(f2.p.boxCenter[d] - 24 + c2.hopfRange[0].hi[d]));
 
   // Quick filter against brute force.
   od::Dock9bStats st;
   int pass = 0;
   for (long long k = 0; k < 400; ++k) {
-    const auto pose = dk.l1Pose(1, k);
+    const auto pose = *dk.l1Pose(c, 1, k);
     int overlap = 0;
-    bool outside = false;
     double dmin = 1e9;
     for (std::size_t a = 0; a < f.x.mobm.size(); ++a) {
-      const auto& y = f.x.mobm.xyz[a];
-      const auto r = od::rotate(pose.q, {y[0] - hc[0] / nh, y[1] - hc[1] / nh, y[2] - hc[2] / nh});
-      const od::Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
-      for (int d = 0; d < 3; ++d) outside |= std::abs(w[d] - f.p.boxCenter[d]) > 24;
       if (!f.x.mobm.heavy[a]) continue;
-      for (std::size_t b = 0; b < f.x.stam.size(); ++b)
-        if (f.x.stam.heavy[b]) {
-          const double dx = w[0] - f.x.stam.xyz[b][0], dy = w[1] - f.x.stam.xyz[b][1], dz = w[2] - f.x.stam.xyz[b][2];
-          const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
-          dmin = std::min(dmin, d);
-        }
+      const auto r = od::rotate(pose.q, rel[a]);
+      const od::Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
       double da = 1e9;
       for (std::size_t b = 0; b < f.x.stam.size(); ++b)
         if (f.x.stam.heavy[b]) {
           const double dx = w[0] - f.x.stam.xyz[b][0], dy = w[1] - f.x.stam.xyz[b][1], dz = w[2] - f.x.stam.xyz[b][2];
           da = std::min(da, std::sqrt(dx * dx + dy * dy + dz * dz));
         }
+      dmin = std::min(dmin, da);
       if (da < 1.7) ++overlap;  // margin for interpolation of the distance grid
     }
     const bool ok = dk.quickFilter(c, pose, st);
     pass += ok;
-    if (outside) CHECK_FALSE(ok);
     if (ok) {
       CHECK(overlap == 0);
       CHECK(dmin < 6.3);
     }
   }
-  CHECK(st.outsideBox + st.overlap + st.far + pass == 400);
-  MESSAGE("quick filter: pass ", pass, ", outside box ", st.outsideBox, ", overlap ", st.overlap, ", far ", st.far);
+  CHECK(st.outsideBox == 0);
+  CHECK(st.overlap + st.far + pass == 400);
+  MESSAGE("quick filter: pass ", pass, ", overlap ", st.overlap, ", far ", st.far);
   CHECK(pass > 0);
 
   // Gradient against finite differences at passing poses.
   int checked = 0;
   for (long long k = 0; k < 400 && checked < 3; ++k) {
-    const auto pose = dk.l1Pose(1, k);
+    const auto pose = *dk.l1Pose(c, 1, k);
     od::Dock9bStats s;
     if (!dk.quickFilter(c, pose, s)) continue;
     ++checked;
@@ -2087,13 +2131,14 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
   std::vector<long long> l2;
   for (long long k = 0; k < 1500; ++k) {
     od::Dock9bStats s;
-    if (dk.quickFilter(c, dk.l1Pose(5, k), s)) l2.push_back(k);
+    const auto pose = dk.l1Pose(c, 5, k);
+    if (pose && dk.quickFilter(c, *pose, s)) l2.push_back(k);
   }
   std::size_t j = 0;
   for (long long k : l2) {
     od::DockSample s;
     od::Dock9bStats s2;
-    const auto start = dk.l1Pose(5, k);
+    const auto start = *dk.l1Pose(c, 5, k);
     if (!dk.minimize(c, start, s, s2)) continue;
     REQUIRE(j < out.size());
     CHECK(s.energy == out[j].energy);  // same result as the parallel run, same order

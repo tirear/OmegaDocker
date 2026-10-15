@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.18 |
+| 文件版本 | 1.19 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -94,7 +94,7 @@
 
 - `--boxCenter x,y,z`、`--boxSize x,y,z`（Å）。
 - 能量網格與距離網格涵蓋此範圍。
-- 任何 pos 使 MobM 有原子超出範圍即被移除（8.5）。
+- posm1、posm2 只產生使 MobM 所有探針原子都在範圍內的 pos（8.4）；8.5 仍保留「超出範圍」檢查。
 
 ---
 
@@ -742,16 +742,25 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 每個構型配對各自產生 L1poss。
 
+**位置格點與定向的精確範圍（posm1、posm2 共用）**
+- 位置格點：MobM 重原子中心 t（8.3）取 `boxMin + posStep × i`，`boxMin = boxCenter − boxSize/2`，每軸 `i = 0～floor(boxSize / posStep)`；`posStep` 預設 1 Å。
+- 定向 q 決定後，以所有探針原子（8.1）相對重原子中心 c 旋轉後的座標 `r = R(q)(y − c)`，求每軸 `lo = min r`、`hi = max r`。
+- 合法範圍：`boxMin ≤ t + lo` 且 `t + hi ≤ boxMax`，即 `i` 在 `ceil(−lo / posStep)`～`floor((boxSize − hi) / posStep)` 之間。此範圍是精確的：範圍內的 pos 所有探針原子都在對接範圍內，多一格即有原子超出。
+- 某軸範圍為空時，該定向放不下，沒有位置。
+- 不使用 radius / diameter of gyration：Rg 不保證所有原子在範圍內，2Rg 與最遠原子距離則與定向無關，會排除細長分子在部分定向下放得下的位置。
+
 #### 8.4.1 posm1：隨機取樣
-- 位置（MobM 重原子中心的位置，8.3）：`boxMin + posStep × 整數亂數`，`posStep` 預設 1 Å。每軸整數亂數均勻取自 0～`floor(boxSize / posStep)`（`boxMin = boxCenter − boxSize/2`）。
+- 先取定向（Shoemake 隨機四元數），再於該定向的合法範圍內，每軸均勻取整數 i。
+- 定向放不下時，該 L1pos 計為「超出範圍」並捨棄，不重新抽定向（避免定向分佈偏向放得下的定向）。
 - 亂數：第 k 個 L1pos 只由 `(seed, 構型配對的串流, k)` 決定；串流由（輪次、MobM 編號、StaM 構型樣本 ID、MobM 構型樣本 ID）雜湊而得，與執行緒數無關。
-- 定向：Shoemake 隨機四元數。
-- 數量：`posm1SampleNum`（每個構型配對，預設 1000）。
+- 數量：`posm1SampleNum`（每個構型配對，預設 1000，含捨棄者）。
+- 所有 L1pos 都被捨棄時輸出警告，提示 `--boxSize` 可能太小。
 
 #### 8.4.2 posm2：均勻完整取樣
-- 位置（MobM 重原子中心的位置，8.3）：對接範圍內 X、Y、Z 以 `posStep`（預設 1 Å）均勻取點，每軸 `floor(boxSize / posStep) + 1` 點，由 `boxMin` 起算。
 - 定向：Hopf 格點（`rotStep`，預設 7.5°）。
-- 樣本數 = 位置數 × 定向數，全部進入篩選與最佳化。
+- 位置：每個定向只取其合法範圍內的格點。
+- 樣本數 = Σ（各定向的合法格點數），全部進入篩選與最佳化。順序以定向為外層、位置為內層。
+- 樣本數為 0 時輸出警告。
 
 #### 8.4.3 posm2_fft：FFT 均勻完整取樣
 1. 每個 StaM 構型：對各原子類型網格（含靜電、去溶劑化）做 FFT，結果快取。
@@ -804,6 +813,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - d 由距離網格三線性內插取得；「重疊」「太遠」只看重原子，「超出範圍」看所有探針原子（8.1）。
 - 檢查順序：超出範圍 → 重疊 → 太遠；每個 pos 只計入第一個成立的條件。
+- posm1、posm2 產生的 pos 已在範圍內（8.4），「超出範圍」只作為保險；posm1 放不下的定向也計入此項。
 
 ### 8.6 9b 最佳化
 
@@ -1235,3 +1245,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.16 | 2026-10-15 | 實作定向（8.3）：四元數、Shoemake 隨機定向、Hopf 格點的取點方式與實測間距；新增 `--rotStep` |
 | 1.17 | 2026-10-15 | 輸入參數改為 `--stamFile`、`--mobmFiles`（3.2）；定向的旋轉中心與 posm1／posm2 的位置改為 MobM 重原子中心（8.3、8.4）；9b 最佳化中移出網格即移除該 pos（8.1、8.6） |
 | 1.18 | 2026-10-15 | 實作 9b 的 posm1、posm2、8.5 快速篩選、L-BFGS 與 9b 最佳化（CPU 參考版）：補充位置取樣範圍、亂數串流、篩選順序、pose 座標定義、旋轉增量、StaM–MobM 碰撞懲罰、L-BFGS 細節（8.4、8.5、8.6、12）；新增 `--posm`、`--posStep`、`--posm1SampleNum`、`--maxOverlapAtomNum`、`--dockMin*`、`--lbfgsMemory`、`--scale*`、`--maxTransStep`、`--maxAngleStep` |
+| 1.19 | 2026-10-15 | posm1、posm2 依每個定向計算 MobM 重原子中心的精確位置範圍（探針原子旋轉後的每軸上下限），只產生所有探針原子都在對接範圍內的 pos；posm1 定向放不下時捨棄不重抽；全部放不下時輸出警告（3.3、8.4、8.5） |

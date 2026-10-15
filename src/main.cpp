@@ -407,6 +407,8 @@ int run(int argc, char** argv) {
                               "L2poss {}  left grid {}  docking samples {}  steps/pose {:.1f}  {:.2f} s",
                               mobs[i].id, confs.size(), st.l1, st.outsideBox, st.overlap, st.far, st.l2, st.leftGrid,
                               samples.size(), st.l2 > 0 ? static_cast<double>(st.steps) / st.l2 : 0.0, sec));
+      if (st.l1 == st.outsideBox)
+        od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger --boxSize", mobs[i].id));
       if (samples.empty()) continue;
       std::sort(samples.begin(), samples.end(), [](const auto& a, const auto& b) { return a.energy < b.energy; });
       std::string top;

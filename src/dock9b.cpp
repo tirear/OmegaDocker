@@ -65,9 +65,34 @@ MobmDocker::MobmDocker(const EnergySystem& sys, const EnergyGrids& grids, const 
   if (p.posm == Posm::Posm2) hopf_ = hopfGrid(p.hopfLevel);
 }
 
-long long MobmDocker::l1Count() const {
+long long MobmDocker::PosRange::count() const {
+  long long n = 1;
+  for (int d = 0; d < 3; ++d) n *= std::max(0, hi[d] - lo[d] + 1);
+  return n;
+}
+
+long long MobmDocker::l1Count(const Conf& c) const {
   if (p_.posm == Posm::Posm1) return p_.posm1SampleNum;
-  return static_cast<long long>(posN_[0]) * posN_[1] * posN_[2] * static_cast<long long>(hopf_.size());
+  return c.hopfOffset.back();
+}
+
+MobmDocker::PosRange MobmDocker::posRange(const Conf& c, const Quat& q) const {
+  Vec3 lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
+  for (int k : probe_) {
+    const Vec3& y = c.coords[k];
+    const Vec3 r = rotate(q, {y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
+    for (int d = 0; d < 3; ++d) {
+      lo[d] = std::min(lo[d], r[d]);
+      hi[d] = std::max(hi[d], r[d]);
+    }
+  }
+  // Centre t = boxMin + i * posStep with boxMin <= t + lo and t + hi <= boxMax.
+  PosRange pr;
+  for (int d = 0; d < 3; ++d) {
+    pr.lo[d] = std::max(0, static_cast<int>(std::ceil(-lo[d] / p_.posStep - 1e-9)));
+    pr.hi[d] = std::min(posN_[d] - 1, static_cast<int>(std::floor((p_.boxSize[d] - hi[d]) / p_.posStep + 1e-9)));
+  }
+  return pr;
 }
 
 MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) const {
@@ -81,23 +106,37 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
       ++n;
     }
   for (double& v : c.center) v /= n;
+  if (p_.posm == Posm::Posm2) {
+    c.hopfRange.resize(hopf_.size());
+    c.hopfOffset.assign(hopf_.size() + 1, 0);
+#pragma omp parallel for schedule(static)
+    for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfRange[j] = posRange(c, hopf_[j]);
+    for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfOffset[j + 1] = c.hopfOffset[j] + c.hopfRange[j].count();
+  }
   return c;
 }
 
-Pose MobmDocker::l1Pose(std::uint64_t stream, long long k) const {
+std::optional<Pose> MobmDocker::l1Pose(const Conf& conf, std::uint64_t stream, long long k) const {
   Pose pose;
   std::array<long long, 3> idx{};
   if (p_.posm == Posm::Posm1) {
     Rng rng(p_.seed, stream, static_cast<std::uint64_t>(k));
-    for (int c = 0; c < 3; ++c) idx[c] = static_cast<long long>(rng.below(static_cast<std::uint64_t>(posN_[c])));
     pose.q = randomQuat(rng);
+    const PosRange pr = posRange(conf, pose.q);
+    if (pr.count() == 0) return std::nullopt;
+    for (int c = 0; c < 3; ++c)
+      idx[c] = pr.lo[c] + static_cast<long long>(rng.below(static_cast<std::uint64_t>(pr.hi[c] - pr.lo[c] + 1)));
   } else {
-    const long long nr = static_cast<long long>(hopf_.size());
-    pose.q = hopf_[k % nr];
-    long long pos = k / nr;
+    // Orientation-major order: orientation j covers [hopfOffset[j], hopfOffset[j + 1]).
+    const auto it = std::upper_bound(conf.hopfOffset.begin(), conf.hopfOffset.end(), k);
+    const std::size_t j = static_cast<std::size_t>(it - conf.hopfOffset.begin()) - 1;
+    pose.q = hopf_[j];
+    const PosRange& pr = conf.hopfRange[j];
+    long long pos = k - conf.hopfOffset[j];
     for (int c = 0; c < 3; ++c) {
-      idx[c] = pos % posN_[c];
-      pos /= posN_[c];
+      const long long w = pr.hi[c] - pr.lo[c] + 1;
+      idx[c] = pr.lo[c] + pos % w;
+      pos /= w;
     }
   }
   for (int c = 0; c < 3; ++c)
@@ -249,7 +288,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
 Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream,
                                  std::vector<DockSample>& out) const {
   const Conf c = conformation(mobAnglesDeg);
-  const long long n = l1Count();
+  const long long n = l1Count(c);
   Dock9bStats total;
   total.l1 = n;
   std::vector<long long> l2;
@@ -258,8 +297,11 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
     Dock9bStats st;
     std::vector<long long> mine;
 #pragma omp for schedule(static) nowait
-    for (long long k = 0; k < n; ++k)
-      if (quickFilter(c, l1Pose(stream, k), st)) mine.push_back(k);
+    for (long long k = 0; k < n; ++k) {
+      const auto pose = l1Pose(c, stream, k);
+      if (!pose) ++st.outsideBox;
+      else if (quickFilter(c, *pose, st)) mine.push_back(k);
+    }
 #pragma omp critical
     {
       total += st;
@@ -274,7 +316,7 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
   {
     Dock9bStats st;
 #pragma omp for schedule(dynamic, 1) nowait
-    for (std::size_t i = 0; i < l2.size(); ++i) ok[i] = minimize(c, l1Pose(stream, l2[i]), res[i], st);
+    for (std::size_t i = 0; i < l2.size(); ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[i]), res[i], st);
 #pragma omp critical
     {
       total.leftGrid += st.leftGrid;
