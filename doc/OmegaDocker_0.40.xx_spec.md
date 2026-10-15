@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.26 |
+| 文件版本 | 1.27 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -434,7 +434,7 @@ flowchart TD
   A --> B["9b 對接樣本生成<br/>取樣 pos → 篩選 → 最佳化"]
   B --> C["9c 排序、多樣性篩選<br/>更新 topSampleSet、篩選 dcss"]
   C --> CP["寫出檢查點（第 16 節）"] --> R
-  R -- 否 --> D["9d 精確重算能量、分群、輸出"]
+  R -- 否 --> D["9d 精確重算能量、對稱修正篩選、輸出"]
 ```
 
 - 每個 MobM 各自擁有：MobM 的 dcss / L2 pool、**StaM 的 dcss**、topSampleSet。
@@ -886,17 +886,17 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ## 10. 9d：停止與輸出
 
 - 停止條件：輪數達 `maxRound`。
-- 目前只實作到 9c：所有輪次結束後，在執行紀錄列出每個 MobM 的 topSampleSet（能量、StaM／MobM 構型樣本 ID、位置）；精確重算、分群與檔案輸出尚未實作。
+- 目前只實作到 9c：所有輪次結束後，在執行紀錄列出每個 MobM 的 topSampleSet（能量、StaM／MobM 構型樣本 ID、位置）；精確重算與檔案輸出尚未實作。
 - 精確重算：沿用目前 OmegaDocker 的 CPU 重算流程（`make_resfiles` 中的 `calc_interE_f`、`calc_intraE_f`），本版不改能量函式。
 - 對稱修正篩選（目前已實作，在所有輪次結束後執行）：依最終 topSampleSet 的順序（能量由低到高），與已保留樣本「使用相同 StaM 構型」且對稱修正 RMSD < `diversityRmsd` 的樣本移除；執行紀錄顯示移除數。質心距離加速同 9c（兩種對稱修正都是一對一配對）。
   - 對稱修正 RMSD：MobM 重原子圖（標記為 AD4 類型，不分鍵級，不含金屬配位鍵）的自同構數 ≤ `symMaxPerm` 時，取所有自同構中最小的 RMSD（C1）；超過時，在每個 AD4 類型內以 Hungarian 法求最佳一對一配對（C2，不考慮鍵結）。
   - 自同構於啟動時列舉一次（色彩細化後回溯），列舉到 `symMaxPerm` + 1 個即停止。
   - `symMaxPerm` 預設 256。實測（CPU 單執行緒）：C1 每個自同構約 0.15 µs（154 個重原子）至 0.37 µs（405 個重原子），與自同構數成正比；C2 約 26 µs（154 個重原子）、235 µs（405 個重原子）。兩者相等的自同構數約 170–650。
-- 分群：沿用 AutoDock-GPU 的 RMSD 分群（`rmstol` 預設 2.0 Å）。
+- 不分群：9c 與 9d 篩選後，以相同門檻分群只會得到單一成員的群，因此不做分群（1.27）。
 - 輸出（每個 MobM 一個目錄 `<outPrefix>/<MobM id>/`）：
   - 每個 top 樣本：MobM 座標，依下表啟用的格式各輸出一份。
   - 每個被使用到的 StaM 構型：依下表啟用的格式各輸出一份。
-  - `summary.tsv`：排名、能量各項、使用的 StaM 構型編號、分群編號（一律輸出）。
+  - `summary.tsv`：排名、能量各項、使用的 StaM 構型編號（一律輸出）。
 
 | 格式 | 參數 | 預設 | 副檔名 |
 |---|---|---|---|
@@ -1302,3 +1302,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.24 | 2026-10-15 | StaM 群完全不可動時，網格與距離網格跨輪快取；其他情況每輪重建（6） |
 | 1.25 | 2026-10-15 | 新增 sampleBuffer：9b 在構型配對內分批最佳化，對接樣本每達 `sampleBufferNum`（至少 4 × `topSampleNum`）就先執行 9c 步驟 1–4；無對接樣本的本輪最低能量記為 +∞；新增 `--sampleBufferNum`（9、13、14） |
 | 1.26 | 2026-10-15 | 9c 改用原子固定配對 RMSD 加質心距離加速（質心雜湊）；所有輪次結束後以對稱修正 RMSD（C1 自同構、C2 Hungarian）篩選最終 topSampleSet 並顯示移除數；新增 `--symMaxPerm`（預設 256）；記錄 sampleBuffer 與對稱修正的實測（9、10、14） |
+| 1.27 | 2026-10-15 | 9d 不分群，`summary.tsv` 移除分群編號（10） |
