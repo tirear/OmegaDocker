@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.28 |
+| 文件版本 | 1.29 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -858,15 +858,15 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 **分批（sampleBuffer）**：
 - 9b 產生的對接樣本先放入每個 MobM 各自的 sampleBuffer；每當其中的樣本數 ≥ `sampleBufferNum`，就先對「目前的 topSampleSet ∪ sampleBuffer」執行步驟 1–4（合併時 topSampleSet 在前），清空 sampleBuffer 後回到 9b 繼續；本輪全部對接完後，再對剩下的樣本執行一次步驟 1–4，然後做步驟 5。
-- 中間的 9c（本輪最後一次以外）在步驟 4 保留 `midTopSampleFactor` × `topSampleNum` 個；本輪最後一次保留 `topSampleNum` 個。`midTopSampleFactor` 預設 2；設為 1 即每次都保留 `topSampleNum` 個（1.27 以前的行為）。
-- `sampleBufferNum` 預設 65536；實際值 = max(`sampleBufferNum`, (`midTopSampleFactor` + 2) × `topSampleNum`)。
+- 中間的 9c（本輪最後一次以外）在步驟 4 保留 `midTopSampleFactor` × `topSampleNum` 個；本輪最後一次保留 `topSampleNum` 個。`midTopSampleFactor` 預設 1（每次都保留 `topSampleNum` 個），大於 1 僅供實驗（實測無明顯改善，見下）。
+- `sampleBufferNum` 預設 65536；實際值 = max(`sampleBufferNum`, max(4, `midTopSampleFactor` + 2) × `topSampleNum`)，即預設至少 4 × `topSampleNum`；`midTopSampleFactor` > 2 時，每次 9c 的新樣本數至少為保留數的 2 倍。
 - 9b 在一個構型配對內也分批最佳化：每批 `sampleBufferNum` 個 L2pos（依 L1pos 序號），每批結束後把對接樣本放入 sampleBuffer 並檢查是否達到上限。批次邊界只由對接順序決定，與執行緒數無關。
 - 分批的結果與一次做完不一定相同（9b 的對接樣本相同：每個樣本的最佳化只取決於 seed、構型配對與 L1pos 序號）。不使用多樣性篩選時兩者相同。差異有兩個來源：
   - 截掉後空出位置：某次 9c 中樣本 S 排在保留數之外而被丟棄；之後更低能量的樣本 L 使已保留的 K 被跳過，空出位置。一次做完時 S 會入選。`midTopSampleFactor` > 1 針對此來源。
   - 被之後消失的樣本擋掉：S 因與已保留的 K 太相似而被跳過；之後 K 又因更低能量的 L 被跳過，而 S 與 L 不相似。一次做完時 S 會入選。此來源與保留數無關。
 - 步驟 5 的本輪最低能量跨批累計，不受分批影響。
 - `sampleBufferNum` 太小時，每批可平行處理的樣本少，平行效率較差。
-- 實測（BTN 對 2KJJ，StaM 不可動，posm2、`--rotStep 15`、`--posStep 2`、`--mobmDockingConfSampleNum 4`，1 輪 5,444,698 個對接樣本；CPU 執行，9b 約 290–298 s，各設定相同）。「分批」為 `sampleBufferNum` 65536（`topSampleNum` 20000 時實際為 (`midTopSampleFactor` + 2) × 20000）；「一次」為 `sampleBufferNum` 2,000,000,000，即全部對接完才執行 9c。「共同」：最終 topSampleSet（9d 篩選後）中與「一次」相同的樣本數；「較差名次」：依能量排序後逐名次比較，能量高於「一次」的名次數。
+- 實測（BTN 對 2KJJ，StaM 不可動，posm2、`--rotStep 15`、`--posStep 2`、`--mobmDockingConfSampleNum 4`，1 輪 5,444,698 個對接樣本；CPU 執行，9b 約 290–298 s，各設定相同）。「分批」為 `sampleBufferNum` 65536（`topSampleNum` 20000 時實際為 max(4, `midTopSampleFactor` + 2) × 20000，即 ×1、×2 為 80000，×4 為 120000）；「一次」為 `sampleBufferNum` 2,000,000,000，即全部對接完才執行 9c。「共同」：最終 topSampleSet（9d 篩選後）中與「一次」相同的樣本數；「較差名次」：依能量排序後逐名次比較，能量高於「一次」的名次數。
 
   | topSampleNum | 方式 | 9c 次數 | 9c 時間 | 主機記憶體 | topSampleSet 最高能量 | 最終數 | 共同 | 較差名次 |
   |---|---|---|---|---|---|---|---|---|
@@ -1073,8 +1073,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--dockMinDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
 | `--topSampleNum` | eliteStaM × eliteMobM | 9 |
 | `--diversityRmsd` | 2.0 Å | 9 |
-| `--sampleBufferNum` | 65536（至少 (`midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
-| `--midTopSampleFactor` | 2 | 9 |
+| `--sampleBufferNum` | 65536（至少 max(4, `midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
+| `--midTopSampleFactor` | 1 | 9 |
 | `--symMaxPerm` | 256 | 10 |
 | `--lbfgsMemory` | 7 | 12 |
 | `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
@@ -1335,3 +1335,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.26 | 2026-10-15 | 9c 改用原子固定配對 RMSD 加質心距離加速（質心雜湊）；所有輪次結束後以對稱修正 RMSD（C1 自同構、C2 Hungarian）篩選最終 topSampleSet 並顯示移除數；新增 `--symMaxPerm`（預設 256）；記錄 sampleBuffer 與對稱修正的實測（9、10、14） |
 | 1.27 | 2026-10-15 | 9d 不分群，`summary.tsv` 移除分群編號（10） |
 | 1.28 | 2026-10-15 | 新增 `--midTopSampleFactor`（預設 2）：中間的 9c 保留 `midTopSampleFactor` × `topSampleNum` 個；`sampleBufferNum` 下限改為 (`midTopSampleFactor` + 2) × `topSampleNum`；說明分批差異的兩個來源，記錄分批實測表與使用建議（9、13、14） |
+| 1.29 | 2026-10-15 | `--midTopSampleFactor` 預設改為 1（大於 1 僅供實驗）；`sampleBufferNum` 下限改為 max(4, `midTopSampleFactor` + 2) × `topSampleNum`，預設維持 4 × `topSampleNum`（9、13） |

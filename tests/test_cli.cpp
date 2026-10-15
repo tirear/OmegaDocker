@@ -45,7 +45,7 @@ TEST_CASE("cli: required options and values") {
   CHECK_FALSE(o.topSampleNum);
   CHECK(o.diversityRmsd == doctest::Approx(2.0));
   CHECK(o.sampleBufferNum == 65536);
-  CHECK(o.midTopSampleFactor == 2);
+  CHECK(o.midTopSampleFactor == 1);
   CHECK(o.symMaxPerm == 256);
   CHECK_NOTHROW(od::validateOptions(o));
 
@@ -97,10 +97,10 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.diversityRmsd = 2;
   CHECK(parse({"--sampleBufferNum", "100"}).sampleBufferNum == 100);
-  CHECK(parse({"--midTopSampleFactor", "1"}).midTopSampleFactor == 1);
+  CHECK(parse({"--midTopSampleFactor", "2"}).midTopSampleFactor == 2);
   o.midTopSampleFactor = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
-  o.midTopSampleFactor = 2;
+  o.midTopSampleFactor = 1;
   o.sampleBufferNum = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.sampleBufferNum = 100;

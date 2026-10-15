@@ -328,7 +328,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
-    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(opt.midTopSampleFactor + 2) *
+    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(std::max(4, opt.midTopSampleFactor + 2)) *
                                                                        static_cast<std::size_t>(ms[i].topNum));
     const auto s0 = std::chrono::steady_clock::now();
     ms[i].sym = std::make_unique<od::SymmetryRmsd>(*mobSets[i]->parts()[0].mol, ms[i].heavy->atoms(), ms[i].heavy->types(),
