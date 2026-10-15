@@ -206,8 +206,10 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.topSampleNum = parseInt32("topSampleNum", v); }},
       {"diversityRmsd", Kind::Value, "<dist>", "2.0", "9c: samples with the same StaM conformation closer than this RMSD to a kept sample are skipped (Å; 0 disables)",
        [](Options& o, const std::string& v) { o.diversityRmsd = parseDouble("diversityRmsd", v); }},
-      {"sampleBufferNum", Kind::Value, "<n>", "65536", "9b/9c: run 9c whenever this many docking samples are waiting (at least 4 x topSampleNum)",
+      {"sampleBufferNum", Kind::Value, "<n>", "65536", "9b/9c: run 9c whenever this many docking samples are waiting (at least (midTopSampleFactor + 2) x topSampleNum)",
        [](Options& o, const std::string& v) { o.sampleBufferNum = parseInt32("sampleBufferNum", v); }},
+      {"midTopSampleFactor", Kind::Value, "<n>", "2", "9c: the 9c runs before the last one of a round keep this many x topSampleNum samples (1: keep topSampleNum)",
+       [](Options& o, const std::string& v) { o.midTopSampleFactor = parseInt32("midTopSampleFactor", v); }},
       {"symMaxPerm", Kind::Value, "<n>", "256", "9d: symmetry-corrected RMSD over the graph automorphisms when there are at most this many; otherwise one-to-one pairing within each AD4 type",
        [](Options& o, const std::string& v) { o.symMaxPerm = parseInt32("symMaxPerm", v); }},
       {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
@@ -350,6 +352,7 @@ void validateOptions(const Options& o) {
   if (o.topSampleNum && *o.topSampleNum < 1) fail("--topSampleNum must be >= 1");
   if (!(o.diversityRmsd >= 0)) fail("--diversityRmsd must be >= 0");
   if (o.sampleBufferNum < 1) fail("--sampleBufferNum must be >= 1");
+  if (o.midTopSampleFactor < 1) fail("--midTopSampleFactor must be >= 1");
   if (o.symMaxPerm < 0) fail("--symMaxPerm must be >= 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");

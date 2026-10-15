@@ -74,6 +74,7 @@ struct Options {
   std::optional<int> topSampleNum;  // default: eliteStaM x eliteMobM (spec 9)
   double diversityRmsd = 2.0;
   int sampleBufferNum = 65536;
+  int midTopSampleFactor = 2;
   int symMaxPerm = 256;  // raised to 4 x topSampleNum when smaller (spec 9)
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...

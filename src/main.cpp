@@ -328,7 +328,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
-    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, 4 * static_cast<std::size_t>(ms[i].topNum));
+    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(opt.midTopSampleFactor + 2) *
+                                                                       static_cast<std::size_t>(ms[i].topNum));
     const auto s0 = std::chrono::steady_clock::now();
     ms[i].sym = std::make_unique<od::SymmetryRmsd>(*mobSets[i]->parts()[0].mol, ms[i].heavy->atoms(), ms[i].heavy->types(),
                                                    static_cast<std::size_t>(opt.symMaxPerm));
@@ -370,13 +371,16 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<std::vector<od::RoundSample>> buffer(ms.size());
     std::vector<double> selectSec(ms.size(), 0);
     // 9c steps 1-4 on the topSampleSet and the waiting docking samples (spec 9).
-    auto select = [&](std::size_t i) {
+    auto select = [&](std::size_t i, bool last) {
       MobState& m = ms[i];
       std::vector<od::RoundSample> merged = std::move(m.top);
       merged.insert(merged.end(), std::make_move_iterator(buffer[i].begin()), std::make_move_iterator(buffer[i].end()));
       buffer[i].clear();
       const auto c0 = std::chrono::steady_clock::now();
-      m.top = od::selectTopSamples(std::move(merged), *m.heavy, m.topNum, opt.diversityRmsd);
+      m.top = od::selectTopSamples(std::move(merged), *m.heavy, last ? m.topNum
+                                        : static_cast<int>(std::min<long long>(
+                                              1LL * opt.midTopSampleFactor * m.topNum, std::numeric_limits<int>::max())),
+                                   opt.diversityRmsd);
       selectSec[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
     };
     double gridSec = 0;
@@ -427,7 +431,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                                    buffer[i].push_back({sid, mid, std::move(s)});
                                  }
                                  if (buffer[i].size() >= ms[i].bufferNum) {
-                                   select(i);
+                                   select(i, false);
                                    ++partial[i];
                                  }
                                });
@@ -468,7 +472,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           upd(stamLowest, a);
           upd(mobLowest, b);
         }
-      select(i);
+      select(i, true);
       const float eTop = od::topMaxEnergy(m.top);
       const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
       const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
