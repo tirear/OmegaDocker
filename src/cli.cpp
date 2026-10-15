@@ -170,6 +170,36 @@ const std::vector<OptionDef>& optionTable() {
        }},
       {"gridSpacing", Kind::Value, "<dist>", "0.375", "9b: spacing of the energy and distance grids (Å)",
        [](Options& o, const std::string& v) { o.gridSpacing = parseDouble("gridSpacing", v); }},
+      {"posm", Kind::Value, "posm1|posm2", "required", "9b: position and orientation sampling method",
+       [](Options& o, const std::string& v) {
+         if (v == "posm2_fft" || v == "posm3" || v == "posm4") fail("--posm {} is not implemented yet", v);
+         if (v != "posm1" && v != "posm2") fail("--posm: expected posm1 or posm2 but got '{}'", v);
+         o.posm = v;
+       }},
+      {"posStep", Kind::Value, "<dist>", "1", "9b: spacing of the sampled positions of the MobM heavy-atom centre (Å)",
+       [](Options& o, const std::string& v) { o.posStep = parseDouble("posStep", v); }},
+      {"posm1SampleNum", Kind::Value, "<n>", "1000", "9b, posm1: L1poss per conformation pair",
+       [](Options& o, const std::string& v) { o.posm1SampleNum = parseInt("posm1SampleNum", v); }},
+      {"maxOverlapAtomNum", Kind::Value, "<n>", "1", "9b: poses with this many MobM heavy atoms closer than --clashDistance to the StaM are removed",
+       [](Options& o, const std::string& v) { o.maxOverlapAtomNum = parseInt32("maxOverlapAtomNum", v); }},
+      {"dockMinMaxStep", Kind::Value, "<n>", "1000", "9b minimization: largest number of steps",
+       [](Options& o, const std::string& v) { o.dockMinMaxStep = parseInt32("dockMinMaxStep", v); }},
+      {"dockMinConvSteps", Kind::Value, "<n>", "10", "9b minimization: stop after this many consecutive steps with |dE| < --dockMinDeltaE",
+       [](Options& o, const std::string& v) { o.dockMinConvSteps = parseInt32("dockMinConvSteps", v); }},
+      {"dockMinDeltaE", Kind::Value, "<E>", "1e-3", "9b minimization: energy change regarded as converged (kcal/mol)",
+       [](Options& o, const std::string& v) { o.dockMinDeltaE = parseDouble("dockMinDeltaE", v); }},
+      {"lbfgsMemory", Kind::Value, "<n>", "7", "L-BFGS: number of stored steps",
+       [](Options& o, const std::string& v) { o.lbfgsMemory = parseInt32("lbfgsMemory", v); }},
+      {"scaleTrans", Kind::Value, "<s>", "1", "9b minimization: scale of the translation variables (Å)",
+       [](Options& o, const std::string& v) { o.scaleTrans = parseDouble("scaleTrans", v); }},
+      {"scaleRot", Kind::Value, "<s>", "1", "9b minimization: scale of the rotation variables (rad)",
+       [](Options& o, const std::string& v) { o.scaleRot = parseDouble("scaleRot", v); }},
+      {"scaleTors", Kind::Value, "<s>", "1", "9b minimization: scale of the torsion variables (rad)",
+       [](Options& o, const std::string& v) { o.scaleTors = parseDouble("scaleTors", v); }},
+      {"maxTransStep", Kind::Value, "<dist>", "0.5", "9b minimization: largest translation per step (Å)",
+       [](Options& o, const std::string& v) { o.maxTransStep = parseDouble("maxTransStep", v); }},
+      {"maxAngleStep", Kind::Value, "<deg>", "10", "9b minimization: largest rotation and torsion change per step",
+       [](Options& o, const std::string& v) { o.maxAngleStep = parseDouble("maxAngleStep", v); }},
       {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
        [](Options& o, const std::string& v) { o.rotStep = parseDouble("rotStep", v); }},
       {"maxNearDistance", Kind::Value, "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -295,6 +325,17 @@ void validateOptions(const Options& o) {
   if (!(o.gridSpacing > 0)) fail("--gridSpacing must be > 0");
   if (!(o.maxNearDistance > 0)) fail("--maxNearDistance must be > 0");
   if (!(o.rotStep > 0)) fail("--rotStep must be > 0");
+  if (o.posm.empty()) fail("--posm is required");
+  if (!(o.posStep > 0)) fail("--posStep must be > 0");
+  if (o.posm1SampleNum < 1) fail("--posm1SampleNum must be >= 1");
+  if (o.maxOverlapAtomNum < 1) fail("--maxOverlapAtomNum must be >= 1");
+  if (o.dockMinMaxStep < 0) fail("--dockMinMaxStep must be >= 0");
+  if (o.dockMinConvSteps < 1) fail("--dockMinConvSteps must be >= 1");
+  if (!(o.dockMinDeltaE >= 0)) fail("--dockMinDeltaE must be >= 0");
+  if (o.lbfgsMemory < 1) fail("--lbfgsMemory must be >= 1");
+  if (!(o.scaleTrans > 0 && o.scaleRot > 0 && o.scaleTors > 0)) fail("--scaleTrans, --scaleRot, --scaleTors must be > 0");
+  if (!(o.maxTransStep > 0)) fail("--maxTransStep must be > 0");
+  if (!(o.maxAngleStep > 0)) fail("--maxAngleStep must be > 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {

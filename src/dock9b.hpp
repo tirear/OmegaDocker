@@ -1,0 +1,127 @@
+// OmegaDocker: an OligoMEr-supported and Gpu-Accelerated Docking program
+// Copyright (C) 2026 Gao Quan-Ze.
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
+#pragma once
+#include <array>
+#include <cstdint>
+#include <span>
+#include <vector>
+
+#include "energy.hpp"
+#include "grid.hpp"
+#include "minimize.hpp"
+#include "orient.hpp"
+
+namespace od {
+
+// 9b docking of one MobM against one StaM conformation (spec 8.4–8.6).
+// CPU reference implementation.
+
+enum class Posm { Posm1, Posm2 };
+
+struct Dock9bParams {
+  Posm posm = Posm::Posm1;
+  double posStep = 1.0;          // Å
+  int hopfLevel = 3;             // posm2 orientations (rotStep)
+  long long posm1SampleNum = 1000;
+  Vec3 boxCenter{}, boxSize{};
+  int maxOverlapAtomNum = 1;
+  double maxNearDistance = 6.0;
+  double clashDistance = 1.8;
+  double clashBase = 10000.0;
+  double clashK = 1000.0;
+  // L-BFGS (spec 12)
+  LbfgsParams lbfgs;
+  double scaleTrans = 1, scaleRot = 1, scaleTors = 1;
+  double maxTransStep = 0.5;     // Å
+  double maxAngleStep = 10.0;    // degrees
+  std::uint64_t seed = 0;
+};
+
+// MobM placement: world x = R(q) (y - center) + t, where y are the coordinates
+// of the conformation (torsion-tree frame) and center its heavy-atom centre.
+struct Pose {
+  Vec3 t{};
+  Quat q{};
+};
+
+struct DockSample {
+  Pose pose;
+  std::vector<float> angles;  // degrees
+  float energy = 0;           // inter + interClash + MobM intra + MobM clash; closure excluded (spec 4.5)
+  float inter = 0;            // grid energy
+  float interClash = 0;       // StaM–MobM clash penalty
+  float intra = 0;            // MobM EnergyTerms::filterEnergy
+  float closureMaxDeviation = 0;
+  int steps = 0;
+};
+
+struct Dock9bStats {
+  long long l1 = 0;          // L1poss generated
+  long long overlap = 0;     // removed by 8.5
+  long long far = 0;
+  long long outsideBox = 0;
+  long long l2 = 0;          // minimized
+  long long leftGrid = 0;    // removed during minimization (spec 8.6)
+  long long steps = 0;
+  long long evaluations = 0;
+  Dock9bStats& operator+=(const Dock9bStats& o);
+};
+
+class MobmDocker {
+ public:
+  // sys: energy system of the single MobM (parts = {mob}).
+  MobmDocker(const EnergySystem& sys, const EnergyGrids& grids, const DistanceGrid& dist, const Dock9bParams& p);
+
+  // Conformation of a MobM sample in the torsion-tree frame.
+  struct Conf {
+    std::vector<double> anglesDeg;
+    std::vector<Vec3> coords;  // all coordinates of sys.evaluate
+    Vec3 center{};             // heavy-atom centre (unweighted)
+  };
+  Conf conformation(std::span<const double> anglesDeg) const;
+
+  // L1pos k (0 <= k < l1Count()) of a conformation pair placed at center;
+  // stream: PRNG stream of the pair (posm1).
+  Pose l1Pose(std::uint64_t stream, long long k) const;
+  // 8.5 quick filter; updates the counters of stats.
+  bool quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats) const;
+
+  // Energy of a pose; grad (optional): d/d(t, rotation vector, torsions in rad).
+  struct PoseEnergy {
+    EnergyTerms intra;
+    double inter = 0, interClash = 0;
+    int outside = 0;  // probe atoms outside the grid
+    double objective() const { return inter + interClash + intra.total(); }
+    double ranking() const { return inter + interClash + intra.filterEnergy(); }
+  };
+  PoseEnergy evaluate(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
+                      std::vector<double>* grad = nullptr) const;
+
+  // 9b minimization of one pose; false when the pose left the grid.
+  bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const;
+
+  // All of 9b for one conformation pair: L1poss -> 8.5 -> minimization.
+  // Appends the docking samples to out (in L1poss order).
+  Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::vector<DockSample>& out) const;
+
+  long long l1Count() const;  // L1poss per conformation pair
+
+ private:
+  const EnergySystem& sys_;
+  const EnergyGrids& grids_;
+  const DistanceGrid& dist_;
+  Dock9bParams p_;
+  std::vector<int> probe_;  // coordinate indices of the probe atoms
+  std::vector<int> map_;    // type map per probe atom
+  std::vector<double> charge_;
+  std::vector<char> heavy_;
+  std::array<int, 3> posN_{};  // positions per axis
+  std::vector<Quat> hopf_;
+};
+
+// PRNG stream of a 9b conformation pair.
+std::uint64_t dockStream(std::uint64_t round, std::uint64_t mobm, std::uint64_t stamSample, std::uint64_t mobmSample);
+
+}  // namespace od

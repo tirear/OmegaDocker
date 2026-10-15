@@ -181,7 +181,7 @@ std::vector<double> EnergySystem::inputAngles() const {
 }
 
 EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient,
-                                   std::vector<Vec3>* coords) const {
+                                   std::vector<Vec3>* coords, const ExternalTerm* external) const {
   std::vector<Vec3> x(coordCount_);
   for (std::size_t k = 0; k < parts_.size(); ++k) {
     const auto& tree = *parts_[k].tree;
@@ -255,6 +255,8 @@ EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vecto
       addPairGrad(i, j, d, r, 2 * G * dd);
     }
   }
+
+  if (external) e.external = (*external)(x, grad ? &g : nullptr);
 
   if (grad) {
     gradient->assign(torsionCount_, 0.0);

@@ -25,6 +25,7 @@
 #include "ccd.hpp"
 #include "conf9a.hpp"
 #include "csgm1.hpp"
+#include "dock9b.hpp"
 #include "log.hpp"
 #include "minimize.hpp"
 #include "dssp.hpp"
@@ -1868,4 +1869,238 @@ TEST_CASE("orient: quaternions, Shoemake and Hopf grid") {
     CHECK(minPair > 0.3 * s);
     CHECK(cover < 1.0 * s);
   }
+}
+
+TEST_CASE("lbfgs: quadratic and Rosenbrock") {
+  const od::VecObjective quad = [](std::span<const double> x, double& e, std::vector<double>& g) {
+    const double a[3] = {1, 10, 100};
+    e = 0;
+    g.assign(3, 0);
+    for (int i = 0; i < 3; ++i) {
+      e += 0.5 * a[i] * (x[i] - i) * (x[i] - i);
+      g[i] = a[i] * (x[i] - i);
+    }
+    return true;
+  };
+  od::LbfgsParams p;
+  p.deltaE = 1e-12;
+  p.convSteps = 2;
+  std::vector<double> x{5, -3, 7};
+  auto r = od::minimizeLbfgs(quad, x, p);
+  CHECK_FALSE(r.aborted);
+  for (int i = 0; i < 3; ++i) CHECK(x[i] == doctest::Approx(i).scale(1).epsilon(1e-5));
+  const od::VecObjective rosen = [](std::span<const double> x, double& e, std::vector<double>& g) {
+    e = 100 * std::pow(x[1] - x[0] * x[0], 2) + std::pow(1 - x[0], 2);
+    g = {-400 * x[0] * (x[1] - x[0] * x[0]) - 2 * (1 - x[0]), 200 * (x[1] - x[0] * x[0])};
+    return true;
+  };
+  x = {-1.2, 1};
+  r = od::minimizeLbfgs(rosen, x, p);
+  CHECK(x[0] == doctest::Approx(1).epsilon(1e-4));
+  CHECK(x[1] == doctest::Approx(1).epsilon(1e-4));
+  // Step limit, accept hook and abort.
+  int accepted = 0;
+  p.stepLimit = [](std::span<const double> d) { return 0.1 / std::max(0.1, std::abs(d[0])); };
+  p.onAccept = [&](std::vector<double>&) { ++accepted; };
+  x = {5, -3, 7};
+  double last = 5;
+  const od::VecObjective quad2 = [&](std::span<const double> v, double& e, std::vector<double>& g) {
+    CHECK(std::abs(v[0] - last) <= 0.1 + 1e-12);
+    return quad(v, e, g);
+  };
+  p.onAccept = [&](std::vector<double>& v) { ++accepted; last = v[0]; };
+  r = od::minimizeLbfgs(quad2, x, p);
+  CHECK(accepted == r.steps);
+  CHECK(r.steps >= 50);
+  const od::VecObjective stop = [&](std::span<const double> v, double& e, std::vector<double>& g) {
+    quad(v, e, g);
+    return v[0] > 4;
+  };
+  x = {5, -3, 7};
+  p.stepLimit = {};
+  p.onAccept = {};
+  CHECK(od::minimizeLbfgs(stop, x, p).aborted);
+}
+
+namespace {
+
+struct DockFixture {
+  GridFixture x;
+  od::Dock9bParams p;
+  od::EnergyGrids grids;
+  od::DistanceGrid dist;
+  DockFixture(od::Posm posm = od::Posm::Posm1) {
+    p.posm = posm;
+    p.boxCenter = x.stamCenter();
+    p.boxSize = {48, 48, 48};
+    p.hopfLevel = 0;
+    p.posm1SampleNum = 400;
+    p.seed = 3;
+    const auto geom = od::boxGrid(p.boxCenter, p.boxSize, 0.375);
+    grids = od::buildEnergyGrids(geom, x.stam, x.mobm.type, {});
+    dist = od::buildDistanceGrid(geom, x.stam, std::max(p.maxNearDistance, p.clashDistance) + 0.75);
+  }
+};
+
+}  // namespace
+
+TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
+  DockFixture f;
+  const od::MobmDocker dk(*f.x.mobSys, f.grids, f.dist, f.p);
+  const auto angles = f.x.mobSys->inputAngles();
+  const auto c = dk.conformation(angles);
+  // Heavy-atom centre.
+  od::Vec3 hc{};
+  int nh = 0;
+  for (std::size_t a = 0; a < f.x.mobm.size(); ++a)
+    if (f.x.mobm.heavy[a]) {
+      for (int k = 0; k < 3; ++k) hc[k] += f.x.mobm.xyz[a][k];
+      ++nh;
+    }
+  for (int k = 0; k < 3; ++k) CHECK(c.center[k] == doctest::Approx(hc[k] / nh));
+
+  // posm1: lattice positions in the box, reproducible.
+  CHECK(dk.l1Count() == 400);
+  for (long long k = 0; k < 400; ++k) {
+    const auto a = dk.l1Pose(9, k), b = dk.l1Pose(9, k);
+    CHECK(a.q.w == b.q.w);
+    for (int d = 0; d < 3; ++d) {
+      const double u = (a.t[d] - (f.p.boxCenter[d] - 24)) / f.p.posStep;
+      CHECK(u == doctest::Approx(std::round(u)).scale(1));
+      CHECK(u >= -1e-9);
+      CHECK(u <= 48 + 1e-9);
+    }
+  }
+  CHECK(dk.l1Pose(9, 0).t != dk.l1Pose(10, 0).t);
+  // posm2: positions x Hopf orientations.
+  DockFixture f2(od::Posm::Posm2);
+  const od::MobmDocker dk2(*f2.x.mobSys, f2.grids, f2.dist, f2.p);
+  CHECK(dk2.l1Count() == 49LL * 49 * 49 * 72);
+  const auto hopf = od::hopfGrid(0);
+  CHECK(dk2.l1Pose(0, 73).q.x == hopf[1].x);
+  CHECK(dk2.l1Pose(0, 73).t[0] == doctest::Approx(f2.p.boxCenter[0] - 24 + 1));
+
+  // Quick filter against brute force.
+  od::Dock9bStats st;
+  int pass = 0;
+  for (long long k = 0; k < 400; ++k) {
+    const auto pose = dk.l1Pose(1, k);
+    int overlap = 0;
+    bool outside = false;
+    double dmin = 1e9;
+    for (std::size_t a = 0; a < f.x.mobm.size(); ++a) {
+      const auto& y = f.x.mobm.xyz[a];
+      const auto r = od::rotate(pose.q, {y[0] - hc[0] / nh, y[1] - hc[1] / nh, y[2] - hc[2] / nh});
+      const od::Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
+      for (int d = 0; d < 3; ++d) outside |= std::abs(w[d] - f.p.boxCenter[d]) > 24;
+      if (!f.x.mobm.heavy[a]) continue;
+      for (std::size_t b = 0; b < f.x.stam.size(); ++b)
+        if (f.x.stam.heavy[b]) {
+          const double dx = w[0] - f.x.stam.xyz[b][0], dy = w[1] - f.x.stam.xyz[b][1], dz = w[2] - f.x.stam.xyz[b][2];
+          const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+          dmin = std::min(dmin, d);
+        }
+      double da = 1e9;
+      for (std::size_t b = 0; b < f.x.stam.size(); ++b)
+        if (f.x.stam.heavy[b]) {
+          const double dx = w[0] - f.x.stam.xyz[b][0], dy = w[1] - f.x.stam.xyz[b][1], dz = w[2] - f.x.stam.xyz[b][2];
+          da = std::min(da, std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+      if (da < 1.7) ++overlap;  // margin for interpolation of the distance grid
+    }
+    const bool ok = dk.quickFilter(c, pose, st);
+    pass += ok;
+    if (outside) CHECK_FALSE(ok);
+    if (ok) {
+      CHECK(overlap == 0);
+      CHECK(dmin < 6.3);
+    }
+  }
+  CHECK(st.outsideBox + st.overlap + st.far + pass == 400);
+  MESSAGE("quick filter: pass ", pass, ", outside box ", st.outsideBox, ", overlap ", st.overlap, ", far ", st.far);
+  CHECK(pass > 0);
+
+  // Gradient against finite differences at passing poses.
+  int checked = 0;
+  for (long long k = 0; k < 400 && checked < 3; ++k) {
+    const auto pose = dk.l1Pose(1, k);
+    od::Dock9bStats s;
+    if (!dk.quickFilter(c, pose, s)) continue;
+    ++checked;
+    std::vector<double> g;
+    const auto pe = dk.evaluate(c, pose, angles, &g);
+    CHECK(pe.outside == 0);
+    const double h = 1e-6;
+    for (int i = 0; i < 3; ++i) {
+      od::Pose a = pose, b = pose;
+      a.t[i] += h;
+      b.t[i] -= h;
+      const double fd = (dk.evaluate(c, a, angles).objective() - dk.evaluate(c, b, angles).objective()) / (2 * h);
+      CHECK(g[i] == doctest::Approx(fd).epsilon(1e-3).scale(1e-2));
+      od::Vec3 v{};
+      v[i] = h;
+      a = pose;
+      b = pose;
+      a.q = od::fromRotationVector(v) * pose.q;
+      v[i] = -h;
+      b.q = od::fromRotationVector(v) * pose.q;
+      const double fr = (dk.evaluate(c, a, angles).objective() - dk.evaluate(c, b, angles).objective()) / (2 * h);
+      CHECK(g[3 + i] == doctest::Approx(fr).epsilon(1e-3).scale(1e-2));
+    }
+    for (std::size_t t = 0; t < angles.size(); t += 5) {
+      auto ap = angles, am = angles;
+      const double hd = h * 180 / std::numbers::pi;
+      ap[t] += hd;
+      am[t] -= hd;
+      const double fd = (dk.evaluate(c, pose, ap).objective() - dk.evaluate(c, pose, am).objective()) / (2 * h);
+      CHECK(g[6 + t] == doctest::Approx(fd).epsilon(1e-3).scale(1e-2));
+    }
+  }
+  CHECK(checked == 3);
+}
+
+TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
+  DockFixture f;
+  f.p.posm1SampleNum = 1500;
+  f.p.lbfgs.maxSteps = 300;
+  const od::MobmDocker dk(*f.x.mobSys, f.grids, f.dist, f.p);
+  const auto angles = f.x.mobSys->inputAngles();
+  const auto c = dk.conformation(angles);
+  std::vector<od::DockSample> out;
+  const auto st = dk.dockPair(angles, 5, out);
+  CHECK(st.l1 == 1500);
+  CHECK(st.l1 == st.l2 + st.overlap + st.far + st.outsideBox);
+  CHECK(static_cast<long long>(out.size()) == st.l2 - st.leftGrid);
+  REQUIRE(!out.empty());
+  float best = 1e30f;
+  for (const auto& s : out) {
+    best = std::min(best, s.energy);
+    CHECK(s.energy == doctest::Approx(s.inter + s.interClash + s.intra).epsilon(1e-4));
+    CHECK(s.steps <= 300);
+    // Re-evaluating the result reproduces the stored energy; all atoms in the grid.
+    std::vector<double> a(s.angles.begin(), s.angles.end());
+    const auto pe = dk.evaluate(c, s.pose, a);
+    CHECK(pe.outside == 0);
+    CHECK(pe.ranking() == doctest::Approx(s.energy).epsilon(1e-3));
+  }
+  // Minimization lowers the energy of every kept pose.
+  std::vector<long long> l2;
+  for (long long k = 0; k < 1500; ++k) {
+    od::Dock9bStats s;
+    if (dk.quickFilter(c, dk.l1Pose(5, k), s)) l2.push_back(k);
+  }
+  std::size_t j = 0;
+  for (long long k : l2) {
+    od::DockSample s;
+    od::Dock9bStats s2;
+    const auto start = dk.l1Pose(5, k);
+    if (!dk.minimize(c, start, s, s2)) continue;
+    REQUIRE(j < out.size());
+    CHECK(s.energy == out[j].energy);  // same result as the parallel run, same order
+    CHECK(s.energy <= dk.evaluate(c, start, angles).ranking() + 1e-3);
+    ++j;
+  }
+  CHECK(j == out.size());
+  MESSAGE("9b: L1 ", st.l1, " L2 ", st.l2, " left grid ", st.leftGrid, " steps/pose ",
+          static_cast<double>(st.steps) / std::max<long long>(1, st.l2), " best ", best);
 }

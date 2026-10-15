@@ -4,6 +4,7 @@
 
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -33,6 +34,7 @@ struct EnergyTerms {
   double closure = 0;
   int clashPairs = 0;
   double closureMaxDeviation = 0;  // Å, compared with maxBreakDist (spec 4.8)
+  double external = 0;             // ExternalTerm energy; not part of the sums below
   double intra() const { return vdw + hbond + elec + desolv; }
   // Compared with E_max and used for ranking; closure excluded (spec 4.5).
   double filterEnergy() const { return intra() + clash; }
@@ -43,6 +45,10 @@ struct EnergyPart {
   const Molecule* mol = nullptr;
   const TorsionTree* tree = nullptr;
 };
+
+// Extra energy term on the coordinates (e.g. the 9b grid energy): adds its
+// dE/dx to grad (nullptr when no gradient is requested) and returns its energy.
+using ExternalTerm = std::function<double(const std::vector<Vec3>& coords, std::vector<Vec3>* grad)>;
 
 class EnergySystem {
  public:
@@ -59,8 +65,9 @@ class EnergySystem {
 
   // anglesDeg: absolute angles of the tree torsions of all parts, in part
   // order. gradient (optional): dE/dangle of total() in kcal/mol/rad.
+  // external (optional): its gradient enters the torsion gradient, its energy goes to EnergyTerms::external.
   EnergyTerms evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient = nullptr,
-                       std::vector<Vec3>* coords = nullptr) const;
+                       std::vector<Vec3>* coords = nullptr, const ExternalTerm* external = nullptr) const;
 
   struct Pair {
     int i, j;            // coordinate indices

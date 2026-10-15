@@ -31,4 +31,29 @@ struct MinResult {
 // lowest-energy point visited is returned in anglesDeg, wrapped to (-180, 180].
 MinResult minimizeFire(const TorsionObjective& f, std::span<double> anglesDeg, const MinParams& p);
 
+// Objective of a general minimizer: energy and gradient at x; returns false to
+// abort the minimization (e.g. a pose leaving the grid, spec 8.6).
+using VecObjective = std::function<bool(std::span<const double> x, double& energy, std::vector<double>& grad)>;
+
+struct LbfgsParams {
+  int maxSteps = 1000;    // dockMinMaxStep
+  int convSteps = 10;     // dockMinConvSteps: stop after this many consecutive steps with |dE| < deltaE
+  double deltaE = 1e-3;   // dockMinDeltaE
+  int memory = 7;         // lbfgsMemory
+  // Largest factor (<= 1) applied to a search direction, enforcing per-step limits.
+  std::function<double(std::span<const double> dir)> stepLimit;
+  // Called after each accepted step; may re-express x (e.g. re-base a rotation).
+  std::function<void(std::vector<double>& x)> onAccept;
+};
+
+struct LbfgsResult {
+  double energy = 0;
+  int steps = 0;
+  int evaluations = 0;
+  bool aborted = false;  // the objective returned false; x is then unspecified
+};
+
+// L-BFGS with Armijo backtracking line search (spec 12).
+LbfgsResult minimizeLbfgs(const VecObjective& f, std::vector<double>& x, const LbfgsParams& p);
+
 }  // namespace od

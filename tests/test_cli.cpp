@@ -19,7 +19,7 @@ od::Options parse(std::vector<const char*> args) {
 }  // namespace
 
 TEST_CASE("cli: required options and values") {
-  auto o = parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--mobmFiles=b.mol2", "--boxCenter", "1,-2.5,3",
+  auto o = parse({"--stamFile", "r.cif", "--posm", "posm1", "--mobmFiles", "a.sdf", "--mobmFiles=b.mol2", "--boxCenter", "1,-2.5,3",
                   "--boxSize", "20,20,30", "--outPrefix", "out", "--outCif", "true", "--outPdb=false",
                   "--mobmDockingConfSampleNum", "8"});
   CHECK(o.stamFile == "r.cif");
@@ -32,6 +32,15 @@ TEST_CASE("cli: required options and values") {
   CHECK(o.omegaTolerance == doctest::Approx(30));
   CHECK_FALSE(o.acceptNonPlanarOmega);
   CHECK(o.stamFlexMargin == doctest::Approx(4));
+  CHECK(o.posm == "posm1");
+  CHECK(o.posStep == doctest::Approx(1));
+  CHECK(o.posm1SampleNum == 1000);
+  CHECK(o.dockMinMaxStep == 1000);
+  CHECK(o.dockMinConvSteps == 10);
+  CHECK(o.dockMinDeltaE == doctest::Approx(1e-3));
+  CHECK(o.lbfgsMemory == 7);
+  CHECK(o.maxTransStep == doctest::Approx(0.5));
+  CHECK(o.maxAngleStep == doctest::Approx(10));
   CHECK_NOTHROW(od::validateOptions(o));
 
   auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--stamFlexMargin=6.5"});
@@ -48,8 +57,13 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(parse({"--outPdb", "yes"}), od::Error);
   CHECK_THROWS_AS(parse({"--outPrefix"}), od::Error);
   CHECK_THROWS_AS(parse({"--help=1"}), od::Error);
+  CHECK_THROWS_AS(parse({"--posm", "posm9"}), od::Error);
+  CHECK_THROWS_AS(parse({"--posm", "posm2_fft"}), od::Error);
+  CHECK_THROWS_AS(od::validateOptions(parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0",
+                                             "--boxSize", "10,10,10", "--outPrefix", "o"})),
+                  od::Error);  // --posm missing
 
-  auto o = parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
+  auto o = parse({"--stamFile", "r.cif", "--posm", "posm1", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
                   "--outPrefix", "o", "--outPdb", "false", "--mobmDockingConfSampleNum", "8"});
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);  // all output formats disabled
   o.outMol2 = true;
@@ -65,7 +79,7 @@ TEST_CASE("cli: errors") {
 }
 
 TEST_CASE("cli: 9a sample numbers and minimization") {
-  auto o = parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
+  auto o = parse({"--stamFile", "r.cif", "--posm", "posm1", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
   CHECK_NOTHROW(od::validateOptions(o));  // required only with rotatable torsions
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::StaM), od::Error);
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::MobM), od::Error);

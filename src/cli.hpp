@@ -59,6 +59,17 @@ struct Options {
   double gridSpacing = 0.375;
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
+  std::string posm;  // posm1 | posm2
+  double posStep = 1.0;
+  long long posm1SampleNum = 1000;
+  int maxOverlapAtomNum = 1;
+  int dockMinMaxStep = 1000;
+  int dockMinConvSteps = 10;
+  double dockMinDeltaE = 1e-3;
+  int lbfgsMemory = 7;
+  double scaleTrans = 1, scaleRot = 1, scaleTors = 1;
+  double maxTransStep = 0.5;
+  double maxAngleStep = 10.0;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;

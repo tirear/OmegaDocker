@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.17 |
+| 文件版本 | 1.18 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -743,12 +743,13 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 每個構型配對各自產生 L1poss。
 
 #### 8.4.1 posm1：隨機取樣
-- 位置（MobM 重原子中心的位置，8.3）：`boxMin + posStep × 整數亂數`，`posStep` 預設 1 Å。
+- 位置（MobM 重原子中心的位置，8.3）：`boxMin + posStep × 整數亂數`，`posStep` 預設 1 Å。每軸整數亂數均勻取自 0～`floor(boxSize / posStep)`（`boxMin = boxCenter − boxSize/2`）。
+- 亂數：第 k 個 L1pos 只由 `(seed, 構型配對的串流, k)` 決定；串流由（輪次、MobM 編號、StaM 構型樣本 ID、MobM 構型樣本 ID）雜湊而得，與執行緒數無關。
 - 定向：Shoemake 隨機四元數。
 - 數量：`posm1SampleNum`（每個構型配對，預設 1000）。
 
 #### 8.4.2 posm2：均勻完整取樣
-- 位置（MobM 重原子中心的位置，8.3）：對接範圍內 X、Y、Z 以 `posStep`（預設 1 Å）均勻取點。
+- 位置（MobM 重原子中心的位置，8.3）：對接範圍內 X、Y、Z 以 `posStep`（預設 1 Å）均勻取點，每軸 `floor(boxSize / posStep) + 1` 點，由 `boxMin` 起算。
 - 定向：Hopf 格點（`rotStep`，預設 7.5°）。
 - 樣本數 = 位置數 × 定向數，全部進入篩選與最佳化。
 
@@ -801,17 +802,24 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 太遠 | 所有原子 d > `maxNearDistance` | `maxNearDistance` = 6 Å |
 | 超出範圍 | 任一 MobM 原子在對接範圍外 | — |
 
+- d 由距離網格三線性內插取得；「重疊」「太遠」只看重原子，「超出範圍」看所有探針原子（8.1）。
+- 檢查順序：超出範圍 → 重疊 → 太遠；每個 pos 只計入第一個成立的條件。
+
 ### 8.6 9b 最佳化
 
 - **全部 L2poss 都進行最佳化**（不預先篩選）。
 - 變數：MobM 的平移（3）、定向（3，旋轉向量增量）、可轉動兩面角。
+- 座標：`x = R(q)·(y(θ) − c) + t`；y 為扭轉樹座標系中的 MobM 座標，c 為最佳化開始時構型的重原子中心（最佳化過程中固定），t 為 c 的位置。
+- 旋轉增量乘在左側（`q ← exp(ω)·q`，繞 t 旋轉），每接受一步後把 ω 併入 q 並歸零；梯度 `∂E/∂ω = Σ (x_i − t) × ∂E/∂x_i`。
 - StaM 構型在 9b 固定（本版不調整 StaM 兩面角）。
-- 能量：分子間（8.1）+ MobM 分子內 + 斷鍵約束；StaM 分子內能量在 9b 為常數，不計入。
+- 能量：分子間（8.1）+ StaM–MobM 碰撞懲罰 + MobM 分子內（含 MobM 碰撞懲罰）+ 斷鍵約束；StaM 分子內能量在 9b 為常數，不計入。
+  - StaM–MobM 碰撞懲罰：MobM 每個重原子以距離網格內插得 d，d < `clashDistance` 時加 `E_clashBase + K_clash·(clashDistance − d)²`（7.9 的形式，以原子計，不以原子對計）。
+  - 對接樣本的能量（9c 排序用）= 上述總和扣除斷鍵約束（4.5）。
 - 停止條件（任一成立）：
   1. 步數達 `dockMinMaxStep`（預設 1000）。
   2. 連續 `dockMinConvSteps`（預設 10）步 `|ΔE| < dockMinDeltaE`（預設 1×10⁻³ kcal/mol）。
 - 最佳化方法：預設 L-BFGS（第 12 節）。
-- **移出網格**：最佳化過程中任一 MobM 探針原子（8.1 的實際原子，不含併入重原子的非極性氫）移出網格範圍，即移除該 pos，不再最佳化，也不進入 9c。
+- **移出網格**：最佳化過程中任一 MobM 探針原子（8.1 的實際原子，不含併入重原子的非極性氫）移出網格範圍，即移除該 pos，不再最佳化，也不進入 9c。line search 的試探點也算在內。
 - 每個構型配對記錄其所有對接樣本中的最低能量，作為 9c 篩選 dcss 的依據；StaM 構型樣本與 MobM 構型樣本的「最低能量」分別取其參與之所有構型配對的最小值。
 
 ---
@@ -893,7 +901,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 9b | `dockMinMethod` | `lbfgs` |
 
 - 變數尺度：平移（Å）、旋轉（rad）、兩面角（rad）以 `scaleTrans`、`scaleRot`、`scaleTors` 預先縮放（預設 1、1、1）。
-- 每步最大變化：平移 `maxTransStep`（預設 0.5 Å）、旋轉與兩面角 `maxAngleStep`（預設 10°）。
+- 每步最大變化：平移 `maxTransStep`（預設 0.5 Å）、旋轉與兩面角 `maxAngleStep`（預設 10°）。平移以向量長度、旋轉以旋轉向量長度、兩面角以各自的變化量判斷；超過時整個搜尋方向等比例縮小，再進行 line search。
+- L-BFGS 細節（CPU 參考版）：
+  - two-loop recursion，初始 Hessian 取 `(sᵀy / yᵀy)·I`；`sᵀy ≤ 10⁻¹²` 的步不存入記憶。
+  - 方向不是下降方向時清空記憶，改用最陡下降方向。
+  - Armijo 條件 `E(x + αd) ≤ E(x) + 10⁻⁴·α·∇Eᵀd`，α 從 1 開始每次減半，最多 20 次；仍不滿足時視為收斂並停止。
+- 目前只實作 9b 的 `lbfgs` 與 9a 的 `fire`，尚未提供 `--dockMinMethod`、`--confMinMethod`。
 
 ---
 
@@ -977,6 +990,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--topSampleNum` | eliteStaM × eliteMobM | 9 |
 | `--diversityRmsd` | 2.0 Å | 9 |
 | `--lbfgsMemory` | 7 | 12 |
+| `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
+| `--maxTransStep` | 0.5 Å | 12 |
+| `--maxAngleStep` | 10° | 12 |
 
 樣本數參數（7.2）與 csgm 參數（7.0）：StaM 群用 `--stam*`，所有 MobM 共用 `--mobm*`，不提供個別 MobM 的覆寫。StaM 專用的參數也使用 `stam` 前綴（`--stamFlexMargin`、`--stamFixedResMovable`）。
 
@@ -1177,6 +1193,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 輸入參數再改為 `--stamFile`／`--mobmFiles`（3.2） |
 | — | posm1／posm2 的位置與定向的旋轉中心為 MobM 重原子中心（重原子座標的不加權平均，與質量無關）（8.3、8.4） |
 | — | 9b 最佳化中任一 MobM 原子移出網格時，移除該 pos（8.6） |
+| — | `--gridSpacing` 預設維持 0.375 Å（8.1） |
 | — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
 
 ### 17.2 待確認
@@ -1217,3 +1234,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.15 | 2026-10-15 | 實作 9b 能量網格（`full`）與距離網格的 CPU 參考版：補充網格範圍、探針類型、type/elec/desolv map 的分解、截斷距離、不用 H-bond 方向性、格點上限（8.1、8.2）；新增 `--gridSpacing` |
 | 1.16 | 2026-10-15 | 實作定向（8.3）：四元數、Shoemake 隨機定向、Hopf 格點的取點方式與實測間距；新增 `--rotStep` |
 | 1.17 | 2026-10-15 | 輸入參數改為 `--stamFile`、`--mobmFiles`（3.2）；定向的旋轉中心與 posm1／posm2 的位置改為 MobM 重原子中心（8.3、8.4）；9b 最佳化中移出網格即移除該 pos（8.1、8.6） |
+| 1.18 | 2026-10-15 | 實作 9b 的 posm1、posm2、8.5 快速篩選、L-BFGS 與 9b 最佳化（CPU 參考版）：補充位置取樣範圍、亂數串流、篩選順序、pose 座標定義、旋轉增量、StaM–MobM 碰撞懲罰、L-BFGS 細節（8.4、8.5、8.6、12）；新增 `--posm`、`--posStep`、`--posm1SampleNum`、`--maxOverlapAtomNum`、`--dockMin*`、`--lbfgsMemory`、`--scale*`、`--maxTransStep`、`--maxAngleStep` |

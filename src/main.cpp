@@ -19,6 +19,7 @@
 #include "csgm1.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
+#include "dock9b.hpp"
 #include "grid.hpp"
 #include "grow.hpp"
 #include "orient.hpp"
@@ -152,13 +153,14 @@ void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>
 }
 
 // First 9a refill of the L2 pool with csgm1 (spec 7.3).
-void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& parts,
+// L2 pool of the first 9a refill (empty when there are no rotatable torsions).
+std::vector<od::ConfSample> runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& parts,
                 const std::vector<const od::MolSettings*>& settings, const od::MolConfig& cfg, const od::Options& opt,
                 od::SampleSet set, std::uint64_t seed, std::uint64_t stream) {
   const od::EnergySystem sys(parts, energyParams(opt));
   if (sys.torsionCount() == 0) {
     od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", name));
-    return;
+    return {};
   }
   const od::CsgmOpts& csgm = set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm;
   od::Csgm1Params cp;
@@ -204,6 +206,7 @@ void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& part
                           name, st.l1, st.batches, st.added, st.growFailed, st.overEmax, st.notClosed,
                           minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   od::logInfo(std::format("    L2 energies: min {:.3f}  median {:.3f}  max {:.3f}", e.front(), e[e.size() / 2], e.back()));
+  return pool;
 }
 
 // DSSP residue counts, e.g. "H 12  E 10  . 5".
@@ -322,9 +325,10 @@ int run(int argc, char** argv) {
     }
     runFirst9a("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0);
   }
+  std::vector<std::vector<od::ConfSample>> mobPools;
   for (std::size_t i = 0; i < mobs.size(); ++i) {
     const auto& s = cfg->molecules[sta.size() + i];
-    runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, od::SampleSet::MobM, seed, 1 + i);
+    mobPools.push_back(runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, od::SampleSet::MobM, seed, 1 + i));
   }
 
   {
@@ -359,6 +363,58 @@ int run(int argc, char** argv) {
                             geom.n[0], geom.n[1], geom.n[2], geom.spacing, stam.size(), types,
                             std::chrono::duration<double>(t1 - t0).count(),
                             std::chrono::duration<double>(t2 - t1).count()));
+
+    od::Dock9bParams dp;
+    dp.posm = opt.posm == "posm2" ? od::Posm::Posm2 : od::Posm::Posm1;
+    dp.posStep = opt.posStep;
+    dp.hopfLevel = od::hopfLevelForStep(opt.rotStep);
+    dp.posm1SampleNum = opt.posm1SampleNum;
+    dp.boxCenter = *opt.boxCenter;
+    dp.boxSize = *opt.boxSize;
+    dp.maxOverlapAtomNum = opt.maxOverlapAtomNum;
+    dp.maxNearDistance = opt.maxNearDistance;
+    dp.clashDistance = opt.clashDistance;
+    dp.clashBase = opt.EclashBase;
+    dp.clashK = opt.Kclash;
+    dp.lbfgs.maxSteps = opt.dockMinMaxStep;
+    dp.lbfgs.convSteps = opt.dockMinConvSteps;
+    dp.lbfgs.deltaE = opt.dockMinDeltaE;
+    dp.lbfgs.memory = opt.lbfgsMemory;
+    dp.scaleTrans = opt.scaleTrans;
+    dp.scaleRot = opt.scaleRot;
+    dp.scaleTors = opt.scaleTors;
+    dp.maxTransStep = opt.maxTransStep;
+    dp.maxAngleStep = opt.maxAngleStep;
+    dp.seed = seed;
+    od::logInfo(std::format("9b docking against the input StaM conformation ({}):", opt.posm));
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+      const std::vector<od::EnergyPart> mp{{&mobs[i], &cfg->molecules[sta.size() + i].tree}};
+      const od::EnergySystem ms(mp, energyParams(opt));
+      const od::MobmDocker dk(ms, grids, dist, dp);
+      // MobM conformations: the first dockingConfSampleNum samples of the L2 pool, or the input conformation.
+      std::vector<std::vector<double>> confs;
+      if (mobPools[i].empty()) confs.push_back(ms.inputAngles());
+      const int nConf = ms.torsionCount() > 0 ? od::confSampleNums(opt, od::SampleSet::MobM).docking : 0;
+      for (int k = 0; k < nConf && k < static_cast<int>(mobPools[i].size()); ++k)
+        confs.emplace_back(mobPools[i][k].angles.begin(), mobPools[i][k].angles.end());
+      od::Dock9bStats st;
+      std::vector<od::DockSample> samples;
+      const auto d0 = std::chrono::steady_clock::now();
+      for (std::size_t k = 0; k < confs.size(); ++k)
+        st += dk.dockPair(confs[k], od::dockStream(0, i, 0, k), samples);
+      const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count();
+      od::logInfo(std::format("  {:<40} conformation pairs {}  L1poss {}  removed (outside box {}, overlap {}, far {})  "
+                              "L2poss {}  left grid {}  docking samples {}  steps/pose {:.1f}  {:.2f} s",
+                              mobs[i].id, confs.size(), st.l1, st.outsideBox, st.overlap, st.far, st.l2, st.leftGrid,
+                              samples.size(), st.l2 > 0 ? static_cast<double>(st.steps) / st.l2 : 0.0, sec));
+      if (samples.empty()) continue;
+      std::sort(samples.begin(), samples.end(), [](const auto& a, const auto& b) { return a.energy < b.energy; });
+      std::string top;
+      for (std::size_t k = 0; k < samples.size() && k < 5; ++k)
+        top += std::format("  {:.3f} (inter {:.3f}, intra {:.3f})", samples[k].energy, samples[k].inter + samples[k].interClash,
+                           samples[k].intra);
+      od::logInfo("    lowest energies:" + top);
+    }
   }
   return 0;
 }
