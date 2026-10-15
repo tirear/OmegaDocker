@@ -318,6 +318,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const od::Dock9bParams dp = dockParams(opt, seed);
   const bool deterministic = dp.posm == od::Posm::Posm2;
 
+  // Grids of the input conformation, kept across rounds when the StaM group has no rotatable torsions.
+  std::unique_ptr<const od::EnergyGrids> fixedGrids;
+  std::unique_ptr<const od::DistanceGrid> fixedDist;
+
   std::vector<MobState> ms(mobSets.size());
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
@@ -351,17 +355,30 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0);
     std::vector<std::vector<od::RoundSample>> roundSamples(ms.size());
     double gridSec = 0;
+    bool gridsReused = false;
     const auto d0 = std::chrono::steady_clock::now();
     for (int sid : stamIds) {
       const auto g0 = std::chrono::steady_clock::now();
-      const auto& sa = stamSet.sample(sid).angles;
-      std::vector<double> angles = stamSet.movable() ? std::vector<double>(sa.begin(), sa.end()) : stamSet.sys().inputAngles();
-      std::vector<od::Vec3> x;
-      stamSet.sys().evaluate(angles, nullptr, &x);
-      const od::GridAtoms stam = od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
-      const od::EnergyGrids grids = od::buildEnergyGrids(geom, stam, probe, energyParams(opt));
-      const od::DistanceGrid dist =
-          od::buildDistanceGrid(geom, stam, std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing);
+      std::unique_ptr<const od::EnergyGrids> ownGrids;
+      std::unique_ptr<const od::DistanceGrid> ownDist;
+      if (stamSet.movable() || !fixedGrids) {
+        const auto& sa = stamSet.sample(sid).angles;
+        std::vector<double> angles = stamSet.movable() ? std::vector<double>(sa.begin(), sa.end()) : stamSet.sys().inputAngles();
+        std::vector<od::Vec3> x;
+        stamSet.sys().evaluate(angles, nullptr, &x);
+        const od::GridAtoms stam = od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
+        ownGrids = std::make_unique<const od::EnergyGrids>(od::buildEnergyGrids(geom, stam, probe, energyParams(opt)));
+        ownDist = std::make_unique<const od::DistanceGrid>(
+            od::buildDistanceGrid(geom, stam, std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing));
+        if (!stamSet.movable()) {
+          fixedGrids = std::move(ownGrids);
+          fixedDist = std::move(ownDist);
+        }
+      } else {
+        gridsReused = true;
+      }
+      const od::EnergyGrids& grids = stamSet.movable() ? *ownGrids : *fixedGrids;
+      const od::DistanceGrid& dist = stamSet.movable() ? *ownDist : *fixedDist;
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
       for (std::size_t i = 0; i < ms.size(); ++i) {
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
@@ -389,7 +406,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       }
     }
     const double dockSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count() - gridSec;
-    od::logInfo(std::format("  9b grids for {} StaM conformation(s): {:.2f} s", stamIds.size(), gridSec));
+    if (gridsReused)
+      od::logInfo("  9b grids of the StaM input conformation reused from the first round");
+    else
+      od::logInfo(std::format("  9b grids for {} StaM conformation(s): {:.2f} s", stamIds.size(), gridSec));
 
     // 9c (spec 9).
     for (std::size_t i = 0; i < ms.size(); ++i) {
