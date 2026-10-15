@@ -34,7 +34,7 @@ Dock9bStats& Dock9bStats::operator+=(const Dock9bStats& o) {
   far += o.far;
   outsideBox += o.outsideBox;
   l2 += o.l2;
-  leftGrid += o.leftGrid;
+  startOutsideGrid += o.startOutsideGrid;
   steps += o.steps;
   evaluations += o.evaluations;
   return *this;
@@ -173,7 +173,7 @@ bool MobmDocker::quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats
 }
 
 MobmDocker::PoseEnergy MobmDocker::evaluate(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
-                                            std::vector<double>* grad) const {
+                                            std::vector<double>* grad, double gridTolerance) const {
   PoseEnergy pe;
   Vec3 gt{}, gr{};
   const double cd = p_.clashDistance;
@@ -181,10 +181,19 @@ MobmDocker::PoseEnergy MobmDocker::evaluate(const Conf& c, const Pose& pose, std
     for (std::size_t k = 0; k < probe_.size(); ++k) {
       const Vec3& y = x[probe_[k]];
       const Vec3 r = rotate(pose.q, {y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
-      const Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
+      Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
       if (!grids_.geom.inside(w)) {
-        ++pe.outside;
-        continue;
+        // Within gridTolerance of the grid: clamped onto the grid.
+        const Vec3 lo = grids_.geom.origin, hi = grids_.geom.max();
+        bool near = true;
+        for (int d = 0; d < 3; ++d) {
+          near &= w[d] >= lo[d] - gridTolerance && w[d] <= hi[d] + gridTolerance;
+          w[d] = std::clamp(w[d], lo[d], hi[d]);
+        }
+        if (!near) {
+          ++pe.outside;
+          continue;
+        }
       }
       const double q = charge_[k];
       Vec3 a{}, b{}, s{}, dg{};
@@ -240,7 +249,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
   const VecObjective f = [&](std::span<const double> v, double& e, std::vector<double>& grad) {
     Pose pose;
     unpack(v, pose);
-    const PoseEnergy pe = evaluate(c, pose, angles, &g);
+    const PoseEnergy pe = evaluate(c, pose, angles, &g, 0.0);
     if (pe.outside > 0) return false;
     e = pe.objective();
     grad.resize(g.size());
@@ -267,7 +276,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
   stats.steps += r.steps;
   stats.evaluations += r.evaluations;
   if (r.aborted) {
-    ++stats.leftGrid;
+    ++stats.startOutsideGrid;
     return false;
   }
   Pose pose;
@@ -319,7 +328,7 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
     for (std::size_t i = 0; i < l2.size(); ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[i]), res[i], st);
 #pragma omp critical
     {
-      total.leftGrid += st.leftGrid;
+      total.startOutsideGrid += st.startOutsideGrid;
       total.steps += st.steps;
       total.evaluations += st.evaluations;
     }

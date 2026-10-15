@@ -31,8 +31,9 @@ struct MinResult {
 // lowest-energy point visited is returned in anglesDeg, wrapped to (-180, 180].
 MinResult minimizeFire(const TorsionObjective& f, std::span<double> anglesDeg, const MinParams& p);
 
-// Objective of a general minimizer: energy and gradient at x; returns false to
-// abort the minimization (e.g. a pose leaving the grid, spec 8.6).
+// Objective of a general minimizer: energy and gradient at x; returns false when
+// x is infeasible (e.g. a probe atom outside the grid, spec 8.6). Infeasible
+// trial points of the line search are rejected; an infeasible start aborts.
 using VecObjective = std::function<bool(std::span<const double> x, double& energy, std::vector<double>& grad)>;
 
 struct LbfgsParams {
@@ -50,7 +51,7 @@ struct LbfgsResult {
   double energy = 0;
   int steps = 0;
   int evaluations = 0;
-  bool aborted = false;  // the objective returned false; x is then unspecified
+  bool aborted = false;  // the starting point is infeasible; x is unchanged
 };
 
 // L-BFGS with Armijo backtracking line search (spec 12).

@@ -1919,7 +1919,15 @@ TEST_CASE("lbfgs: quadratic and Rosenbrock") {
   x = {5, -3, 7};
   p.stepLimit = {};
   p.onAccept = {};
+  // Infeasible trial points are rejected: the minimization stays feasible.
+  r = od::minimizeLbfgs(stop, x, p);
+  CHECK_FALSE(r.aborted);
+  CHECK(x[0] > 4);
+  CHECK(r.energy < 0.5 * 25 + 0.5 * 10 * 16 + 0.5 * 100 * 25);
+  // An infeasible start aborts.
+  x = {3, -3, 7};
   CHECK(od::minimizeLbfgs(stop, x, p).aborted);
+  CHECK(x[0] == 3);
 }
 
 namespace {
@@ -2114,7 +2122,8 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
   const auto st = dk.dockPair(angles, 5, out);
   CHECK(st.l1 == 1500);
   CHECK(st.l1 == st.l2 + st.overlap + st.far + st.outsideBox);
-  CHECK(static_cast<long long>(out.size()) == st.l2 - st.leftGrid);
+  CHECK(st.startOutsideGrid == 0);
+  CHECK(static_cast<long long>(out.size()) == st.l2);
   REQUIRE(!out.empty());
   float best = 1e30f;
   for (const auto& s : out) {
@@ -2146,6 +2155,6 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
     ++j;
   }
   CHECK(j == out.size());
-  MESSAGE("9b: L1 ", st.l1, " L2 ", st.l2, " left grid ", st.leftGrid, " steps/pose ",
+  MESSAGE("9b: L1 ", st.l1, " L2 ", st.l2, " start outside grid ", st.startOutsideGrid, " steps/pose ",
           static_cast<double>(st.steps) / std::max<long long>(1, st.l2), " best ", best);
 }

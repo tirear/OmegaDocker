@@ -404,8 +404,8 @@ int run(int argc, char** argv) {
         st += dk.dockPair(confs[k], od::dockStream(0, i, 0, k), samples);
       const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count();
       od::logInfo(std::format("  {:<40} conformation pairs {}  L1poss {}  removed (outside box {}, overlap {}, far {})  "
-                              "L2poss {}  left grid {}  docking samples {}  steps/pose {:.1f}  {:.2f} s",
-                              mobs[i].id, confs.size(), st.l1, st.outsideBox, st.overlap, st.far, st.l2, st.leftGrid,
+                              "L2poss {}  start outside grid {}  docking samples {}  steps/pose {:.1f}  {:.2f} s",
+                              mobs[i].id, confs.size(), st.l1, st.outsideBox, st.overlap, st.far, st.l2, st.startOutsideGrid,
                               samples.size(), st.l2 > 0 ? static_cast<double>(st.steps) / st.l2 : 0.0, sec));
       if (st.l1 == st.outsideBox)
         od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger --boxSize", mobs[i].id));
