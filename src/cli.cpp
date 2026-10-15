@@ -121,12 +121,12 @@ std::vector<OptionDef> withCsgmOptions(std::vector<OptionDef> t) {
 
 const std::vector<OptionDef>& optionTable() {
   static const std::vector<OptionDef> table = withCsgmOptions({
-      {"stam", Kind::Value, "<file>", "required", "Stationary molecules (StaM); may be given once",
+      {"stamFile", Kind::Value, "<file>", "required", "Stationary molecules (StaM); may be given once",
        [](Options& o, const std::string& v) {
-         if (!o.stamFile.empty()) fail("--stam may be given only once");
+         if (!o.stamFile.empty()) fail("--stamFile may be given only once");
          o.stamFile = v;
        }},
-      {"mobm", Kind::Value, "<file>", "required", "Mobile molecule (MobM), one molecule per file; repeatable",
+      {"mobmFiles", Kind::Value, "<file>", "required", "Mobile molecule (MobM), one molecule per file; repeatable",
        [](Options& o, const std::string& v) { o.mobmFiles.push_back(v); }},
       {"molConfig", Kind::Value, "<file>", "none", "Molecule configuration file (TOML)",
        [](Options& o, const std::string& v) { o.molConfig = v; }},
@@ -279,8 +279,8 @@ void requireConfSampleNums(const Options& o, SampleSet set) {
 }
 
 void validateOptions(const Options& o) {
-  if (o.stamFile.empty()) fail("--stam is required");
-  if (o.mobmFiles.empty()) fail("At least one --mobm is required");
+  if (o.stamFile.empty()) fail("--stamFile is required");
+  if (o.mobmFiles.empty()) fail("At least one --mobmFiles is required");
   if (!o.boxCenter) fail("--boxCenter is required");
   if (!o.boxSize) fail("--boxSize is required");
   for (double v : *o.boxSize)
@@ -319,7 +319,7 @@ void validateOptions(const Options& o) {
 }
 
 std::string usageText() {
-  std::string s = std::format("OmegaDocker {}\n\nUsage: omegadocker --stam <file> --mobm <file> [--mobm <file> ...] "
+  std::string s = std::format("OmegaDocker {}\n\nUsage: omegadocker --stamFile <file> --mobmFiles <file> [--mobmFiles <file> ...] "
                               "--boxCenter x,y,z --boxSize x,y,z --outPrefix <path> [options]\n\nOptions:\n",
                               kVersion);
   for (const auto& d : optionTable()) {

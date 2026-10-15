@@ -19,7 +19,7 @@ od::Options parse(std::vector<const char*> args) {
 }  // namespace
 
 TEST_CASE("cli: required options and values") {
-  auto o = parse({"--stam", "r.cif", "--mobm", "a.sdf", "--mobm=b.mol2", "--boxCenter", "1,-2.5,3",
+  auto o = parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--mobmFiles=b.mol2", "--boxCenter", "1,-2.5,3",
                   "--boxSize", "20,20,30", "--outPrefix", "out", "--outCif", "true", "--outPdb=false",
                   "--mobmDockingConfSampleNum", "8"});
   CHECK(o.stamFile == "r.cif");
@@ -41,7 +41,7 @@ TEST_CASE("cli: required options and values") {
 }
 
 TEST_CASE("cli: errors") {
-  CHECK_THROWS_AS(parse({"--stam", "a", "--stam", "b"}), od::Error);
+  CHECK_THROWS_AS(parse({"--stamFile", "a", "--stamFile", "b"}), od::Error);
   CHECK_THROWS_AS(parse({"--unknown"}), od::Error);
   CHECK_THROWS_AS(parse({"--boxCenter", "1,2"}), od::Error);
   CHECK_THROWS_AS(parse({"--boxCenter", "1,2,x"}), od::Error);
@@ -49,7 +49,7 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(parse({"--outPrefix"}), od::Error);
   CHECK_THROWS_AS(parse({"--help=1"}), od::Error);
 
-  auto o = parse({"--stam", "r.cif", "--mobm", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
+  auto o = parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
                   "--outPrefix", "o", "--outPdb", "false", "--mobmDockingConfSampleNum", "8"});
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);  // all output formats disabled
   o.outMol2 = true;
@@ -65,7 +65,7 @@ TEST_CASE("cli: errors") {
 }
 
 TEST_CASE("cli: 9a sample numbers and minimization") {
-  auto o = parse({"--stam", "r.cif", "--mobm", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
+  auto o = parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
   CHECK_NOTHROW(od::validateOptions(o));  // required only with rotatable torsions
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::StaM), od::Error);
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::MobM), od::Error);

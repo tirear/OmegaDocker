@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.16 |
+| 文件版本 | 1.17 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -86,8 +86,8 @@
 ### 3.2 分子的劃分與角色指定
 
 - 一個 **分子** = 鍵結圖中的一個連通元件（connected component）。
-- `--stam <file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
-- `--mobm <file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
+- `--stamFile <file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
+- `--mobmFiles <file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
 - 每個 MobM 視為獨立的對接任務（見第 11 節）。
 
 ### 3.3 對接範圍
@@ -709,7 +709,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 函數形式與截斷距離同 7.9（vdW/H-bond 8 Å，elec 與 desolv 20.48 Å）；與 AutoGrid 不同，**不使用 H-bond 方向性**，使網格與 `flexres` 的逐對計算一致。
 - type map 的格點值上限 1×10⁵ kcal/mol（同 AutoGrid 的 EINTCLAMP）；elec、desolv map 不設上限。
 - 格點以 float 儲存。
-- 網格外的 MobM 原子不計入網格能量，另外計數（處理方式見 8.6）。
+- 網格外的 MobM 原子不計入網格能量，另外計數；9b 最佳化中出現網格外原子時移除該 pos（8.6）。
 
 ### 8.2 距離網格
 
@@ -720,7 +720,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ### 8.3 定向表示
 
-- 所有定向以 **單位四元數** 表示，繞 MobM 質心旋轉。
+- 所有定向以 **單位四元數** 表示，繞 **MobM 重原子中心**旋轉。重原子中心 = MobM 所有重原子座標的不加權平均（與質量無關），在 MobM 構型樣本的座標上計算。
 - 隨機定向：Shoemake 方法，u1、u2、u3 ∈ [0, 1)：
   `q = (√(1−u1)·sin2πu2, √(1−u1)·cos2πu2, √u1·sin2πu3, √u1·cos2πu3)`
 - 均勻定向：Yershova (2010) Hopf 格點。基礎層 72 點，每加一層 ×8，間距約減半：
@@ -743,12 +743,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 每個構型配對各自產生 L1poss。
 
 #### 8.4.1 posm1：隨機取樣
-- 位置：`boxMin + posStep × 整數亂數`，`posStep` 預設 1 Å。
+- 位置（MobM 重原子中心的位置，8.3）：`boxMin + posStep × 整數亂數`，`posStep` 預設 1 Å。
 - 定向：Shoemake 隨機四元數。
 - 數量：`posm1SampleNum`（每個構型配對，預設 1000）。
 
 #### 8.4.2 posm2：均勻完整取樣
-- 位置：對接範圍內 X、Y、Z 以 `posStep`（預設 1 Å）均勻取點。
+- 位置（MobM 重原子中心的位置，8.3）：對接範圍內 X、Y、Z 以 `posStep`（預設 1 Å）均勻取點。
 - 定向：Hopf 格點（`rotStep`，預設 7.5°）。
 - 樣本數 = 位置數 × 定向數，全部進入篩選與最佳化。
 
@@ -811,6 +811,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   1. 步數達 `dockMinMaxStep`（預設 1000）。
   2. 連續 `dockMinConvSteps`（預設 10）步 `|ΔE| < dockMinDeltaE`（預設 1×10⁻³ kcal/mol）。
 - 最佳化方法：預設 L-BFGS（第 12 節）。
+- **移出網格**：最佳化過程中任一 MobM 探針原子（8.1 的實際原子，不含併入重原子的非極性氫）移出網格範圍，即移除該 pos，不再最佳化，也不進入 9c。
 - 每個構型配對記錄其所有對接樣本中的最低能量，作為 9c 篩選 dcss 的依據；StaM 構型樣本與 MobM 構型樣本的「最低能量」分別取其參與之所有構型配對的最小值。
 
 ---
@@ -909,7 +910,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 | 參數 | 預設 | 節 |
 |---|---|---|
-| `--stam`、`--mobm` | 必填 | 3.2 |
+| `--stamFile`、`--mobmFiles` | 必填 | 3.2 |
 | `--molConfig` | 無 | 5 |
 | `--ccd` | 無 | 3.1 |
 | `--boxCenter`、`--boxSize` | 必填 | 3.3 |
@@ -1116,7 +1117,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 |---|---|
 | Q1 | 新架構；能量 kernel 取自 AutoDock-GPU 1.6，移植 OmegaDocker 修改 |
 | Q2 | 版本號 0.40.0 |
-| Q3 | `--stam` 檔案內全部為 StaM；`--mobm` 每個檔案只有一個分子，可多次指定 |
+| Q3 | `--stamFile` 檔案內全部為 StaM；`--mobmFiles` 每個檔案只有一個分子，可多次指定 |
 | Q4 | 樣本數參數：命令列共同值 + 分子設定檔覆寫 |
 | Q5 | StaM 依 `stamFixedResMovable`（預設 false）：固定殘基主鏈不動、loop 由固定端建構並在另一端斷鍵；true 時錨點為最靠近質心的殘基（4.7） |
 | Q6 | 9b 不調整 StaM 兩面角 |
@@ -1130,7 +1131,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | Q14 | 超過 PDB 上限時輸出 mmCIF |
 | Q15 | 核酸 δ 預設不可動（除非斷環） |
 | Q16 | 寫出檢查點，並支援從中斷處接續（第 16 節） |
-| R1 | `--stam` 只能指定一次 |
+| R1 | `--stamFile` 只能指定一次 |
 | R2 | Top8000 數值直接作為抽樣權重 |
 | R3 | 檢查點僅在 9c 結束時寫出；SIGINT / SIGTERM 直接結束 |
 | — | 開發順序：CPU 版 → CUDA 版 → OpenCL 版 |
@@ -1173,6 +1174,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 參數前綴統一為 `stam`／`mobm`；csgm 參數分為 StaM 群與 MobM 兩組（7.0） |
 | — | 9a 的批次與上限分為兩組；9a 最佳化、可達距離與能量相關參數兩組共用（7.0） |
 | — | 輸入參數改為 `--stam`／`--mobm`，分子 id 前綴改為 `stam:`／`mobm:`（3.2、5.2） |
+| — | 輸入參數再改為 `--stamFile`／`--mobmFiles`（3.2） |
+| — | posm1／posm2 的位置與定向的旋轉中心為 MobM 重原子中心（重原子座標的不加權平均，與質量無關）（8.3、8.4） |
+| — | 9b 最佳化中任一 MobM 原子移出網格時，移除該 pos（8.6） |
 | — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
 
 ### 17.2 待確認
@@ -1212,3 +1216,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.14 | 2026-10-15 | 輸入參數 `--sta`、`--mob` 改為 `--stam`、`--mobm`，分子 id 前綴改為 `stam:`、`mobm:`；`--maxL1TotalNum`、`--maxL1BatchNum` 分為 `--stam*`／`--mobm*`（7.0、7.4）；新增 7.11 loop 閉合（CCD、KIC） |
 | 1.15 | 2026-10-15 | 實作 9b 能量網格（`full`）與距離網格的 CPU 參考版：補充網格範圍、探針類型、type/elec/desolv map 的分解、截斷距離、不用 H-bond 方向性、格點上限（8.1、8.2）；新增 `--gridSpacing` |
 | 1.16 | 2026-10-15 | 實作定向（8.3）：四元數、Shoemake 隨機定向、Hopf 格點的取點方式與實測間距；新增 `--rotStep` |
+| 1.17 | 2026-10-15 | 輸入參數改為 `--stamFile`、`--mobmFiles`（3.2）；定向的旋轉中心與 posm1／posm2 的位置改為 MobM 重原子中心（8.3、8.4）；9b 最佳化中移出網格即移除該 pos（8.1、8.6） |

@@ -253,7 +253,7 @@ int run(int argc, char** argv) {
   std::vector<od::Topology> mobTopo;
   for (const auto& f : opt.mobmFiles) {
     auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
-    if (mob.size() != 1) od::fail("{}: --mobm file must contain exactly one molecule, found {}", f, mob.size());
+    if (mob.size() != 1) od::fail("{}: --mobmFiles file must contain exactly one molecule, found {}", f, mob.size());
     od::logInfo(std::format("MobM from {}:", f));
     printMolecule(mob.front());
     od::Topology t = analyze(mob.front(), opt);

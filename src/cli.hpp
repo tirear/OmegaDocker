@@ -31,8 +31,8 @@ struct CsgmOpts {
 };
 
 struct Options {
-  std::string stamFile;                // --stam
-  std::vector<std::string> mobmFiles;  // --mobm
+  std::string stamFile;                // --stamFile
+  std::vector<std::string> mobmFiles;  // --mobmFiles
   std::string molConfig;
   std::vector<std::string> ccd;
   std::optional<Vec3> boxCenter;
