@@ -76,6 +76,9 @@ class EnergySystem {
   EnergyTerms evaluate(std::span<const float> anglesDeg, std::vector<double>* gradient, std::vector<Vec3f>* coords,
                        const ExternalTermF* external) const;
 
+  // Coordinates only (atoms and virtual atoms of all parts), single precision.
+  std::vector<Vec3f> coordinates(std::span<const float> anglesDeg) const;
+
   struct Pair {
     int i, j;            // coordinate indices
     std::uint16_t type;  // index into the type-pair table
@@ -84,6 +87,8 @@ class EnergySystem {
   const std::vector<Pair>& pairs() const { return pairs_; }
 
  private:
+  template <class T>
+  std::vector<Vec3T<T>> coordinatesT(std::span<const T> anglesDeg) const;
   template <class T>
   EnergyTerms evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient, std::vector<Vec3T<T>>* coords,
                         const ExternalTermT<T>* external) const;

@@ -52,6 +52,7 @@ struct Pose {
 
 struct DockSample {
   Pose pose;                  // float values
+  Vec3 center{};              // heavy-atom centre of the starting conformation (the Pose frame)
   std::vector<float> angles;  // degrees
   float energy = 0;           // inter + interClash + MobM intra + MobM clash; closure excluded (spec 4.5)
   float inter = 0;            // grid energy

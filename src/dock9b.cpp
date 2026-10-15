@@ -341,6 +341,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
   out.intra = static_cast<float>(pe.intra.filterEnergy());
   out.closureMaxDeviation = static_cast<float>(pe.intra.closureMaxDeviation);
   out.steps = r.steps;
+  out.center = c.center;
   return true;
 }
 

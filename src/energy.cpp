@@ -181,15 +181,23 @@ std::vector<double> EnergySystem::inputAngles() const {
 }
 
 template <class T>
-EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient,
-                                    std::vector<Vec3T<T>>* coords, const ExternalTermT<T>* external) const {
-  using V = Vec3T<T>;
-  std::vector<V> x(coordCount_);
+std::vector<Vec3T<T>> EnergySystem::coordinatesT(std::span<const T> anglesDeg) const {
+  std::vector<Vec3T<T>> x(coordCount_);
   for (std::size_t k = 0; k < parts_.size(); ++k) {
     const auto& tree = *parts_[k].tree;
     const auto xyz = buildCoordinates(*parts_[k].mol, tree, anglesDeg.subspan(torsionOffset_[k], tree.torsions.size()));
     std::copy(xyz.begin(), xyz.end(), x.begin() + offset_[k]);
   }
+  return x;
+}
+
+std::vector<Vec3f> EnergySystem::coordinates(std::span<const float> anglesDeg) const { return coordinatesT(anglesDeg); }
+
+template <class T>
+EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient,
+                                    std::vector<Vec3T<T>>* coords, const ExternalTermT<T>* external) const {
+  using V = Vec3T<T>;
+  std::vector<V> x = coordinatesT(anglesDeg);
   const bool grad = gradient != nullptr;
   // Accumulators (energy sums, per-coordinate gradients) are double.
   std::vector<Vec3> g(grad ? coordCount_ : 0, Vec3{0, 0, 0});

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.22 |
+| 文件版本 | 1.23 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -439,6 +439,8 @@ flowchart TD
 
 - 每個 MobM 各自擁有：MobM 的 dcss / L2 pool、**StaM 的 dcss**、topSampleSet。
 - 所有 MobM 共用：StaM 的 L2 pool、StaM 構型的網格快取。
+- 每輪的 9a 依 MobM 順序補滿：先補第 i 個 MobM 的 StaM dcss（從共用的 StaM L2 pool 取），再補其 MobM dcss。樣本移入 dcss 時取得 ID（StaM 群一組、每個 MobM 一組，從 0 起依序編號）；無可動兩面角的分子只有 ID 0（輸入結構）。
+- 每輪的 9b：取所有 MobM 的 StaM dcss 的聯集，依 StaM 構型樣本 ID 由小到大，每個 StaM 構型建立一次網格與距離網格，供 StaM dcss 含有它的所有 MobM 使用；用完即釋放，下一輪若仍需要則重建（目前不跨輪快取）。每個 MobM 依 MobM dcss 的順序對接每個構型配對。
 
 ---
 
@@ -489,6 +491,7 @@ if |L2pool| < need:
 
 - 「使用者指定」：StaM 群用 `--stamCsgmGA`，MobM 用 `--mobmCsgmGA`。
 - csgm1 的父代不依賴 dcss。
+- 目前尚未實作 csgm2、csgm3，也尚未提供 `--stamCsgmGA`、`--mobmCsgmGA`：所有補充都使用 csgm1。
 - csgm2 的父代、csgm3 的端點 = 目前 dcss 中的樣本（必定 ≥ `eliteConfSampleNum` ≥ 2 個，且都已有 9b 能量）。
 
 ### 7.4 下一批 L1 數量
@@ -753,7 +756,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 #### 8.4.1 posm1：隨機取樣
 - 先取定向（Shoemake 隨機四元數），再於該定向的合法範圍內，每軸均勻取整數 i。
 - 定向放不下時，該 L1pos 計為「超出範圍」並捨棄，不重新抽定向（避免定向分佈偏向放得下的定向）。
-- 亂數：第 k 個 L1pos 只由 `(seed, 構型配對的串流, k)` 決定；串流由（輪次、MobM 編號、StaM 構型樣本 ID、MobM 構型樣本 ID）雜湊而得，與執行緒數無關。
+- 亂數：第 k 個 L1pos 只由 `(seed, 構型配對的串流, k)` 決定；串流由（輪次（從 1 起）、MobM 編號（從 0 起）、StaM 構型樣本 ID、MobM 構型樣本 ID）雜湊而得，與執行緒數無關。
 - 數量：`posm1SampleNum`（每個構型配對，預設 1000，含捨棄者）。
 - 所有 L1pos 都被捨棄時輸出警告，提示 `--boxSize` 可能太小。
 
@@ -843,13 +846,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 每個 MobM 獨立進行：
 
-1. **合併**：上一輪 topSampleSet ∪ 本輪所有對接樣本。
-2. **排序**：依 9b 能量由低到高。
+1. **合併**：上一輪 topSampleSet ∪ 本輪所有對接樣本。合併順序：上一輪 topSampleSet（依其順序），再接本輪對接樣本（依 9b 的對接順序：StaM 構型樣本 ID、MobM dcss 順序、L1pos 序號）。
+2. **排序**：依 9b 能量（8.6 的排序能量，不含閉合約束）由低到高；能量相同時保持合併順序（穩定排序）。
 3. **多樣性篩選**（貪婪法）：
    - 依序檢查每個樣本；若與已保留樣本「使用相同 StaM 構型」且 RMSD < `diversityRmsd`，則跳過。
-   - RMSD：MobM 重原子，不疊合（StaM 為固定座標框架）；對稱修正採同類型原子最近配對（同 AutoDock）。
-   - 加速：質心距離 > `diversityRmsd` 的配對直接視為不同（RMSD ≥ 質心距離）。
+   - RMSD：MobM 重原子（8.1 的探針原子中 H、HD、HS 以外者），不疊合（StaM 為固定座標框架）；座標與 9b 相同，以 float 由對接樣本的 pose 與兩面角計算。對稱修正採同類型原子最近配對（同 AutoDock）：受檢樣本的每個原子，與已保留樣本中同一 AD4 類型、距離最近的原子配對。
+   - 不使用質心距離加速：採最近配對時，RMSD 可能小於質心距離，以質心距離判定為不同會保留應跳過的樣本。
    - 相同位置、不同定向的樣本因 RMSD 大，會被保留。
+   - 依序檢查到保留 `topSampleNum` 個為止；只計算被檢查樣本的座標。
    - `diversityRmsd` 預設 2.0 Å；設為 0 表示關閉。
 4. **取前 `topSampleNum` 個** 為新的 topSampleSet。
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
@@ -858,6 +862,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 5. **篩選 dcss**：
    - `E_top_max` = topSampleSet 中的最高能量。
    - MobM dcss 與 StaM dcss 中，本輪最低能量 > `E_top_max` 的樣本移除。
+   - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低能量；不重做的配對（決定性 posm）使用先前記錄的值。
+   - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除）一律移除；topSampleSet 為空時，dcss 全部移除。
+   - 無可動兩面角的分子（只有輸入結構）不篩選。
 6. 下一輪的 9a 補滿 dcss。
 
 **已對接過的構型配對**：以 (StaM 構型樣本 ID, MobM 構型樣本 ID) 記錄。後續輪次中：
@@ -870,6 +877,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ## 10. 9d：停止與輸出
 
 - 停止條件：輪數達 `maxRound`。
+- 目前只實作到 9c：所有輪次結束後，在執行紀錄列出每個 MobM 的 topSampleSet（能量、StaM／MobM 構型樣本 ID、位置）；精確重算、分群與檔案輸出尚未實作。
 - 精確重算：沿用目前 OmegaDocker 的 CPU 重算流程（`make_resfiles` 中的 `calc_interE_f`、`calc_intraE_f`），本版不改能量函式。
 - 分群：沿用 AutoDock-GPU 的 RMSD 分群（`rmstol` 預設 2.0 Å）。
 - 輸出（每個 MobM 一個目錄 `<outPrefix>/<MobM id>/`）：
@@ -947,6 +955,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - `--gpuMemLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
 - L2 pool、topSampleSet 存在主機記憶體；L2 pool 不設容量上限。
+- 目前 CPU 版在 9c 之前保留本輪所有對接樣本（每個含 pose 與兩面角）；posm2 下一輪可達數百萬個，記憶體用量隨之增加。
 - csgm2、csgm3 的一批樣本即使 L2 pool 已達 `minL2confSampleNum`，仍處理完整批。
 
 ---
@@ -1228,6 +1237,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 9b 以 float 計算，只有加總、L-BFGS、pose 更新用 double；對接樣本即最後被接受的點，不重算（8.6、12.1） |
 | — | `--gridSpacing` 預設維持 0.375 Å（8.1） |
 | — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
+| — | 9c：穩定排序、AutoDock 式最近配對 RMSD（不用質心距離加速）；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，不跨輪快取（6、9） |
 
 ### 17.2 待確認
 - loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
@@ -1272,3 +1282,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.20 | 2026-10-15 | 9b 最佳化中有探針原子在網格外的試探點改為直接拒絕（視同不滿足 Armijo 條件），不再移除 pos；最佳化後重算樣本時允許 10⁻³ Å 的出界容許值（8.1、8.6、12） |
 | 1.21 | 2026-10-15 | 9b 改為 float 計算（加總、L-BFGS、pose 更新維持 double），新增 12.1 數值精度；對接樣本直接取最後被接受的點，不重算，移除 1.20 的 10⁻³ Å 容許值；8.4 位置範圍改以 float 計算並向內保留 0.01 Å（8.4、8.6、12.1） |
 | 1.22 | 2026-10-15 | 9b 最佳化中有探針原子移出網格（含 line search 試探點）時改回移除該 pos（1.17 的做法），取消 1.20 的拒絕試探點（8.1、8.6、12） |
+| 1.23 | 2026-10-15 | 實作輪次流程與 9c（CPU 參考版）：補滿 dcss 的順序與樣本 ID、每輪的網格建立、合併順序與穩定排序、RMSD 的原子與配對方向、移除質心距離加速（與最近配對不相容）、dcss 的本輪最低能量與無對接樣本的處理；csgm2／csgm3 尚未實作前一律用 csgm1；新增 `--maxRound`、`--topSampleNum`、`--diversityRmsd`（6、7.3、8.4、9、10、13） |

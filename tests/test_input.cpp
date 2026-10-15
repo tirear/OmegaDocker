@@ -8,6 +8,7 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <fstream>
 #include <numbers>
 #include <optional>
@@ -16,6 +17,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #include <omp.h>
 #include <unistd.h>
@@ -26,6 +28,7 @@
 #include "conf9a.hpp"
 #include "csgm1.hpp"
 #include "dock9b.hpp"
+#include "dock9c.hpp"
 #include "log.hpp"
 #include "minimize.hpp"
 #include "dssp.hpp"
@@ -2206,4 +2209,81 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
   CHECK(j == out.size());
   MESSAGE("9b: L1 ", st.l1, " L2 ", st.l2, " left grid ", st.leftGrid, " steps/pose ",
           static_cast<double>(st.steps) / std::max<long long>(1, st.l2), " best ", best);
+}
+
+TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
+  // RMSD with nearest same-type pairing.
+  const std::vector<od::Vec3f> a{{0, 0, 0}, {1, 0, 0}, {0, 2, 0}};
+  const std::vector<int> ty{1, 1, 2};
+  CHECK(od::symmetricRmsd(a, a, ty) == 0);
+  const std::vector<od::Vec3f> sw{{1, 0, 0}, {0, 0, 0}, {0, 2, 0}};  // same-type atoms swapped
+  CHECK(od::symmetricRmsd(a, sw, ty) == 0);
+  std::vector<od::Vec3f> sh = a;
+  for (auto& p : sh) p[2] += 3;
+  CHECK(od::symmetricRmsd(a, sh, ty) == doctest::Approx(3));
+
+  // Docking samples of one conformation pair.
+  DockFixture f;
+  f.p.posm1SampleNum = 600;
+  f.p.lbfgs.maxSteps = 100;
+  const od::MobmDocker dk(*f.x.mobSys, f.grids, f.dist, f.p);
+  const auto angles = f.x.mobSys->inputAngles();
+  std::vector<od::DockSample> out;
+  dk.dockPair(angles, 9, out);
+  REQUIRE(out.size() >= 10);
+  const od::MobmHeavyAtoms heavy(*f.x.mobSys);
+  CHECK(heavy.size() == static_cast<std::size_t>(std::count_if(f.x.mobm.heavy.begin(), f.x.mobm.heavy.end(), [](char h) { return h != 0; })));
+  // World coordinates: inside the docking box, and the energy of the sample re-evaluates from the same pose.
+  for (const auto& p : heavy.world(out[0]))
+    for (int d = 0; d < 3; ++d) CHECK(std::abs(p[d] - f.p.boxCenter[d]) <= 0.5 * f.p.boxSize[d] + 1e-3);
+  CHECK(od::symmetricRmsd(heavy.world(out[0]), heavy.world(out[0]), heavy.types()) == 0);
+
+  std::vector<od::RoundSample> merged;
+  for (std::size_t k = 0; k < out.size(); ++k) merged.push_back({static_cast<int>(k % 2), 0, out[k]});
+  std::vector<float> e;
+  for (const auto& m : merged) e.push_back(m.s.energy);
+  std::sort(e.begin(), e.end());
+
+  // Without the diversity filter: the topNum lowest energies.
+  auto top = od::selectTopSamples(merged, heavy, 5, 0);
+  REQUIRE(top.size() == 5);
+  for (int k = 0; k < 5; ++k) CHECK(top[k].s.energy == e[k]);
+  CHECK(od::topMaxEnergy(top) == e[4]);
+
+  // With the filter: sorted, and samples of the same StaM conformation at least diversityRmsd apart.
+  const double rmsd = 4.0;
+  top = od::selectTopSamples(merged, heavy, 1000, rmsd);
+  REQUIRE(!top.empty());
+  CHECK(top.size() < merged.size());
+  CHECK(top[0].s.energy == e[0]);
+  for (std::size_t k = 1; k < top.size(); ++k) CHECK(top[k - 1].s.energy <= top[k].s.energy);
+  for (std::size_t k = 0; k < top.size(); ++k)
+    for (std::size_t j = 0; j < k; ++j)
+      if (top[j].stam == top[k].stam) CHECK(od::symmetricRmsd(heavy.world(top[k].s), heavy.world(top[j].s), heavy.types()) >= rmsd);
+  // Every skipped sample is close to a kept sample of the same StaM conformation with a lower or equal energy.
+  for (const auto& m : merged) {
+    bool kept = false, covered = false;
+    for (const auto& t : top) {
+      kept |= t.s.energy == m.s.energy && t.stam == m.stam && t.s.pose.t == m.s.pose.t;
+      covered |= t.stam == m.stam && t.s.energy <= m.s.energy &&
+                 od::symmetricRmsd(heavy.world(m.s), heavy.world(t.s), heavy.types()) < rmsd;
+    }
+    CHECK((kept || covered));
+  }
+  // Ties keep the merged order (previous topSampleSet first).
+  std::vector<od::RoundSample> tie{{0, 1, out[0]}, {0, 2, out[0]}};
+  top = od::selectTopSamples(tie, heavy, 2, 0);
+  CHECK(top[0].mobm == 1);
+  CHECK(top[1].mobm == 2);
+  top = od::selectTopSamples(tie, heavy, 2, rmsd);
+  REQUIRE(top.size() == 1);
+  CHECK(top[0].mobm == 1);
+
+  // dcss filter.
+  std::vector<int> dcss{1, 2, 3, 4};
+  const std::unordered_map<int, float> lowest{{1, -5.f}, {2, -2.f}, {4, -3.f}};
+  CHECK(od::filterDcss(dcss, lowest, -3.f) == 2);  // 2 above E_top_max, 3 without docking samples
+  CHECK(dcss == std::vector<int>{1, 4});
+  CHECK(od::filterDcss(dcss, lowest, -std::numeric_limits<float>::infinity()) == 2);
+  CHECK(dcss.empty());
 }

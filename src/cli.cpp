@@ -200,6 +200,12 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.maxTransStep = parseDouble("maxTransStep", v); }},
       {"maxAngleStep", Kind::Value, "<deg>", "10", "9b minimization: largest rotation and torsion change per step",
        [](Options& o, const std::string& v) { o.maxAngleStep = parseDouble("maxAngleStep", v); }},
+      {"maxRound", Kind::Value, "<n>", "10", "Number of 9a-9c rounds",
+       [](Options& o, const std::string& v) { o.maxRound = parseInt32("maxRound", v); }},
+      {"topSampleNum", Kind::Value, "<n>", "eliteStaM x eliteMobM", "9c: size of the topSampleSet of each MobM",
+       [](Options& o, const std::string& v) { o.topSampleNum = parseInt32("topSampleNum", v); }},
+      {"diversityRmsd", Kind::Value, "<dist>", "2.0", "9c: samples with the same StaM conformation closer than this RMSD to a kept sample are skipped (Å; 0 disables)",
+       [](Options& o, const std::string& v) { o.diversityRmsd = parseDouble("diversityRmsd", v); }},
       {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
        [](Options& o, const std::string& v) { o.rotStep = parseDouble("rotStep", v); }},
       {"maxNearDistance", Kind::Value, "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -336,6 +342,9 @@ void validateOptions(const Options& o) {
   if (!(o.scaleTrans > 0 && o.scaleRot > 0 && o.scaleTors > 0)) fail("--scaleTrans, --scaleRot, --scaleTors must be > 0");
   if (!(o.maxTransStep > 0)) fail("--maxTransStep must be > 0");
   if (!(o.maxAngleStep > 0)) fail("--maxAngleStep must be > 0");
+  if (o.maxRound < 1) fail("--maxRound must be >= 1");
+  if (o.topSampleNum && *o.topSampleNum < 1) fail("--topSampleNum must be >= 1");
+  if (!(o.diversityRmsd >= 0)) fail("--diversityRmsd must be >= 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {

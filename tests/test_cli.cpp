@@ -41,6 +41,9 @@ TEST_CASE("cli: required options and values") {
   CHECK(o.lbfgsMemory == 7);
   CHECK(o.maxTransStep == doctest::Approx(0.5));
   CHECK(o.maxAngleStep == doctest::Approx(10));
+  CHECK(o.maxRound == 10);
+  CHECK_FALSE(o.topSampleNum);
+  CHECK(o.diversityRmsd == doctest::Approx(2.0));
   CHECK_NOTHROW(od::validateOptions(o));
 
   auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--stamFlexMargin=6.5"});
@@ -75,6 +78,19 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.stamFlexMargin = 4;
   o.boxSize = od::Vec3{10, 0, 10};
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.boxSize = od::Vec3{10, 10, 10};
+  auto r = parse({"--maxRound", "3", "--topSampleNum", "20", "--diversityRmsd", "0"});
+  CHECK(r.maxRound == 3);
+  CHECK(r.topSampleNum == 20);
+  CHECK(r.diversityRmsd == 0);
+  o.maxRound = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.maxRound = 1;
+  o.topSampleNum = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.topSampleNum.reset();
+  o.diversityRmsd = -1;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 }
 

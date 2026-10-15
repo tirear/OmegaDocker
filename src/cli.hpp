@@ -70,6 +70,9 @@ struct Options {
   double scaleTrans = 1, scaleRot = 1, scaleTors = 1;
   double maxTransStep = 0.5;
   double maxAngleStep = 10.0;
+  int maxRound = 10;
+  std::optional<int> topSampleNum;  // default: eliteStaM x eliteMobM (spec 9)
+  double diversityRmsd = 2.0;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;
