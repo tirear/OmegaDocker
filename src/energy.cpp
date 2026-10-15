@@ -137,6 +137,8 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
     }
   }
 
+  std::vector<std::string> fixedClashes;
+  const double cd2 = params_.clashDistance * params_.clashDistance;
   for (std::size_t x = 0; x < atoms.size(); ++x) {
     const EAtom& p = atoms[x];
     const auto& gp = groups[p.part][p.atom];
@@ -144,10 +146,29 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
       const EAtom& q = atoms[y];
       if (p.part == q.part && std::binary_search(near[p.part][p.atom].begin(), near[p.part][p.atom].end(), q.atom))
         continue;
-      if (intersect(gp, groups[q.part][q.atom])) continue;
+      if (intersect(gp, groups[q.part][q.atom])) {
+        if (!p.heavy || !q.heavy) continue;
+        const Molecule& mp = *parts_[p.part].mol;
+        const Molecule& mq = *parts_[q.part].mol;
+        const Vec3& a = mp.atoms[p.atom].xyz;
+        const Vec3& b = mq.atoms[q.atom].xyz;
+        const double r2 = (a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]);
+        if (r2 < cd2)
+          fixedClashes.push_back(std::format("\n  {} {} - {} {}: {:.3f} Å", mp.id, atomRef(mp, p.atom), mq.id,
+                                             atomRef(mq, q.atom), std::sqrt(r2)));
+        continue;
+      }
       pairs_.push_back({p.index, q.index, static_cast<std::uint16_t>(static_cast<int>(p.type) * kTypes + static_cast<int>(q.type)),
                         p.heavy && q.heavy});
     }
+  }
+  if (!fixedClashes.empty()) {
+    std::string list;
+    for (std::size_t i = 0; i < fixedClashes.size() && i < 50; ++i) list += fixedClashes[i];
+    if (fixedClashes.size() > 50) list += std::format("\n  ... ({} more)", fixedClashes.size() - 50);
+    fail("input structure: {} pair(s) of heavy atoms closer than --clashDistance {} Å whose distance cannot change "
+         "(make torsions between them rotatable or fix the input):{}",
+         fixedClashes.size(), params_.clashDistance, list);
   }
 }
 

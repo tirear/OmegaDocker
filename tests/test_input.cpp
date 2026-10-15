@@ -1224,3 +1224,25 @@ TEST_CASE("energy: metal restraints (1ZNF)") {
   CHECK(sys.evaluate(a).closure > 0);
   CHECK(gradientMismatches(sys, a) == 0);
 }
+
+TEST_CASE("energy: clash between fixed atoms in the input (2KJJ)") {
+  StaFixture f;
+  const auto cfg = f.ok(f.text);
+  od::Molecule m = f.mols[0];
+  const auto& tree = cfg.molecules[0].tree;
+  CHECK_NOTHROW(od::EnergySystem({{&m, &tree}}, {}));
+  // Move one fixed backbone atom onto a distant fixed backbone atom.
+  const int a = tree.anchors.front();
+  int b = -1;
+  for (int c : tree.anchors)
+    if (distance(m.atoms[a].xyz, m.atoms[c].xyz) > 10) b = c;
+  REQUIRE(b >= 0);
+  m.atoms[a].xyz = {m.atoms[b].xyz[0] + 1.0, m.atoms[b].xyz[1], m.atoms[b].xyz[2]};
+  try {
+    od::EnergySystem sys({{&m, &tree}}, {});
+    FAIL("no error");
+  } catch (const od::Error& e) {
+    CHECK(std::string(e.what()).find("distance cannot change") != std::string::npos);
+    CHECK(std::string(e.what()).find("1.000 Å") != std::string::npos);
+  }
+}

@@ -46,7 +46,8 @@ struct EnergyPart {
 
 class EnergySystem {
  public:
-  // Throws od::Error when an atom has no AD4 parameters.
+  // Throws od::Error when an atom has no AD4 parameters, or when two heavy
+  // atoms whose distance cannot change clash in the input structure.
   EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& params);
 
   int torsionCount() const { return torsionCount_; }
