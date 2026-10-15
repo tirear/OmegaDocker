@@ -75,6 +75,8 @@ DistanceGrid buildDistanceGrid(const GridGeometry& geom, const GridAtoms& stam, 
 
 // Trilinear interpolation of a map at p (p inside geom); grad (optional): dvalue/dp.
 double interpolate(const GridGeometry& geom, std::span<const float> map, const Vec3& p, Vec3* grad = nullptr);
+// Single precision (9b, spec 8.6): all arithmetic in float.
+float interpolate(const GridGeometry& geom, std::span<const float> map, const Vec3f& p, Vec3f* grad = nullptr);
 
 struct InterEnergy {
   double energy = 0;

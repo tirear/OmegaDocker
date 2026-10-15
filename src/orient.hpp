@@ -15,6 +15,20 @@ struct Quat {
   double w = 1, x = 0, y = 0, z = 0;
 };
 
+// Single-precision quaternion (9b energy evaluation, spec 8.6).
+struct QuatF {
+  float w = 1, x = 0, y = 0, z = 0;
+};
+inline QuatF toFloat(const Quat& q) {
+  return {static_cast<float>(q.w), static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z)};
+}
+inline Vec3f rotate(const QuatF& q, const Vec3f& v) {
+  const float tx = q.y * v[2] - q.z * v[1] + q.w * v[0];
+  const float ty = q.z * v[0] - q.x * v[2] + q.w * v[1];
+  const float tz = q.x * v[1] - q.y * v[0] + q.w * v[2];
+  return {v[0] + 2 * (q.y * tz - q.z * ty), v[1] + 2 * (q.z * tx - q.x * tz), v[2] + 2 * (q.x * ty - q.y * tx)};
+}
+
 Quat operator*(const Quat& a, const Quat& b);
 Quat normalized(const Quat& q);
 Vec3 rotate(const Quat& q, const Vec3& v);

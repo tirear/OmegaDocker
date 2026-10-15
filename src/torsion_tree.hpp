@@ -83,6 +83,8 @@ TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::ve
 // Coordinates (atoms, then virtual atoms) for absolute angles in degrees, one
 // per TorsionTree::torsions.
 std::vector<Vec3> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const double> anglesDeg);
+// Single precision (9b, spec 8.6): all arithmetic in float.
+std::vector<Vec3f> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const float> anglesDeg);
 
 struct ClosureState {
   double energy = 0.0;        // G * sum of squared deviations (spec 4.5)

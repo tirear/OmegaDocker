@@ -88,13 +88,36 @@ std::vector<std::vector<int>> chains(const Topology& t) {
 }
 
 // Rotates p around the axis through o with unit direction k by angle (radians).
-Vec3 rotate(const Vec3& p, const Vec3& o, const Vec3& k, double c, double s) {
-  const Vec3 v{p[0] - o[0], p[1] - o[1], p[2] - o[2]};
-  const double dot = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
-  const Vec3 cr{k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]};
-  Vec3 r;
+template <class T>
+Vec3T<T> rotate(const Vec3T<T>& p, const Vec3T<T>& o, const Vec3T<T>& k, T c, T s) {
+  const Vec3T<T> v{p[0] - o[0], p[1] - o[1], p[2] - o[2]};
+  const T dot = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+  const Vec3T<T> cr{k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]};
+  Vec3T<T> r;
   for (int i = 0; i < 3; ++i) r[i] = o[i] + v[i] * c + cr[i] * s + k[i] * dot * (1 - c);
   return r;
+}
+
+template <class T>
+std::vector<Vec3T<T>> buildCoordinatesT(const Molecule& m, const TorsionTree& tree, std::span<const T> anglesDeg) {
+  std::vector<Vec3T<T>> xyz;
+  xyz.reserve(m.atoms.size() + tree.virtuals.size());
+  auto cast = [](const Vec3& p) { return Vec3T<T>{static_cast<T>(p[0]), static_cast<T>(p[1]), static_cast<T>(p[2])}; };
+  for (const Atom& a : m.atoms) xyz.push_back(cast(a.xyz));
+  for (const VirtualAtom& v : tree.virtuals) xyz.push_back(cast(v.xyz));
+  // Children first; the axis atoms of a torsion are not moved by its descendants.
+  for (std::size_t i = tree.torsions.size(); i-- > 0;) {
+    const TreeTorsion& tt = tree.torsions[i];
+    const Vec3T<T> o = xyz[tt.fixedAtom], p = xyz[tt.movingAtom];
+    Vec3T<T> k{p[0] - o[0], p[1] - o[1], p[2] - o[2]};
+    const T len = std::sqrt(k[0] * k[0] + k[1] * k[1] + k[2] * k[2]);
+    if (len == 0) continue;
+    for (T& x : k) x /= len;
+    const T delta = (anglesDeg[i] - static_cast<T>(tt.inputAngle)) * std::numbers::pi_v<T> / T(180);
+    const T c = std::cos(delta), s = std::sin(delta);
+    for (int a : tt.moving) xyz[a] = rotate(xyz[a], o, k, c, s);
+  }
+  return xyz;
 }
 
 }  // namespace
@@ -277,23 +300,11 @@ TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::ve
 }
 
 std::vector<Vec3> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const double> anglesDeg) {
-  std::vector<Vec3> xyz;
-  xyz.reserve(m.atoms.size() + tree.virtuals.size());
-  for (const Atom& a : m.atoms) xyz.push_back(a.xyz);
-  for (const VirtualAtom& v : tree.virtuals) xyz.push_back(v.xyz);
-  // Children first; the axis atoms of a torsion are not moved by its descendants.
-  for (std::size_t i = tree.torsions.size(); i-- > 0;) {
-    const TreeTorsion& tt = tree.torsions[i];
-    const Vec3 o = xyz[tt.fixedAtom], p = xyz[tt.movingAtom];
-    Vec3 k{p[0] - o[0], p[1] - o[1], p[2] - o[2]};
-    const double len = std::sqrt(k[0] * k[0] + k[1] * k[1] + k[2] * k[2]);
-    if (len == 0) continue;
-    for (double& x : k) x /= len;
-    const double delta = (anglesDeg[i] - tt.inputAngle) * std::numbers::pi / 180.0;
-    const double c = std::cos(delta), s = std::sin(delta);
-    for (int a : tt.moving) xyz[a] = rotate(xyz[a], o, k, c, s);
-  }
-  return xyz;
+  return buildCoordinatesT(m, tree, anglesDeg);
+}
+
+std::vector<Vec3f> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const float> anglesDeg) {
+  return buildCoordinatesT(m, tree, anglesDeg);
 }
 
 ClosureState evaluateClosure(const TorsionTree& tree, std::span<const Vec3> xyz, double G) {

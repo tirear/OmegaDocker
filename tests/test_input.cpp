@@ -874,6 +874,49 @@ TEST_CASE("torsion tree: MobM coordinates (1L2Y)") {
   }
 }
 
+TEST_CASE("torsion tree: single-precision coordinates of a long chain (1D3Z)") {
+  std::vector<od::Molecule> mols{od::loadMolecules(kData + "/1D3Z.cif", od::Role::MobM, ccd()).front()};
+  std::vector<od::Topology> topos{od::analyzeTopology(mols[0], {})};
+  od::assignDssp({&mols[0]}, {&topos[0]});
+  const std::vector<od::MolInput> inputs{{&mols[0], &topos[0]}};
+  const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_1d3z_{}.toml", ::getpid())).string();
+  std::ofstream(path) << od::defaultMolConfigText(inputs);
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(path, inputs, {}, errors);
+  std::filesystem::remove(path);
+  REQUIRE(cfg);
+  const od::TorsionTree& tree = cfg->molecules[0].tree;
+  int depth = 0;
+  for (std::size_t i = 0; i < tree.torsions.size(); ++i) {
+    int d = 0;
+    for (int p = static_cast<int>(i); p >= 0; p = tree.torsions[p].parent) ++d;
+    depth = std::max(depth, d);
+  }
+  CHECK(depth > 50);
+  double worst = 0, worstBond = 0;
+  for (std::uint64_t s = 0; s < 5; ++s) {
+    od::Rng rng(11, 0, s);
+    std::vector<double> ad(tree.torsions.size());
+    for (double& v : ad) v = static_cast<float>(rng.uniform() * 360 - 180);
+    const std::vector<float> af(ad.begin(), ad.end());
+    const auto xd = od::buildCoordinates(mols[0], tree, ad);
+    const auto xf = od::buildCoordinates(mols[0], tree, std::span<const float>(af));
+    for (std::size_t i = 0; i < xd.size(); ++i)
+      for (int k = 0; k < 3; ++k) worst = std::max(worst, std::abs(xd[i][k] - xf[i][k]));
+    for (const auto& b : mols[0].bonds) {
+      auto len = [&](const auto& x) {
+        const double dx = x[b.a][0] - x[b.b][0], dy = x[b.a][1] - x[b.b][1], dz = x[b.a][2] - x[b.b][2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+      };
+      worstBond = std::max(worstBond, std::abs(len(xd) - len(xf)));
+    }
+  }
+  MESSAGE("1D3Z: ", tree.torsions.size(), " torsions, depth ", depth, ", max |float - double| ", worst,
+          " Å, max bond-length change ", worstBond, " Å");
+  CHECK(worst < 1e-2);
+  CHECK(worstBond < 1e-3);
+}
+
 TEST_CASE("torsion tree: StaM defaults (2KJJ)") {
   StaFixture f;
   const auto cfg = f.ok(f.text);
@@ -1970,14 +2013,16 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   // Probe atoms (all real atoms) relative to the heavy-atom centre.
   std::vector<od::Vec3> rel;
   for (const auto& y : f.x.mobm.xyz) rel.push_back({y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
-  const auto allInside = [&](const od::Pose& pose, const od::Vec3& bc) {
+  // shrink: distance kept from the box faces.
+  const auto allInside = [&](const od::Pose& pose, const od::Vec3& bc, double shrink = 0) {
     for (const auto& y : rel) {
       const auto r = od::rotate(pose.q, y);
       for (int d = 0; d < 3; ++d)
-        if (std::abs(r[d] + pose.t[d] - bc[d]) > 24 + 1e-9) return false;
+        if (std::abs(r[d] + pose.t[d] - bc[d]) > 24 - shrink + 1e-9) return false;
     }
     return true;
   };
+  const double inner = od::MobmDocker::kPosMargin - 1e-4;  // float rounding of the range
   const auto onLattice = [&](const od::Pose& pose, const od::Vec3& bc) {
     for (int d = 0; d < 3; ++d) {
       const double u = pose.t[d] - (bc[d] - 24);
@@ -1994,10 +2039,10 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
     CHECK(a->q.w == b->q.w);
     CHECK(a->t == b->t);
     CHECK(onLattice(*a, f.p.boxCenter));
-    CHECK(allInside(*a, f.p.boxCenter));
+    CHECK(allInside(*a, f.p.boxCenter, inner));
   }
   CHECK(dk.l1Pose(c, 9, 0)->t != dk.l1Pose(c, 10, 0)->t);
-  // The range is exact: one more lattice step leaves the box.
+  // The range is exact (up to kPosMargin): one more lattice step comes closer than kPosMargin to a box face.
   for (long long k = 0; k < 50; ++k) {
     const auto q = dk.l1Pose(c, 9, k)->q;
     const auto pr = dk.posRange(c, q);
@@ -2007,9 +2052,9 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
       hi.t[d] = f.p.boxCenter[d] - 24 + pr.hi[d] + 1;
       od::Pose in = lo;
       in.t[d] += 1;
-      CHECK(allInside(in, f.p.boxCenter) == (pr.lo[d] <= pr.hi[d]));
-      if (pr.lo[d] > 0) CHECK_FALSE(allInside(lo, f.p.boxCenter));
-      if (pr.hi[d] < 48) CHECK_FALSE(allInside(hi, f.p.boxCenter));
+      CHECK(allInside(in, f.p.boxCenter, inner) == (pr.lo[d] <= pr.hi[d]));
+      if (pr.lo[d] > 0) CHECK_FALSE(allInside(lo, f.p.boxCenter, od::MobmDocker::kPosMargin + 1e-4));
+      if (pr.hi[d] < 48) CHECK_FALSE(allInside(hi, f.p.boxCenter, od::MobmDocker::kPosMargin + 1e-4));
     }
   }
   // posm2: per Hopf orientation, exactly the lattice positions keeping the MobM in the box.
@@ -2031,7 +2076,7 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
     const auto pose = dk2.l1Pose(c2, 0, k);
     REQUIRE(pose.has_value());
     CHECK(onLattice(*pose, f2.p.boxCenter));
-    CHECK(allInside(*pose, f2.p.boxCenter));
+    CHECK(allInside(*pose, f2.p.boxCenter, inner));
   }
   const auto first1 = dk2.l1Pose(c2, 0, c2.hopfOffset[1]);
   CHECK(first1->q.x == hopf[1].x);
@@ -2072,22 +2117,31 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   MESSAGE("quick filter: pass ", pass, ", overlap ", st.overlap, ", far ", st.far);
   CHECK(pass > 0);
 
-  // Gradient against finite differences at passing poses.
+  // Gradient against finite differences at passing poses (double reference),
+  // and the single-precision evaluation against the double reference.
   int checked = 0;
   for (long long k = 0; k < 400 && checked < 3; ++k) {
     const auto pose = *dk.l1Pose(c, 1, k);
     od::Dock9bStats s;
     if (!dk.quickFilter(c, pose, s)) continue;
     ++checked;
-    std::vector<double> g;
-    const auto pe = dk.evaluate(c, pose, angles, &g);
+    std::vector<double> g, gf;
+    const auto pe = dk.evaluateDouble(c, pose, angles, &g);
     CHECK(pe.outside == 0);
+    const auto pf = dk.evaluate(c, pose, angles, &gf);
+    CHECK(pf.outside == 0);
+    CHECK(pf.objective() == doctest::Approx(pe.objective()).epsilon(1e-4).scale(1));
+    REQUIRE(gf.size() == g.size());
+    // Relative to the largest component: float cancellation in sums of large pair terms.
+    double gmax = 1;
+    for (double v : g) gmax = std::max(gmax, std::abs(v));
+    for (std::size_t i = 0; i < g.size(); ++i) CHECK(std::abs(gf[i] - g[i]) <= 1e-4 * gmax);
     const double h = 1e-6;
     for (int i = 0; i < 3; ++i) {
       od::Pose a = pose, b = pose;
       a.t[i] += h;
       b.t[i] -= h;
-      const double fd = (dk.evaluate(c, a, angles).objective() - dk.evaluate(c, b, angles).objective()) / (2 * h);
+      const double fd = (dk.evaluateDouble(c, a, angles).objective() - dk.evaluateDouble(c, b, angles).objective()) / (2 * h);
       CHECK(g[i] == doctest::Approx(fd).epsilon(1e-3).scale(1e-2));
       od::Vec3 v{};
       v[i] = h;
@@ -2096,7 +2150,7 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
       a.q = od::fromRotationVector(v) * pose.q;
       v[i] = -h;
       b.q = od::fromRotationVector(v) * pose.q;
-      const double fr = (dk.evaluate(c, a, angles).objective() - dk.evaluate(c, b, angles).objective()) / (2 * h);
+      const double fr = (dk.evaluateDouble(c, a, angles).objective() - dk.evaluateDouble(c, b, angles).objective()) / (2 * h);
       CHECK(g[3 + i] == doctest::Approx(fr).epsilon(1e-3).scale(1e-2));
     }
     for (std::size_t t = 0; t < angles.size(); t += 5) {
@@ -2104,7 +2158,7 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
       const double hd = h * 180 / std::numbers::pi;
       ap[t] += hd;
       am[t] -= hd;
-      const double fd = (dk.evaluate(c, pose, ap).objective() - dk.evaluate(c, pose, am).objective()) / (2 * h);
+      const double fd = (dk.evaluateDouble(c, pose, ap).objective() - dk.evaluateDouble(c, pose, am).objective()) / (2 * h);
       CHECK(g[6 + t] == doctest::Approx(fd).epsilon(1e-3).scale(1e-2));
     }
   }
@@ -2130,11 +2184,12 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
     best = std::min(best, s.energy);
     CHECK(s.energy == doctest::Approx(s.inter + s.interClash + s.intra).epsilon(1e-4));
     CHECK(s.steps <= 300);
-    // Re-evaluating the result reproduces the stored energy; all atoms in the grid.
+    // Re-evaluating the stored float pose and angles reproduces the stored energy exactly.
+    for (double v : s.pose.t) CHECK(v == static_cast<double>(static_cast<float>(v)));
     std::vector<double> a(s.angles.begin(), s.angles.end());
     const auto pe = dk.evaluate(c, s.pose, a);
     CHECK(pe.outside == 0);
-    CHECK(pe.ranking() == doctest::Approx(s.energy).epsilon(1e-3));
+    CHECK(static_cast<float>(pe.ranking()) == s.energy);
   }
   // Minimization lowers the energy of every kept pose.
   std::vector<long long> l2;

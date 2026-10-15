@@ -180,19 +180,22 @@ std::vector<double> EnergySystem::inputAngles() const {
   return v;
 }
 
-EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient,
-                                   std::vector<Vec3>* coords, const ExternalTerm* external) const {
-  std::vector<Vec3> x(coordCount_);
+template <class T>
+EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient,
+                                    std::vector<Vec3T<T>>* coords, const ExternalTermT<T>* external) const {
+  using V = Vec3T<T>;
+  std::vector<V> x(coordCount_);
   for (std::size_t k = 0; k < parts_.size(); ++k) {
     const auto& tree = *parts_[k].tree;
     const auto xyz = buildCoordinates(*parts_[k].mol, tree, anglesDeg.subspan(torsionOffset_[k], tree.torsions.size()));
     std::copy(xyz.begin(), xyz.end(), x.begin() + offset_[k]);
   }
   const bool grad = gradient != nullptr;
+  // Accumulators (energy sums, per-coordinate gradients) are double.
   std::vector<Vec3> g(grad ? coordCount_ : 0, Vec3{0, 0, 0});
-  auto addPairGrad = [&](int i, int j, const Vec3& d, double r, double dedr) {
+  auto addPairGrad = [&](int i, int j, const V& d, T r, T dedr) {
     if (!grad || r <= 0) return;
-    const double f = dedr / r;
+    const T f = dedr / r;
     for (int c = 0; c < 3; ++c) {
       g[i][c] += f * d[c];
       g[j][c] -= f * d[c];
@@ -200,28 +203,35 @@ EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vecto
   };
 
   EnergyTerms e;
-  const double half = 0.5 * params_.smooth;
-  const double cd2 = params_.clashDistance * params_.clashDistance;
+  const T half = static_cast<T>(0.5 * params_.smooth);
+  const T cd = static_cast<T>(params_.clashDistance), cd2 = cd * cd;
+  const T elecCoeff = static_cast<T>(params_.coeffs.elec), desolvCoeff = static_cast<T>(params_.coeffs.desolv);
+  const T rMin = static_cast<T>(params_.elecMinDistance);
+  const T clashBase = static_cast<T>(params_.clashBase), clashK = static_cast<T>(params_.clashK);
+  constexpr T kVdwCut = static_cast<T>(kVdwCutoff), kElecCut2 = static_cast<T>(kElecCutoff * kElecCutoff);
   for (const Pair& p : pairs_) {
-    const Vec3 d{x[p.i][0] - x[p.j][0], x[p.i][1] - x[p.j][1], x[p.i][2] - x[p.j][2]};
-    const double r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-    if (r2 >= kElecCutoff * kElecCutoff) continue;
-    const double r = std::sqrt(r2);
-    double dedr = 0, ee, de;
-    if (r < kVdwCutoff) {
+    const V d{x[p.i][0] - x[p.j][0], x[p.i][1] - x[p.j][1], x[p.i][2] - x[p.j][2]};
+    const T r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    if (r2 >= kElecCut2) continue;
+    const T r = std::sqrt(r2);
+    T dedr = 0, ee, de;
+    if (r < kVdwCut) {
       const Ad4PairParams& pp = pairParams_[p.type];
-      ad4VdwHb(r, pp.AC, pp.BD, pp.m, pp.n, pp.reqm, half, ee, de);
+      ad4VdwHb<T>(r, static_cast<T>(pp.AC), static_cast<T>(pp.BD), pp.m, pp.n, static_cast<T>(pp.reqm), half, ee, de);
       (pp.n == 10 ? e.hbond : e.vdw) += ee;
       dedr += de;
     }
-    ad4Elec(r, params_.coeffs.elec * charge_[p.i] * charge_[p.j], params_.elecMinDistance, ee, de);
+    ad4Elec<T>(r, elecCoeff * static_cast<T>(charge_[p.i]) * static_cast<T>(charge_[p.j]), rMin, ee, de);
     e.elec += ee;
     dedr += de;
-    ad4Desolv(r, params_.coeffs.desolv * (sv_[p.i] * vol_[p.j] + sv_[p.j] * vol_[p.i]), params_.elecMinDistance, ee, de);
+    ad4Desolv<T>(r,
+                 desolvCoeff * (static_cast<T>(sv_[p.i]) * static_cast<T>(vol_[p.j]) +
+                                static_cast<T>(sv_[p.j]) * static_cast<T>(vol_[p.i])),
+                 rMin, ee, de);
     e.desolv += ee;
     dedr += de;
     if (p.heavy && r2 < cd2) {
-      clashPenalty(r, params_.clashDistance, params_.clashBase, params_.clashK, ee, de);
+      clashPenalty<T>(r, cd, clashBase, clashK, ee, de);
       e.clash += ee;
       ++e.clashPairs;
       dedr += de;
@@ -229,16 +239,16 @@ EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vecto
     addPairGrad(p.i, p.j, d, r, dedr);
   }
 
-  const double G = params_.closureG;
+  const T G = static_cast<T>(params_.closureG);
   for (std::size_t k = 0; k < parts_.size(); ++k) {
     const auto& tree = *parts_[k].tree;
     const int o = offset_[k];
     for (std::size_t v = 0; v < tree.virtuals.size(); ++v) {
       const int i = o + tree.atomCount + static_cast<int>(v), j = o + tree.virtuals[v].copyOf;
-      const Vec3 d{x[i][0] - x[j][0], x[i][1] - x[j][1], x[i][2] - x[j][2]};
-      const double r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+      const V d{x[i][0] - x[j][0], x[i][1] - x[j][1], x[i][2] - x[j][2]};
+      const T r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
       e.closure += G * r2;
-      e.closureMaxDeviation = std::max(e.closureMaxDeviation, std::sqrt(r2));
+      e.closureMaxDeviation = std::max(e.closureMaxDeviation, static_cast<double>(std::sqrt(r2)));
       if (grad)
         for (int c = 0; c < 3; ++c) {
           g[i][c] += 2 * G * d[c];
@@ -247,11 +257,11 @@ EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vecto
     }
     for (const auto& rs : tree.restraints) {
       const int i = o + rs.a, j = o + rs.b;
-      const Vec3 d{x[i][0] - x[j][0], x[i][1] - x[j][1], x[i][2] - x[j][2]};
-      const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-      const double dd = r - rs.r0;
+      const V d{x[i][0] - x[j][0], x[i][1] - x[j][1], x[i][2] - x[j][2]};
+      const T r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      const T dd = r - static_cast<T>(rs.r0);
       e.closure += G * dd * dd;
-      e.closureMaxDeviation = std::max(e.closureMaxDeviation, std::abs(dd));
+      e.closureMaxDeviation = std::max(e.closureMaxDeviation, static_cast<double>(std::abs(dd)));
       addPairGrad(i, j, d, r, 2 * G * dd);
     }
   }
@@ -265,15 +275,15 @@ EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vecto
       const int o = offset_[k];
       for (std::size_t t = 0; t < tree.torsions.size(); ++t) {
         const auto& tt = tree.torsions[t];
-        const Vec3& a = x[o + tt.fixedAtom];
-        Vec3 u{x[o + tt.movingAtom][0] - a[0], x[o + tt.movingAtom][1] - a[1], x[o + tt.movingAtom][2] - a[2]};
-        const double len = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        const V& a = x[o + tt.fixedAtom];
+        V u{x[o + tt.movingAtom][0] - a[0], x[o + tt.movingAtom][1] - a[1], x[o + tt.movingAtom][2] - a[2]};
+        const T len = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
         if (len == 0) continue;
-        for (double& c : u) c /= len;
+        for (T& c : u) c /= len;
         double s = 0;
         for (int idx : tt.moving) {
-          const Vec3& p = x[o + idx];
-          const Vec3 v{p[0] - a[0], p[1] - a[1], p[2] - a[2]};
+          const V& p = x[o + idx];
+          const V v{p[0] - a[0], p[1] - a[1], p[2] - a[2]};
           const Vec3& gi = g[o + idx];
           // g . (u x v)
           s += gi[0] * (u[1] * v[2] - u[2] * v[1]) + gi[1] * (u[2] * v[0] - u[0] * v[2]) + gi[2] * (u[0] * v[1] - u[1] * v[0]);
@@ -284,6 +294,16 @@ EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vecto
   }
   if (coords) *coords = std::move(x);
   return e;
+}
+
+EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient,
+                                   std::vector<Vec3>* coords, const ExternalTerm* external) const {
+  return evaluateT(anglesDeg, gradient, coords, external);
+}
+
+EnergyTerms EnergySystem::evaluate(std::span<const float> anglesDeg, std::vector<double>* gradient,
+                                   std::vector<Vec3f>* coords, const ExternalTermF* external) const {
+  return evaluateT(anglesDeg, gradient, coords, external);
 }
 
 }  // namespace od

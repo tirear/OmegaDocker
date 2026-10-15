@@ -10,7 +10,10 @@
 
 namespace od {
 
-using Vec3 = std::array<double, 3>;
+template <class T>
+using Vec3T = std::array<T, 3>;
+using Vec3 = Vec3T<double>;
+using Vec3f = Vec3T<float>;
 
 // Kekulé bond orders. Aromaticity is stored separately (Bond::aromatic).
 enum class BondOrder : std::uint8_t { Single = 1, Double = 2, Triple = 3, Metal = 4 };

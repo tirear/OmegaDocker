@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <type_traits>
 
 #include "log.hpp"
 #include "rng.hpp"
@@ -18,6 +19,12 @@ namespace {
 constexpr double kDeg = std::numbers::pi / 180.0;
 
 Quat conj(const Quat& q) { return {q.w, -q.x, -q.y, -q.z}; }
+QuatF conj(const QuatF& q) { return {q.w, -q.x, -q.y, -q.z}; }
+
+template <class T>
+Vec3T<T> castVec(const Vec3& v) {
+  return {static_cast<T>(v[0]), static_cast<T>(v[1]), static_cast<T>(v[2])};
+}
 
 std::uint64_t splitmix(std::uint64_t z) {
   z += 0x9e3779b97f4a7c15ULL;
@@ -77,20 +84,23 @@ long long MobmDocker::l1Count(const Conf& c) const {
 }
 
 MobmDocker::PosRange MobmDocker::posRange(const Conf& c, const Quat& q) const {
-  Vec3 lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
+  const QuatF qf = toFloat(q);
+  const Vec3f cf = castVec<float>(c.center);
+  Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
   for (int k : probe_) {
-    const Vec3& y = c.coords[k];
-    const Vec3 r = rotate(q, {y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
+    const Vec3f& y = c.coords[k];
+    const Vec3f r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]});
     for (int d = 0; d < 3; ++d) {
       lo[d] = std::min(lo[d], r[d]);
       hi[d] = std::max(hi[d], r[d]);
     }
   }
-  // Centre t = boxMin + i * posStep with boxMin <= t + lo and t + hi <= boxMax.
+  // Centre t = boxMin + i * posStep with boxMin + margin <= t + lo and t + hi <= boxMax - margin.
   PosRange pr;
   for (int d = 0; d < 3; ++d) {
-    pr.lo[d] = std::max(0, static_cast<int>(std::ceil(-lo[d] / p_.posStep - 1e-9)));
-    pr.hi[d] = std::min(posN_[d] - 1, static_cast<int>(std::floor((p_.boxSize[d] - hi[d]) / p_.posStep + 1e-9)));
+    pr.lo[d] = std::max(0, static_cast<int>(std::ceil((kPosMargin - lo[d]) / p_.posStep - 1e-9)));
+    pr.hi[d] = std::min(posN_[d] - 1,
+                        static_cast<int>(std::floor((p_.boxSize[d] - kPosMargin - hi[d]) / p_.posStep + 1e-9)));
   }
   return pr;
 }
@@ -98,7 +108,8 @@ MobmDocker::PosRange MobmDocker::posRange(const Conf& c, const Quat& q) const {
 MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) const {
   Conf c;
   c.anglesDeg.assign(anglesDeg.begin(), anglesDeg.end());
-  sys_.evaluate(anglesDeg, nullptr, &c.coords);
+  const std::vector<float> af(anglesDeg.begin(), anglesDeg.end());
+  sys_.evaluate(std::span<const float>(af), nullptr, &c.coords, nullptr);
   int n = 0;
   for (std::size_t k = 0; k < probe_.size(); ++k)
     if (heavy_[k]) {
@@ -147,19 +158,27 @@ std::optional<Pose> MobmDocker::l1Pose(const Conf& conf, std::uint64_t stream, l
 bool MobmDocker::quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats) const {
   int overlap = 0;
   bool near = false;
+  const QuatF qf = toFloat(pose.q);
+  const Vec3f cf = castVec<float>(c.center), tf = castVec<float>(pose.t);
+  Vec3f boxLo, boxHi;
+  for (int d = 0; d < 3; ++d) {
+    boxLo[d] = static_cast<float>(p_.boxCenter[d] - 0.5 * p_.boxSize[d]);
+    boxHi[d] = static_cast<float>(p_.boxCenter[d] + 0.5 * p_.boxSize[d]);
+  }
+  const float cd = static_cast<float>(p_.clashDistance), nearD = static_cast<float>(p_.maxNearDistance);
   for (std::size_t k = 0; k < probe_.size(); ++k) {
-    const Vec3& y = c.coords[probe_[k]];
-    const Vec3 r = rotate(pose.q, {y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
-    const Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
+    const Vec3f& y = c.coords[probe_[k]];
+    const Vec3f r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]});
+    const Vec3f w{r[0] + tf[0], r[1] + tf[1], r[2] + tf[2]};
     for (int d = 0; d < 3; ++d)
-      if (std::abs(w[d] - p_.boxCenter[d]) > 0.5 * p_.boxSize[d]) {
+      if (w[d] < boxLo[d] || w[d] > boxHi[d]) {
         ++stats.outsideBox;
         return false;
       }
     if (!heavy_[k]) continue;
-    const double dd = interpolate(dist_.geom, dist_.d, w);
-    if (dd < p_.clashDistance) ++overlap;
-    if (dd <= p_.maxNearDistance) near = true;
+    const float dd = interpolate(dist_.geom, dist_.d, w);
+    if (dd < cd) ++overlap;
+    if (dd <= nearD) near = true;
   }
   if (overlap >= p_.maxOverlapAtomNum) {
     ++stats.overlap;
@@ -172,41 +191,48 @@ bool MobmDocker::quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats
   return true;
 }
 
-MobmDocker::PoseEnergy MobmDocker::evaluate(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
-                                            std::vector<double>* grad, double gridTolerance) const {
+template <class T>
+MobmDocker::PoseEnergy MobmDocker::evaluateT(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
+                                             std::vector<double>* grad) const {
+  using V = Vec3T<T>;
   PoseEnergy pe;
-  Vec3 gt{}, gr{};
-  const double cd = p_.clashDistance;
-  const ExternalTerm ext = [&](const std::vector<Vec3>& x, std::vector<Vec3>* g) {
+  Vec3 gt{}, gr{};  // double accumulators
+  const QuatF qf = toFloat(pose.q);
+  auto rot = [&](const V& v) -> V {
+    if constexpr (std::is_same_v<T, float>) return rotate(qf, v);
+    else return rotate(pose.q, v);
+  };
+  auto rotBack = [&](const V& v) -> V {
+    if constexpr (std::is_same_v<T, float>) return rotate(conj(qf), v);
+    else return rotate(conj(pose.q), v);
+  };
+  const V ctr = castVec<T>(c.center), tt = castVec<T>(pose.t);
+  const V gLo = castVec<T>(grids_.geom.origin), gHi = castVec<T>(grids_.geom.max());
+  const T cd = static_cast<T>(p_.clashDistance), clashBase = static_cast<T>(p_.clashBase),
+          clashK = static_cast<T>(p_.clashK);
+  const ExternalTermT<T> ext = [&](const std::vector<V>& x, std::vector<Vec3>* g) {
     for (std::size_t k = 0; k < probe_.size(); ++k) {
-      const Vec3& y = x[probe_[k]];
-      const Vec3 r = rotate(pose.q, {y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
-      Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
-      if (!grids_.geom.inside(w)) {
-        // Within gridTolerance of the grid: clamped onto the grid.
-        const Vec3 lo = grids_.geom.origin, hi = grids_.geom.max();
-        bool near = true;
-        for (int d = 0; d < 3; ++d) {
-          near &= w[d] >= lo[d] - gridTolerance && w[d] <= hi[d] + gridTolerance;
-          w[d] = std::clamp(w[d], lo[d], hi[d]);
-        }
-        if (!near) {
-          ++pe.outside;
-          continue;
-        }
+      const V& y = x[probe_[k]];
+      const V r = rot({y[0] - ctr[0], y[1] - ctr[1], y[2] - ctr[2]});
+      const V w{r[0] + tt[0], r[1] + tt[1], r[2] + tt[2]};
+      bool in = true;
+      for (int d = 0; d < 3; ++d) in &= w[d] >= gLo[d] && w[d] <= gHi[d];
+      if (!in) {
+        ++pe.outside;
+        continue;
       }
-      const double q = charge_[k];
-      Vec3 a{}, b{}, s{}, dg{};
-      pe.inter += interpolate(grids_.geom, grids_.typeMaps[map_[k]], w, g ? &a : nullptr) +
-                  q * interpolate(grids_.geom, grids_.elecMap, w, g ? &b : nullptr) +
-                  std::abs(q) * interpolate(grids_.geom, grids_.desolvMap, w, g ? &s : nullptr);
-      Vec3 gw{a[0] + q * b[0] + std::abs(q) * s[0], a[1] + q * b[1] + std::abs(q) * s[1],
-              a[2] + q * b[2] + std::abs(q) * s[2]};
+      const T q = static_cast<T>(charge_[k]), aq = std::abs(q);
+      V a{}, b{}, s{}, dg{};
+      const T ew = interpolate(grids_.geom, grids_.typeMaps[map_[k]], w, g ? &a : nullptr) +
+                   q * interpolate(grids_.geom, grids_.elecMap, w, g ? &b : nullptr) +
+                   aq * interpolate(grids_.geom, grids_.desolvMap, w, g ? &s : nullptr);
+      pe.inter += ew;
+      V gw{a[0] + q * b[0] + aq * s[0], a[1] + q * b[1] + aq * s[1], a[2] + q * b[2] + aq * s[2]};
       if (heavy_[k]) {
-        const double d = interpolate(dist_.geom, dist_.d, w, g ? &dg : nullptr);
+        const T d = interpolate(dist_.geom, dist_.d, w, g ? &dg : nullptr);
         if (d < cd) {
-          pe.interClash += p_.clashBase + p_.clashK * (cd - d) * (cd - d);
-          for (int i = 0; i < 3; ++i) gw[i] += -2 * p_.clashK * (cd - d) * dg[i];
+          pe.interClash += clashBase + clashK * (cd - d) * (cd - d);
+          for (int i = 0; i < 3; ++i) gw[i] += -2 * clashK * (cd - d) * dg[i];
         }
       }
       if (!g) continue;
@@ -214,13 +240,14 @@ MobmDocker::PoseEnergy MobmDocker::evaluate(const Conf& c, const Pose& pose, std
       gr[0] += r[1] * gw[2] - r[2] * gw[1];
       gr[1] += r[2] * gw[0] - r[0] * gw[2];
       gr[2] += r[0] * gw[1] - r[1] * gw[0];
-      const Vec3 gy = rotate(conj(pose.q), gw);
+      const V gy = rotBack(gw);
       for (int i = 0; i < 3; ++i) (*g)[probe_[k]][i] += gy[i];
     }
     return pe.inter + pe.interClash;
   };
+  const std::vector<T> ang(anglesDeg.begin(), anglesDeg.end());
   std::vector<double> gTors;
-  pe.intra = sys_.evaluate(anglesDeg, grad ? &gTors : nullptr, nullptr, &ext);
+  pe.intra = sys_.evaluate(std::span<const T>(ang), grad ? &gTors : nullptr, nullptr, &ext);
   if (grad) {
     grad->assign(6 + gTors.size(), 0.0);
     for (int i = 0; i < 3; ++i) {
@@ -232,6 +259,16 @@ MobmDocker::PoseEnergy MobmDocker::evaluate(const Conf& c, const Pose& pose, std
   return pe;
 }
 
+MobmDocker::PoseEnergy MobmDocker::evaluate(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
+                                            std::vector<double>* grad) const {
+  return evaluateT<float>(c, pose, anglesDeg, grad);
+}
+
+MobmDocker::PoseEnergy MobmDocker::evaluateDouble(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
+                                                  std::vector<double>* grad) const {
+  return evaluateT<double>(c, pose, anglesDeg, grad);
+}
+
 bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const {
   const std::size_t nt = c.anglesDeg.size();
   const double sT = p_.scaleTrans, sR = p_.scaleRot, sA = p_.scaleTors;
@@ -240,18 +277,32 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
   std::vector<double> z(6 + nt);
   for (int i = 0; i < 3; ++i) z[i] = start.t[i] / sT;
   for (std::size_t k = 0; k < nt; ++k) z[6 + k] = c.anglesDeg[k] * kDeg / sA;
-  std::vector<double> angles(nt), g;
-  auto unpack = [&](std::span<const double> v, Pose& pose) {
-    for (int i = 0; i < 3; ++i) pose.t[i] = v[i] * sT;
-    pose.q = normalized(fromRotationVector({v[3] * sR, v[4] * sR, v[5] * sR}) * q0);
-    for (std::size_t k = 0; k < nt; ++k) angles[k] = v[6 + k] * sA / kDeg;
+  // A point of the energy surface: the float pose and angles the energy is evaluated at.
+  struct Point {
+    Pose pose;
+    std::vector<double> angles;  // float values, wrapped to (-180, 180]
+    PoseEnergy pe;
+  };
+  Point trial, accepted;
+  trial.angles.resize(nt);
+  bool started = false;
+  std::vector<double> g;
+  auto unpack = [&](std::span<const double> v, Point& pt) {
+    for (int i = 0; i < 3; ++i) pt.pose.t[i] = static_cast<float>(v[i] * sT);
+    const Quat q = normalized(fromRotationVector({v[3] * sR, v[4] * sR, v[5] * sR}) * q0);
+    const QuatF qf = toFloat(q);
+    pt.pose.q = {qf.w, qf.x, qf.y, qf.z};
+    for (std::size_t k = 0; k < nt; ++k) pt.angles[k] = static_cast<float>(wrapDeg(v[6 + k] * sA / kDeg));
   };
   const VecObjective f = [&](std::span<const double> v, double& e, std::vector<double>& grad) {
-    Pose pose;
-    unpack(v, pose);
-    const PoseEnergy pe = evaluate(c, pose, angles, &g, 0.0);
-    if (pe.outside > 0) return false;
-    e = pe.objective();
+    unpack(v, trial);
+    trial.pe = evaluate(c, trial.pose, trial.angles, &g);
+    if (trial.pe.outside > 0) return false;
+    if (!started) {
+      accepted = trial;
+      started = true;
+    }
+    e = trial.pe.objective();
     grad.resize(g.size());
     for (std::size_t i = 0; i < g.size(); ++i) grad[i] = g[i] * (i < 3 ? sT : i < 6 ? sR : sA);
     return true;
@@ -268,8 +319,10 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
       if (sA * std::abs(d[k]) > maxA) s = std::min(s, maxA / (sA * std::abs(d[k])));
     return s;
   };
+  // The accepted point is the last one evaluated (the line search stops at it).
   lp.onAccept = [&](std::vector<double>& v) {
-    q0 = normalized(fromRotationVector({v[3] * sR, v[4] * sR, v[5] * sR}) * q0);
+    accepted = trial;
+    q0 = accepted.pose.q;
     v[3] = v[4] = v[5] = 0;
   };
   const LbfgsResult r = minimizeLbfgs(f, z, lp);
@@ -279,12 +332,9 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
     ++stats.startOutsideGrid;
     return false;
   }
-  Pose pose;
-  unpack(z, pose);
-  const PoseEnergy pe = evaluate(c, pose, angles);
-  out.pose = pose;
-  out.angles.resize(nt);
-  for (std::size_t k = 0; k < nt; ++k) out.angles[k] = static_cast<float>(wrapDeg(angles[k]));
+  const PoseEnergy& pe = accepted.pe;
+  out.pose = accepted.pose;
+  out.angles.assign(accepted.angles.begin(), accepted.angles.end());
   out.energy = static_cast<float>(pe.ranking());
   out.inter = static_cast<float>(pe.inter);
   out.interClash = static_cast<float>(pe.interClash);

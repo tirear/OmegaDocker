@@ -17,7 +17,9 @@
 namespace od {
 
 // 9b docking of one MobM against one StaM conformation (spec 8.4–8.6).
-// CPU reference implementation.
+// CPU reference implementation. Coordinates, grid interpolation and per-atom /
+// per-pair terms are single precision; sums, L-BFGS and pose updates are double
+// (spec 12.1).
 
 enum class Posm { Posm1, Posm2 };
 
@@ -42,13 +44,14 @@ struct Dock9bParams {
 
 // MobM placement: world x = R(q) (y - center) + t, where y are the coordinates
 // of the conformation (torsion-tree frame) and center its heavy-atom centre.
+// The energy is evaluated at float(t), float(q).
 struct Pose {
   Vec3 t{};
   Quat q{};
 };
 
 struct DockSample {
-  Pose pose;
+  Pose pose;                  // float values
   std::vector<float> angles;  // degrees
   float energy = 0;           // inter + interClash + MobM intra + MobM clash; closure excluded (spec 4.5)
   float inter = 0;            // grid energy
@@ -75,8 +78,9 @@ class MobmDocker {
   // sys: energy system of the single MobM (parts = {mob}).
   MobmDocker(const EnergySystem& sys, const EnergyGrids& grids, const DistanceGrid& dist, const Dock9bParams& p);
 
-  // Lattice indices of the positions keeping every probe atom in the box
-  // for one orientation (spec 8.4); empty when lo > hi on an axis.
+  // Lattice indices of the positions keeping every probe atom kPosMargin inside
+  // the box for one orientation (spec 8.4); empty when lo > hi on an axis.
+  static constexpr double kPosMargin = 0.01;  // Å, absorbs float rounding
   struct PosRange {
     std::array<int, 3> lo{}, hi{};
     long long count() const;
@@ -85,8 +89,8 @@ class MobmDocker {
   // Conformation of a MobM sample in the torsion-tree frame.
   struct Conf {
     std::vector<double> anglesDeg;
-    std::vector<Vec3> coords;  // all coordinates of sys.evaluate
-    Vec3 center{};             // heavy-atom centre (unweighted)
+    std::vector<Vec3f> coords;  // all coordinates of sys.evaluate, at float(anglesDeg)
+    Vec3 center{};              // heavy-atom centre (unweighted)
     // posm2: position range per Hopf orientation and the prefix sums of their counts.
     std::vector<PosRange> hopfRange;
     std::vector<long long> hopfOffset;
@@ -109,14 +113,15 @@ class MobmDocker {
     double objective() const { return inter + interClash + intra.total(); }
     double ranking() const { return inter + interClash + intra.filterEnergy(); }
   };
-  // gridTolerance (Å): probe atoms this close outside the grid are clamped onto it
-  // (the stored single-precision angles of a pose at the grid boundary); 9b
-  // minimization itself uses 0.
-  static constexpr double kGridTolerance = 1e-3;
+  // Single precision at float(pose), float(anglesDeg) (spec 8.6).
   PoseEnergy evaluate(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
-                      std::vector<double>* grad = nullptr, double gridTolerance = kGridTolerance) const;
+                      std::vector<double>* grad = nullptr) const;
+  // Double-precision reference of evaluate (tests).
+  PoseEnergy evaluateDouble(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
+                            std::vector<double>* grad = nullptr) const;
 
   // 9b minimization of one pose; false when the starting pose is outside the grid.
+  // out holds the float pose, angles and energies of the last accepted point.
   bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const;
 
   // All of 9b for one conformation pair: L1poss -> 8.5 -> minimization.
@@ -126,6 +131,10 @@ class MobmDocker {
   long long l1Count(const Conf& c) const;  // L1poss per conformation pair
 
  private:
+  template <class T>
+  PoseEnergy evaluateT(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
+                       std::vector<double>* grad) const;
+
   const EnergySystem& sys_;
   const EnergyGrids& grids_;
   const DistanceGrid& dist_;

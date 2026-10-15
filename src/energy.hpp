@@ -48,7 +48,10 @@ struct EnergyPart {
 
 // Extra energy term on the coordinates (e.g. the 9b grid energy): adds its
 // dE/dx to grad (nullptr when no gradient is requested) and returns its energy.
-using ExternalTerm = std::function<double(const std::vector<Vec3>& coords, std::vector<Vec3>* grad)>;
+template <class T>
+using ExternalTermT = std::function<double(const std::vector<Vec3T<T>>& coords, std::vector<Vec3>* grad)>;
+using ExternalTerm = ExternalTermT<double>;
+using ExternalTermF = ExternalTermT<float>;
 
 class EnergySystem {
  public:
@@ -68,6 +71,10 @@ class EnergySystem {
   // external (optional): its gradient enters the torsion gradient, its energy goes to EnergyTerms::external.
   EnergyTerms evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient = nullptr,
                        std::vector<Vec3>* coords = nullptr, const ExternalTerm* external = nullptr) const;
+  // Single precision (9b, spec 8.6): coordinates and per-pair terms in float;
+  // energy sums and gradient accumulation in double.
+  EnergyTerms evaluate(std::span<const float> anglesDeg, std::vector<double>* gradient, std::vector<Vec3f>* coords,
+                       const ExternalTermF* external) const;
 
   struct Pair {
     int i, j;            // coordinate indices
@@ -77,6 +84,10 @@ class EnergySystem {
   const std::vector<Pair>& pairs() const { return pairs_; }
 
  private:
+  template <class T>
+  EnergyTerms evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient, std::vector<Vec3T<T>>* coords,
+                        const ExternalTermT<T>* external) const;
+
   std::vector<EnergyPart> parts_;
   EnergyParams params_;
   std::vector<Ad4Typing> typing_;

@@ -211,31 +211,45 @@ DistanceGrid buildDistanceGrid(const GridGeometry& geom, const GridAtoms& stam, 
   return g;
 }
 
-double interpolate(const GridGeometry& geom, std::span<const float> map, const Vec3& p, Vec3* grad) {
+namespace {
+
+template <class T>
+T interpolateT(const GridGeometry& geom, std::span<const float> map, const Vec3T<T>& p, Vec3T<T>* grad) {
+  const T spacing = static_cast<T>(geom.spacing);
   std::array<int, 3> i0{};
-  std::array<double, 3> f{};
+  std::array<T, 3> f{};
   for (int c = 0; c < 3; ++c) {
-    const double u = (p[c] - geom.origin[c]) / geom.spacing;
+    const T u = (p[c] - static_cast<T>(geom.origin[c])) / spacing;
     i0[c] = std::clamp(static_cast<int>(std::floor(u)), 0, geom.n[c] - 2);
     f[c] = u - i0[c];
   }
-  double v[2][2][2];
+  T v[2][2][2];
   for (int z = 0; z < 2; ++z)
     for (int y = 0; y < 2; ++y)
       for (int x = 0; x < 2; ++x) v[z][y][x] = map[geom.index(i0[0] + x, i0[1] + y, i0[2] + z)];
-  const double fx = f[0], fy = f[1], fz = f[2];
-  auto lerp = [](double a, double b, double t) { return a + (b - a) * t; };
-  const double c00 = lerp(v[0][0][0], v[0][0][1], fx), c10 = lerp(v[0][1][0], v[0][1][1], fx);
-  const double c01 = lerp(v[1][0][0], v[1][0][1], fx), c11 = lerp(v[1][1][0], v[1][1][1], fx);
-  const double c0 = lerp(c00, c10, fy), c1 = lerp(c01, c11, fy);
+  const T fx = f[0], fy = f[1], fz = f[2];
+  auto lerp = [](T a, T b, T t) { return a + (b - a) * t; };
+  const T c00 = lerp(v[0][0][0], v[0][0][1], fx), c10 = lerp(v[0][1][0], v[0][1][1], fx);
+  const T c01 = lerp(v[1][0][0], v[1][0][1], fx), c11 = lerp(v[1][1][0], v[1][1][1], fx);
+  const T c0 = lerp(c00, c10, fy), c1 = lerp(c01, c11, fy);
   if (grad) {
-    const double dx0 = lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], fy);
-    const double dx1 = lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], fy);
-    (*grad)[0] = lerp(dx0, dx1, fz) / geom.spacing;
-    (*grad)[1] = lerp(c10 - c00, c11 - c01, fz) / geom.spacing;
-    (*grad)[2] = (c1 - c0) / geom.spacing;
+    const T dx0 = lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], fy);
+    const T dx1 = lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], fy);
+    (*grad)[0] = lerp(dx0, dx1, fz) / spacing;
+    (*grad)[1] = lerp(c10 - c00, c11 - c01, fz) / spacing;
+    (*grad)[2] = (c1 - c0) / spacing;
   }
   return lerp(c0, c1, fz);
+}
+
+}  // namespace
+
+double interpolate(const GridGeometry& geom, std::span<const float> map, const Vec3& p, Vec3* grad) {
+  return interpolateT(geom, map, p, grad);
+}
+
+float interpolate(const GridGeometry& geom, std::span<const float> map, const Vec3f& p, Vec3f* grad) {
+  return interpolateT(geom, map, p, grad);
 }
 
 InterEnergy gridEnergy(const EnergyGrids& g, const GridAtoms& probe, std::vector<Vec3>* grad) {
