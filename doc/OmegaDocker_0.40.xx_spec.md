@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.29 |
+| 文件版本 | 1.30 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -858,12 +858,21 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 **分批（sampleBuffer）**：
 - 9b 產生的對接樣本先放入每個 MobM 各自的 sampleBuffer；每當其中的樣本數 ≥ `sampleBufferNum`，就先對「目前的 topSampleSet ∪ sampleBuffer」執行步驟 1–4（合併時 topSampleSet 在前），清空 sampleBuffer 後回到 9b 繼續；本輪全部對接完後，再對剩下的樣本執行一次步驟 1–4，然後做步驟 5。
-- 中間的 9c（本輪最後一次以外）在步驟 4 保留 `midTopSampleFactor` × `topSampleNum` 個；本輪最後一次保留 `topSampleNum` 個。`midTopSampleFactor` 預設 1（每次都保留 `topSampleNum` 個），大於 1 僅供實驗（實測無明顯改善，見下）。
+- 中間的 9c（本輪最後一次以外）在步驟 4 保留 `midTopSampleFactor` × `topSampleNum` 個；本輪最後一次保留 `topSampleNum` 個。`midTopSampleFactor` 預設 1（每次都保留 `topSampleNum` 個）；使用 `--midKeepSkipped` 時預設 2。不使用 `--midKeepSkipped` 時，大於 1 實測無明顯改善（見下），僅供實驗。
+- 保留池（`--midKeepSkipped`，預設關閉）：中間的 9c 不只保留通過多樣性篩選的樣本，也保留被跳過的樣本。
+  1. 合併「保留池 ∪ sampleBuffer」（保留池在前，本輪開始時為上一輪的 topSampleSet），依能量穩定排序。
+  2. 執行多樣性篩選，直到保留 `midTopSampleFactor` × `topSampleNum` 個；最後一個保留樣本的能量為 E_cut（保留數不足時 E_cut = +∞）。
+  3. 新的保留池 = 所有能量 ≤ E_cut 的樣本（保留的與被跳過的）。
+  4. 上限 `sampleBufferNum` 個：超過時，保留的樣本全部留下，被跳過的樣本依能量由低到高補足到上限，其餘丟棄。
+  - 本輪最後一次 9c 與不使用保留池時相同：對「保留池 ∪ sampleBuffer」執行步驟 1–4，取 `topSampleNum` 個。
+  - 依據：多樣性篩選中，能量 ≤ E 的樣本是否被保留，只取決於能量 ≤ E 的樣本。保留池含有目前為止所有能量低於 E_drop 的樣本（E_drop：本輪被丟棄樣本中的最低能量），因此最終 topSampleSet 有 `topSampleNum` 個且最高能量 < E_drop 時，結果與一次做完相同（同能量樣本的先後除外）。執行紀錄顯示最大保留池大小、E_drop，以及「same as a single 9c: yes / not guaranteed」。
+  - 「not guaranteed」的原因：保留池達到上限；或新的低能量樣本同時擋掉多個已保留樣本，使 E_cut 上移，而介於其間的樣本已被丟棄（`midTopSampleFactor` 越大越不易發生）。
+  - 主機記憶體多了保留池（最多 `sampleBufferNum` 個樣本）；9c 時間因每次重新篩選保留池而增加。
 - `sampleBufferNum` 預設 65536；實際值 = max(`sampleBufferNum`, max(4, `midTopSampleFactor` + 2) × `topSampleNum`)，即預設至少 4 × `topSampleNum`；`midTopSampleFactor` > 2 時，每次 9c 的新樣本數至少為保留數的 2 倍。
 - 9b 在一個構型配對內也分批最佳化：每批 `sampleBufferNum` 個 L2pos（依 L1pos 序號），每批結束後把對接樣本放入 sampleBuffer 並檢查是否達到上限。批次邊界只由對接順序決定，與執行緒數無關。
 - 分批的結果與一次做完不一定相同（9b 的對接樣本相同：每個樣本的最佳化只取決於 seed、構型配對與 L1pos 序號）。不使用多樣性篩選時兩者相同。差異有兩個來源：
   - 截掉後空出位置：某次 9c 中樣本 S 排在保留數之外而被丟棄；之後更低能量的樣本 L 使已保留的 K 被跳過，空出位置。一次做完時 S 會入選。`midTopSampleFactor` > 1 針對此來源。
-  - 被之後消失的樣本擋掉：S 因與已保留的 K 太相似而被跳過；之後 K 又因更低能量的 L 被跳過，而 S 與 L 不相似。一次做完時 S 會入選。此來源與保留數無關。
+  - 被之後消失的樣本擋掉：S 因與已保留的 K 太相似而被跳過；之後 K 又因更低能量的 L 被跳過，而 S 與 L 不相似。一次做完時 S 會入選。此來源與保留數無關；`--midKeepSkipped` 針對此來源。
 - 步驟 5 的本輪最低能量跨批累計，不受分批影響。
 - `sampleBufferNum` 太小時，每批可平行處理的樣本少，平行效率較差。
 - 實測（BTN 對 2KJJ，StaM 不可動，posm2、`--rotStep 15`、`--posStep 2`、`--mobmDockingConfSampleNum 4`，1 輪 5,444,698 個對接樣本；CPU 執行，9b 約 290–298 s，各設定相同）。「分批」為 `sampleBufferNum` 65536（`topSampleNum` 20000 時實際為 max(4, `midTopSampleFactor` + 2) × 20000，即 ×1、×2 為 80000，×4 為 120000）；「一次」為 `sampleBufferNum` 2,000,000,000，即全部對接完才執行 9c。「共同」：最終 topSampleSet（9d 篩選後）中與「一次」相同的樣本數；「較差名次」：依能量排序後逐名次比較，能量高於「一次」的名次數。
@@ -888,12 +897,51 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   | | 一次 | 1 | 6.91 s | 2065 MB | −3.287 | 16043 | — | — |
 
   （×n：`midTopSampleFactor` = n。能量單位 kcal/mol。）
+
+  保留池（`--midKeepSkipped`；K×n：`midTopSampleFactor` = n；`sampleBufferNum` 同上，保留池上限 = `sampleBufferNum`；「保留池」：最大保留池大小；「相同」：執行紀錄的 same as a single 9c）：
+
+  | topSampleNum | 方式 | 9c 時間 | 主機記憶體 | topSampleSet 最高能量 | 最終數 | 共同 | 較差名次 | 保留池 | E_drop | 相同 |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | 20 | K×1 | 0.76 s | 227 MB | −7.795 | 18 | 18 | 0 | 1,160 | −7.795 | yes |
+  | | K×2 | 0.70 s | 215 MB | −7.795 | 18 | 18 | 0 | 3,089 | −7.418 | yes |
+  | | K×4 | 0.74 s | 205 MB | −7.795 | 18 | 18 | 0 | 5,197 | −7.161 | yes |
+  | 200 | K×1 | 1.05 s | 252 MB | −6.778 | 184 | 184 | 0 | 11,677 | −6.778 | yes |
+  | | K×2 | 1.35 s | 202 MB | −6.778 | 184 | 184 | 0 | 26,028 | −6.427 | yes |
+  | | K×4 | 2.56 s | 261 MB | −6.778 | 184 | 184 | 0 | 65,536 | −6.037 | yes |
+  | 2000 | K×1 | 4.23 s | 220 MB | −5.351 | 1796 | 1526 | 1013 | 65,536 | −6.045 | not guaranteed |
+  | | K×2 | 4.68 s | 246 MB | −5.368 | 1799 | 1522 | 1029 | 65,536 | −6.059 | not guaranteed |
+  | | K×4 | 6.81 s | 256 MB | −5.367 | 1798 | 1514 | 1030 | 65,536 | −6.087 | not guaranteed |
+  | 20000 | K×1 | 13.66 s | 245 MB | −2.709 | 17588 | 7221 | 15313 | 80,000 | −6.069 | not guaranteed |
+  | | K×2 | 20.88 s | 276 MB | −2.711 | 17612 | 7145 | 15457 | 80,000 | −6.242 | not guaranteed |
+  | | K×4 | 20.26 s | 314 MB | −2.750 | 17518 | 7450 | 15231 | 120,000 | −6.025 | not guaranteed |
+
+  加大 `sampleBufferNum`（同時加大保留池上限）；×1 為不使用保留池：
+
+  | topSampleNum | 方式 | sampleBufferNum | 9c 次數 | 9c 時間 | 主機記憶體 | topSampleSet 最高能量 | 最終數 | 共同 | 較差名次 | 保留池 | 相同 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | 2000 | ×1 | 262,144 | 17 | 1.49 s | 344 MB | −5.349 | 1820 | 1376 | 1707 | — | — |
+  | | ×1 | 1,048,576 | 5 | 1.87 s | 954 MB | −5.405 | 1803 | 1517 | 1679 | — | — |
+  | | K×2 | 262,144 | 17 | 6.12 s | 444 MB | −5.452 | 1760 | 1760 | 0 | 262,144 | yes |
+  | | K×2 | 1,048,576 | 5 | 3.69 s | 1161 MB | −5.452 | 1760 | 1760 | 0 | 535,917 | yes |
+  | 20000 | ×1 | 262,144 | 17 | 9.08 s | 370 MB | −2.667 | 17346 | 7462 | 15990 | — | — |
+  | | ×1 | 1,048,576 | 5 | 8.16 s | 979 MB | −2.872 | 16892 | 9292 | 15962 | — | — |
+  | | K×2 | 262,144 | 17 | 18.99 s | 425 MB | −2.857 | 17240 | 8563 | 14116 | 262,144 | not guaranteed |
+  | | K×2 | 1,048,576 | 5 | 21.49 s | 1187 MB | −3.109 | 16523 | 13101 | 9610 | 1,048,576 | not guaranteed |
+
+  （9b 時間與設定無關，各次在 278–314 s 之間變動，為機器負載差異；總時間的差異主要來自此變動。）
 - 實測的意義：
   - 所有設定的最低能量相同（−9.012），前 5 名相同；差異從第 6 名開始，`topSampleNum` 越大差異越大。最低能量的樣本在任何一次 9c 都會保留，因此分批不影響最佳結果。
   - 分批時 topSampleSet 的最高能量較高，表示有一次做完會入選的低能量樣本被移除。
-  - `midTopSampleFactor` 2 或 4 幾乎沒有改善（只有 20000 ×4 共同樣本由 6843 增為 6969，此時 9c 次數也不同），代表差異主要來自「被之後消失的樣本擋掉」，而非截掉。
-  - 主機記憶體：分批約 0.2–0.3 GB，一次約 2.05 GB（與對接樣本總數成正比）。9c 時間佔總時間 6% 以下。
-  - 使用建議：只需要最佳的少數結果時，分批即可。需要完整的 topSampleSet（例如大量候選結合點位）且記憶體足夠時，加大 `--sampleBufferNum`（對接樣本約每個 0.4 KB，以本例估計）。
+  - 不使用保留池時，`midTopSampleFactor` 2 或 4 幾乎沒有改善，代表差異主要來自「被之後消失的樣本擋掉」，而非截掉。
+  - 保留池未達上限時（`topSampleNum` 20、200），結果與一次做完完全相同，主機記憶體仍約 0.2–0.26 GB（一次做完 2.05 GB）。
+  - 保留池的大小約為 `topSampleNum` 的 58–270 倍（被跳過的近似重複樣本很多），且隨 `midTopSampleFactor` 增加。`topSampleNum` 2000 時需約 54 萬個（`sampleBufferNum` 262,144 即可得到相同結果，主機記憶體 0.44 GB）；`topSampleNum` 20000 時 `sampleBufferNum` 1,048,576 仍不足，但共同樣本由 9292 增為 13101。
+  - 相同 `sampleBufferNum` 下，保留池的改善大於只加大 `sampleBufferNum`（例如 2000、262,144：共同 1760 對 1376）。
+  - 保留池達到上限時，`midTopSampleFactor` 越大，被跳過樣本可用的空間越少，改善不一定更好；此時 ×1 或 ×2 即可。
+  - 9c 時間增加為不使用保留池的 1–6 倍，但仍不到總時間的 8%。
+- 使用建議（主機記憶體與 topSampleSet 完整度的取捨）：
+  - 只需要最佳的少數結果：預設（不使用保留池）即可，主機記憶體最少。
+  - 需要完整的 topSampleSet（例如大量候選結合點位）：使用 `--midKeepSkipped`，並視記憶體加大 `--sampleBufferNum`；執行紀錄顯示「not guaranteed」時，表示加大 `--sampleBufferNum` 仍可能改善。保留池大小可參考執行紀錄的 largest pool。
+  - 記憶體足夠時，可直接以很大的 `--sampleBufferNum` 一次做完（對接樣本約每個 0.4 KB，以本例估計）。
 4. **取前 `topSampleNum` 個** 為新的 topSampleSet。
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
@@ -998,7 +1046,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - `--gpuMemLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
 - L2 pool、topSampleSet 存在主機記憶體；L2 pool 不設容量上限。
-- 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `midTopSampleFactor` × `topSampleNum` 個；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
+- 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `midTopSampleFactor` × `topSampleNum` 個（使用 `--midKeepSkipped` 時約 3 × `sampleBufferNum` 個）；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
 - csgm2、csgm3 的一批樣本即使 L2 pool 已達 `minL2confSampleNum`，仍處理完整批。
 
 ---
@@ -1074,7 +1122,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--topSampleNum` | eliteStaM × eliteMobM | 9 |
 | `--diversityRmsd` | 2.0 Å | 9 |
 | `--sampleBufferNum` | 65536（至少 max(4, `midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
-| `--midTopSampleFactor` | 1 | 9 |
+| `--midTopSampleFactor` | 1（使用 `--midKeepSkipped` 時 2） | 9 |
+| `--midKeepSkipped` | 關閉 | 9 |
 | `--symMaxPerm` | 256 | 10 |
 | `--lbfgsMemory` | 7 | 12 |
 | `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
@@ -1336,3 +1385,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.27 | 2026-10-15 | 9d 不分群，`summary.tsv` 移除分群編號（10） |
 | 1.28 | 2026-10-15 | 新增 `--midTopSampleFactor`（預設 2）：中間的 9c 保留 `midTopSampleFactor` × `topSampleNum` 個；`sampleBufferNum` 下限改為 (`midTopSampleFactor` + 2) × `topSampleNum`；說明分批差異的兩個來源，記錄分批實測表與使用建議（9、13、14） |
 | 1.29 | 2026-10-15 | `--midTopSampleFactor` 預設改為 1（大於 1 僅供實驗）；`sampleBufferNum` 下限改為 max(4, `midTopSampleFactor` + 2) × `topSampleNum`，預設維持 4 × `topSampleNum`（9、13） |
+| 1.30 | 2026-10-15 | 新增 `--midKeepSkipped`（保留池，上限 `sampleBufferNum`，超過時保留的樣本優先）；搭配時 `midTopSampleFactor` 預設 2；執行紀錄顯示保留池大小、E_drop 與是否保證與一次做完相同；記錄保留池與加大 `sampleBufferNum` 的實測及使用建議（9、13、14） |

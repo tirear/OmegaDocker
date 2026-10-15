@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <format>
 #include <limits>
@@ -328,7 +329,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
-    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(std::max(4, opt.midTopSampleFactor + 2)) *
+    ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(std::max(4, od::midTopSampleFactor(opt) + 2)) *
                                                                        static_cast<std::size_t>(ms[i].topNum));
     const auto s0 = std::chrono::steady_clock::now();
     ms[i].sym = std::make_unique<od::SymmetryRmsd>(*mobSets[i]->parts()[0].mol, ms[i].heavy->atoms(), ms[i].heavy->types(),
@@ -370,6 +371,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0), sampleNum(ms.size(), 0), partial(ms.size(), 0);
     std::vector<std::vector<od::RoundSample>> buffer(ms.size());
     std::vector<double> selectSec(ms.size(), 0);
+    std::vector<float> droppedMin(ms.size(), std::numeric_limits<float>::infinity());  // --midKeepSkipped
+    std::vector<std::size_t> poolMax(ms.size(), 0);
     // 9c steps 1-4 on the topSampleSet and the waiting docking samples (spec 9).
     auto select = [&](std::size_t i, bool last) {
       MobState& m = ms[i];
@@ -377,10 +380,18 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       merged.insert(merged.end(), std::make_move_iterator(buffer[i].begin()), std::make_move_iterator(buffer[i].end()));
       buffer[i].clear();
       const auto c0 = std::chrono::steady_clock::now();
-      m.top = od::selectTopSamples(std::move(merged), *m.heavy, last ? m.topNum
-                                        : static_cast<int>(std::min<long long>(
-                                              1LL * opt.midTopSampleFactor * m.topNum, std::numeric_limits<int>::max())),
-                                   opt.diversityRmsd);
+      const int midNum = static_cast<int>(
+          std::min<long long>(1LL * od::midTopSampleFactor(opt) * m.topNum, std::numeric_limits<int>::max()));
+      if (last) {
+        m.top = od::selectTopSamples(std::move(merged), *m.heavy, m.topNum, opt.diversityRmsd);
+      } else if (opt.midKeepSkipped) {
+        auto r = od::selectPool(std::move(merged), *m.heavy, static_cast<std::size_t>(midNum), opt.diversityRmsd, m.bufferNum);
+        m.top = std::move(r.pool);
+        droppedMin[i] = std::min(droppedMin[i], r.droppedMin);
+        poolMax[i] = std::max(poolMax[i], m.top.size());
+      } else {
+        m.top = od::selectTopSamples(std::move(merged), *m.heavy, midNum, opt.diversityRmsd);
+      }
       selectSec[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
     };
     double gridSec = 0;
@@ -480,6 +491,12 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                               "9c runs {}  {:.2f} s",
                               mobSets[i]->name(), m.top.size(), m.topNum, eTop, rmStam, rmMob, partial[i] + 1,
                               selectSec[i]));
+      if (opt.midKeepSkipped) {
+        const bool same = std::isinf(droppedMin[i]) ||
+                          (m.top.size() == static_cast<std::size_t>(m.topNum) && eTop < droppedMin[i]);
+        od::logInfo(std::format("    midKeepSkipped: largest pool {}  lowest removed energy {:.3f}  same as a single 9c: {}",
+                                poolMax[i], droppedMin[i], same ? "yes" : "not guaranteed"));
+      }
       if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5));
     }
     od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));

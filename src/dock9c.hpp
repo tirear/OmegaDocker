@@ -46,6 +46,19 @@ class MobmHeavyAtoms {
 std::vector<RoundSample> selectTopSamples(std::vector<RoundSample> merged, const MobmHeavyAtoms& atoms, int topNum,
                                           double diversityRmsd);
 
+// Intermediate 9c with --midKeepSkipped (spec 9): sorts merged by energy
+// (stable), runs the diversity filter until keepNum samples are kept, and keeps
+// every sample (kept or skipped) up to the last kept one. Over cap samples: the
+// kept samples and the lowest-energy skipped samples, cap in total (at least the
+// kept samples).
+// droppedMin: lowest energy of the removed samples (+inf if none).
+struct PoolSelection {
+  std::vector<RoundSample> pool;
+  float droppedMin = std::numeric_limits<float>::infinity();
+};
+PoolSelection selectPool(std::vector<RoundSample> merged, const MobmHeavyAtoms& atoms, std::size_t keepNum,
+                         double diversityRmsd, std::size_t cap);
+
 // 9d: in order, removes the samples closer than rmsd (symmetry-corrected) to a
 // kept sample with the same StaM conformation sample.
 std::vector<RoundSample> symmetryFilter(std::vector<RoundSample> top, const MobmHeavyAtoms& atoms,

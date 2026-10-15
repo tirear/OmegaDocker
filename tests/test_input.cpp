@@ -2319,6 +2319,52 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
     for (std::size_t j = 0; j < k; ++j)
       if (fin[j].stam == fin[k].stam) CHECK(sym.rmsd(heavy.world(fin[k].s), heavy.world(fin[j].s)) >= rmsd);
 
+  // midKeepSkipped: batches through selectPool give the single-9c result when no
+  // sample below the final largest energy was removed.
+  for (std::size_t topN : {3, 5, 8}) {
+    const auto once = od::selectTopSamples(merged, heavy, static_cast<int>(topN), rmsd);
+    std::vector<od::RoundSample> pool;
+    float dropped = std::numeric_limits<float>::infinity();
+    const std::size_t bs = merged.size() / 4 + 1;
+    for (std::size_t b = 0; b < merged.size(); b += bs) {
+      std::vector<od::RoundSample> m2 = std::move(pool);
+      m2.insert(m2.end(), merged.begin() + b, merged.begin() + std::min(b + bs, merged.size()));
+      if (b + bs >= merged.size()) {
+        pool = od::selectTopSamples(std::move(m2), heavy, static_cast<int>(topN), rmsd);
+        break;
+      }
+      auto r = od::selectPool(std::move(m2), heavy, 2 * topN, rmsd, 100000);
+      for (std::size_t k = 1; k < r.pool.size(); ++k) CHECK(r.pool[k - 1].s.energy <= r.pool[k].s.energy);
+      if (!r.pool.empty()) CHECK(r.pool.back().s.energy <= r.droppedMin);
+      dropped = std::min(dropped, r.droppedMin);
+      pool = std::move(r.pool);
+    }
+    const bool same = std::isinf(dropped) || (pool.size() == topN && od::topMaxEnergy(pool) < dropped);
+    CHECK(same);
+    if (same) {
+      REQUIRE(pool.size() == once.size());
+      for (std::size_t k = 0; k < once.size(); ++k) {
+        CHECK(pool[k].s.energy == once[k].s.energy);
+        CHECK(pool[k].stam == once[k].stam);
+        CHECK(pool[k].mobm == once[k].mobm);
+      }
+    }
+  }
+  {
+    // Over the cap: the kept samples stay, skipped samples fill the rest.
+    const auto kept = od::selectTopSamples(merged, heavy, 4, rmsd);
+    REQUIRE(kept.size() == 4);
+    auto r = od::selectPool(merged, heavy, 4, rmsd, 5);
+    auto full = od::selectPool(merged, heavy, 4, rmsd, 100000);
+    REQUIRE(full.pool.size() > 5);
+    CHECK(r.pool.size() == 5);
+    for (const auto& k : kept)
+      CHECK(std::any_of(r.pool.begin(), r.pool.end(), [&](const auto& p) { return p.s.energy == k.s.energy && p.mobm == k.mobm && p.stam == k.stam; }));
+    for (std::size_t k = 1; k < r.pool.size(); ++k) CHECK(r.pool[k - 1].s.energy <= r.pool[k].s.energy);
+    CHECK(r.droppedMin <= full.droppedMin);
+    CHECK(od::selectTopSamples(r.pool, heavy, 4, rmsd).size() == 4);
+  }
+
   // dcss filter.
   std::vector<int> dcss{1, 2, 3, 4};
   const std::unordered_map<int, float> lowest{{1, -5.f}, {2, -2.f}, {4, -3.f}};

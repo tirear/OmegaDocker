@@ -74,7 +74,8 @@ struct Options {
   std::optional<int> topSampleNum;  // default: eliteStaM x eliteMobM (spec 9)
   double diversityRmsd = 2.0;
   int sampleBufferNum = 65536;
-  int midTopSampleFactor = 1;
+  std::optional<int> midTopSampleFactor;  // default: 2 with midKeepSkipped, otherwise 1 (spec 9)
+  bool midKeepSkipped = false;
   int symMaxPerm = 256;  // raised to 4 x topSampleNum when smaller (spec 9)
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
@@ -103,6 +104,9 @@ void requireConfSampleNums(const Options& o, SampleSet set);
 
 // Checks required parameters and value ranges; throws od::Error.
 void validateOptions(const Options& o);
+
+// --midTopSampleFactor, or its default.
+inline int midTopSampleFactor(const Options& o) { return o.midTopSampleFactor.value_or(o.midKeepSkipped ? 2 : 1); }
 
 std::string usageText();
 
