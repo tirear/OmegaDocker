@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.25 |
+| 文件版本 | 1.26 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -850,8 +850,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 2. **排序**：依 9b 能量（8.6 的排序能量，不含閉合約束）由低到高；能量相同時保持合併順序（穩定排序）。
 3. **多樣性篩選**（貪婪法）：
    - 依序檢查每個樣本；若與已保留樣本「使用相同 StaM 構型」且 RMSD < `diversityRmsd`，則跳過。
-   - RMSD：MobM 重原子（8.1 的探針原子中 H、HD、HS 以外者），不疊合（StaM 為固定座標框架）；座標與 9b 相同，以 float 由對接樣本的 pose 與兩面角計算。對稱修正採同類型原子最近配對（同 AutoDock）：受檢樣本的每個原子，與已保留樣本中同一 AD4 類型、距離最近的原子配對。
-   - 不使用質心距離加速：採最近配對時，RMSD 可能小於質心距離，以質心距離判定為不同會保留應跳過的樣本。
+   - RMSD：MobM 重原子（8.1 的探針原子中 H、HD、HS 以外者），不疊合（StaM 為固定座標框架）；座標與 9b 相同，以 float 由對接樣本的 pose 與兩面角計算。原子 i 與原子 i 配對，不做對稱修正（對稱修正在 9d 進行）。
+   - 質心距離加速：一對一配對時 RMSD ≥ 重原子質心距離，因此質心距離 ≥ `diversityRmsd` 的配對直接視為不同。已保留樣本依（StaM 構型樣本 ID, 質心所在格子）建立雜湊，格子邊長 = `diversityRmsd`；受檢樣本只與相鄰 27 格中、質心距離 < `diversityRmsd` 的已保留樣本計算 RMSD。
    - 相同位置、不同定向的樣本因 RMSD 大，會被保留。
    - 依序檢查到保留 `topSampleNum` 個為止；只計算被檢查樣本的座標。
    - `diversityRmsd` 預設 2.0 Å；設為 0 表示關閉。
@@ -863,6 +863,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 分批的結果與一次做完不一定相同：多樣性篩選中，先前批次被截掉的樣本，在後來的批次中可能本應因其他樣本被跳過而入選。不使用多樣性篩選時兩者相同。
 - 步驟 5 的本輪最低能量跨批累計，不受分批影響。
 - `sampleBufferNum` 太小時，每批可平行處理的樣本少，平行效率較差。
+- 實測（BTN，StaM 不可動，posm2、`--rotStep 15`、`--posStep 2`，1 輪 544 萬個對接樣本，9b 約 295 s）：主機記憶體由約 2.05 GB 降為 0.2 GB；9c 時間 `topSampleNum` 20–2000 時 0.7–1.2 s（一次做完 1.9–2.1 s），20000 時 11.4 s（一次做完 6.9 s）。最終 topSampleSet 與一次做完相同的樣本比例：20 個中 17、200 個中 169、2000 個中 1319、20000 個中 6843；分批時 topSampleSet 的最高能量較高（例如 20000 個時 −2.70 對 −3.29 kcal/mol）。
 4. **取前 `topSampleNum` 個** 為新的 topSampleSet。
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
@@ -887,6 +888,10 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 停止條件：輪數達 `maxRound`。
 - 目前只實作到 9c：所有輪次結束後，在執行紀錄列出每個 MobM 的 topSampleSet（能量、StaM／MobM 構型樣本 ID、位置）；精確重算、分群與檔案輸出尚未實作。
 - 精確重算：沿用目前 OmegaDocker 的 CPU 重算流程（`make_resfiles` 中的 `calc_interE_f`、`calc_intraE_f`），本版不改能量函式。
+- 對稱修正篩選（目前已實作，在所有輪次結束後執行）：依最終 topSampleSet 的順序（能量由低到高），與已保留樣本「使用相同 StaM 構型」且對稱修正 RMSD < `diversityRmsd` 的樣本移除；執行紀錄顯示移除數。質心距離加速同 9c（兩種對稱修正都是一對一配對）。
+  - 對稱修正 RMSD：MobM 重原子圖（標記為 AD4 類型，不分鍵級，不含金屬配位鍵）的自同構數 ≤ `symMaxPerm` 時，取所有自同構中最小的 RMSD（C1）；超過時，在每個 AD4 類型內以 Hungarian 法求最佳一對一配對（C2，不考慮鍵結）。
+  - 自同構於啟動時列舉一次（色彩細化後回溯），列舉到 `symMaxPerm` + 1 個即停止。
+  - `symMaxPerm` 預設 256。實測（CPU 單執行緒）：C1 每個自同構約 0.15 µs（154 個重原子）至 0.37 µs（405 個重原子），與自同構數成正比；C2 約 26 µs（154 個重原子）、235 µs（405 個重原子）。兩者相等的自同構數約 170–650。
 - 分群：沿用 AutoDock-GPU 的 RMSD 分群（`rmstol` 預設 2.0 Å）。
 - 輸出（每個 MobM 一個目錄 `<outPrefix>/<MobM id>/`）：
   - 每個 top 樣本：MobM 座標，依下表啟用的格式各輸出一份。
@@ -1039,6 +1044,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--topSampleNum` | eliteStaM × eliteMobM | 9 |
 | `--diversityRmsd` | 2.0 Å | 9 |
 | `--sampleBufferNum` | 65536（至少 4 × `topSampleNum`） | 9 |
+| `--symMaxPerm` | 256 | 10 |
 | `--lbfgsMemory` | 7 | 12 |
 | `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
 | `--maxTransStep` | 0.5 Å | 12 |
@@ -1246,7 +1252,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 9b 以 float 計算，只有加總、L-BFGS、pose 更新用 double；對接樣本即最後被接受的點，不重算（8.6、12.1） |
 | — | `--gridSpacing` 預設維持 0.375 Å（8.1） |
 | — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
-| — | 9c：穩定排序、AutoDock 式最近配對 RMSD（不用質心距離加速）；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，只有 StaM 完全不可動時跨輪快取（6、9） |
+| — | 9c：穩定排序、原子固定配對 RMSD 加質心距離加速（1.26 起；1.23–1.25 為 AutoDock 式最近配對）；9d 以對稱修正 RMSD（C1 自同構／C2 Hungarian，`--symMaxPerm` 256）再篩選；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，只有 StaM 完全不可動時跨輪快取（6、9） |
 | — | 沒有對接樣本的 dcss 樣本，本輪最低能量記為 +∞（不用 `E_max − 1`）；9b／9c 以 `--sampleBufferNum` 分批，接受分批與一次做完結果不同（9） |
 
 ### 17.2 待確認
@@ -1295,3 +1301,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.23 | 2026-10-15 | 實作輪次流程與 9c（CPU 參考版）：補滿 dcss 的順序與樣本 ID、每輪的網格建立、合併順序與穩定排序、RMSD 的原子與配對方向、移除質心距離加速（與最近配對不相容）、dcss 的本輪最低能量與無對接樣本的處理；csgm2／csgm3 尚未實作前一律用 csgm1；新增 `--maxRound`、`--topSampleNum`、`--diversityRmsd`（6、7.3、8.4、9、10、13） |
 | 1.24 | 2026-10-15 | StaM 群完全不可動時，網格與距離網格跨輪快取；其他情況每輪重建（6） |
 | 1.25 | 2026-10-15 | 新增 sampleBuffer：9b 在構型配對內分批最佳化，對接樣本每達 `sampleBufferNum`（至少 4 × `topSampleNum`）就先執行 9c 步驟 1–4；無對接樣本的本輪最低能量記為 +∞；新增 `--sampleBufferNum`（9、13、14） |
+| 1.26 | 2026-10-15 | 9c 改用原子固定配對 RMSD 加質心距離加速（質心雜湊）；所有輪次結束後以對稱修正 RMSD（C1 自同構、C2 Hungarian）篩選最終 topSampleSet 並顯示移除數；新增 `--symMaxPerm`（預設 256）；記錄 sampleBuffer 與對稱修正的實測（9、10、14） |

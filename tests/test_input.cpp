@@ -32,6 +32,7 @@
 #include "log.hpp"
 #include "minimize.hpp"
 #include "dssp.hpp"
+#include "symrmsd.hpp"
 #include "energy.hpp"
 #include "grid.hpp"
 #include "grow.hpp"
@@ -2212,15 +2213,13 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
 }
 
 TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
-  // RMSD with nearest same-type pairing.
   const std::vector<od::Vec3f> a{{0, 0, 0}, {1, 0, 0}, {0, 2, 0}};
-  const std::vector<int> ty{1, 1, 2};
-  CHECK(od::symmetricRmsd(a, a, ty) == 0);
-  const std::vector<od::Vec3f> sw{{1, 0, 0}, {0, 0, 0}, {0, 2, 0}};  // same-type atoms swapped
-  CHECK(od::symmetricRmsd(a, sw, ty) == 0);
+  CHECK(od::fixedRmsd(a, a) == 0);
+  const std::vector<od::Vec3f> sw{{1, 0, 0}, {0, 0, 0}, {0, 2, 0}};  // atoms 0 and 1 swapped
+  CHECK(od::fixedRmsd(a, sw) == doctest::Approx(std::sqrt(2.0 / 3)));
   std::vector<od::Vec3f> sh = a;
   for (auto& p : sh) p[2] += 3;
-  CHECK(od::symmetricRmsd(a, sh, ty) == doctest::Approx(3));
+  CHECK(od::fixedRmsd(a, sh) == doctest::Approx(3));
 
   // Docking samples of one conformation pair.
   DockFixture f;
@@ -2236,7 +2235,7 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   // World coordinates: inside the docking box, and the energy of the sample re-evaluates from the same pose.
   for (const auto& p : heavy.world(out[0]))
     for (int d = 0; d < 3; ++d) CHECK(std::abs(p[d] - f.p.boxCenter[d]) <= 0.5 * f.p.boxSize[d] + 1e-3);
-  CHECK(od::symmetricRmsd(heavy.world(out[0]), heavy.world(out[0]), heavy.types()) == 0);
+  CHECK(od::fixedRmsd(heavy.world(out[0]), heavy.world(out[0])) == 0);
 
   std::vector<od::RoundSample> merged;
   for (std::size_t k = 0; k < out.size(); ++k) merged.push_back({static_cast<int>(k % 2), 0, out[k]});
@@ -2251,7 +2250,13 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   CHECK(od::topMaxEnergy(top) == e[4]);
 
   // With the filter: sorted, and samples of the same StaM conformation at least diversityRmsd apart.
-  const double rmsd = 4.0;
+  // Threshold: median fixed RMSD between samples with the same StaM id.
+  std::vector<double> pr;
+  for (std::size_t k = 0; k < merged.size(); ++k)
+    for (std::size_t j = 0; j < k; ++j)
+      if (merged[j].stam == merged[k].stam) pr.push_back(od::fixedRmsd(heavy.world(merged[k].s), heavy.world(merged[j].s)));
+  std::nth_element(pr.begin(), pr.begin() + pr.size() / 2, pr.end());
+  const double rmsd = pr[pr.size() / 2];
   top = od::selectTopSamples(merged, heavy, 1000, rmsd);
   REQUIRE(!top.empty());
   CHECK(top.size() < merged.size());
@@ -2259,14 +2264,14 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   for (std::size_t k = 1; k < top.size(); ++k) CHECK(top[k - 1].s.energy <= top[k].s.energy);
   for (std::size_t k = 0; k < top.size(); ++k)
     for (std::size_t j = 0; j < k; ++j)
-      if (top[j].stam == top[k].stam) CHECK(od::symmetricRmsd(heavy.world(top[k].s), heavy.world(top[j].s), heavy.types()) >= rmsd);
+      if (top[j].stam == top[k].stam) CHECK(od::fixedRmsd(heavy.world(top[k].s), heavy.world(top[j].s)) >= rmsd);
   // Every skipped sample is close to a kept sample of the same StaM conformation with a lower or equal energy.
   for (const auto& m : merged) {
     bool kept = false, covered = false;
     for (const auto& t : top) {
       kept |= t.s.energy == m.s.energy && t.stam == m.stam && t.s.pose.t == m.s.pose.t;
       covered |= t.stam == m.stam && t.s.energy <= m.s.energy &&
-                 od::symmetricRmsd(heavy.world(m.s), heavy.world(t.s), heavy.types()) < rmsd;
+                 od::fixedRmsd(heavy.world(m.s), heavy.world(t.s)) < rmsd;
     }
     CHECK((kept || covered));
   }
@@ -2303,6 +2308,17 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   REQUIRE(inc.size() == once.size());
   for (std::size_t k = 0; k < once.size(); ++k) CHECK(inc[k].s.energy == once[k].s.energy);
 
+  // 9d filter: never keeps more than the 9c filter with the same threshold, and keeps the lowest energy.
+  top = od::selectTopSamples(merged, heavy, 1000, rmsd);
+  const od::SymmetryRmsd sym(f.x.f.mols[1], heavy.atoms(), heavy.types(), 256);
+  const auto fin = od::symmetryFilter(top, heavy, sym, rmsd);
+  CHECK(!fin.empty());
+  CHECK(fin.size() <= top.size());
+  CHECK(fin[0].s.energy == top[0].s.energy);
+  for (std::size_t k = 0; k < fin.size(); ++k)
+    for (std::size_t j = 0; j < k; ++j)
+      if (fin[j].stam == fin[k].stam) CHECK(sym.rmsd(heavy.world(fin[k].s), heavy.world(fin[j].s)) >= rmsd);
+
   // dcss filter.
   std::vector<int> dcss{1, 2, 3, 4};
   const std::unordered_map<int, float> lowest{{1, -5.f}, {2, -2.f}, {4, -3.f}};
@@ -2310,4 +2326,101 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   CHECK(dcss == std::vector<int>{1, 4});
   CHECK(od::filterDcss(dcss, lowest, -std::numeric_limits<float>::infinity()) == 2);
   CHECK(dcss.empty());
+}
+
+TEST_CASE("symrmsd: automorphisms, Hungarian pairing, symmetry-corrected RMSD") {
+  // Labelled graphs.
+  const std::vector<std::vector<int>> ring{{1, 5}, {0, 2}, {1, 3}, {2, 4}, {3, 5}, {4, 0}};
+  const std::vector<int> same(6, 0);
+  CHECK(od::graphAutomorphisms(ring, same, 1000).size() == 12);
+  const std::vector<int> oneLabel{1, 0, 0, 0, 0, 0};
+  CHECK(od::graphAutomorphisms(ring, oneLabel, 1000).size() == 2);
+  CHECK(od::graphAutomorphisms(ring, same, 5).size() == 6);  // stops after limit + 1
+  // Star with 4 equal leaves: 4! automorphisms.
+  const std::vector<std::vector<int>> star{{1, 2, 3, 4}, {0}, {0}, {0}, {0}};
+  CHECK(od::graphAutomorphisms(star, std::vector<int>(5, 0), 1000).size() == 24);
+  // k independent 2-fold swaps: 2^k.
+  std::vector<std::vector<int>> chain;
+  std::vector<int> lab;
+  const int k = 6;
+  for (int i = 0; i < k; ++i) {
+    const int c = static_cast<int>(chain.size());
+    chain.push_back({});
+    lab.push_back(10 + i);  // distinct backbone labels
+    chain.push_back({c});
+    chain.push_back({c});
+    lab.push_back(0);
+    lab.push_back(0);
+    chain[c].push_back(c + 1);
+    chain[c].push_back(c + 2);
+    if (i > 0) {
+      chain[c].push_back(c - 3);
+      chain[c - 3].push_back(c);
+    }
+  }
+  CHECK(od::graphAutomorphisms(chain, lab, 1000).size() == 64);
+
+  // Hungarian pairing against brute force.
+  std::mt19937 gen(3);
+  std::uniform_real_distribution<float> u(-3, 3);
+  for (int trial = 0; trial < 20; ++trial) {
+    const int n = 6;
+    std::vector<od::Vec3f> p(n), q(n);
+    for (int i = 0; i < n; ++i) {
+      p[i] = {u(gen), u(gen), u(gen)};
+      q[i] = {u(gen), u(gen), u(gen)};
+    }
+    std::vector<int> perm{0, 1, 2, 3, 4, 5};
+    double best = 1e30;
+    do {
+      double s = 0;
+      for (int i = 0; i < n; ++i)
+        for (int d = 0; d < 3; ++d) s += (p[i][d] - q[perm[i]][d]) * (p[i][d] - q[perm[i]][d]);
+      best = std::min(best, s);
+    } while (std::next_permutation(perm.begin(), perm.end()));
+    CHECK(od::hungarianSquaredSum(p, q, {{0, 1, 2, 3, 4, 5}}) == doctest::Approx(best).epsilon(1e-6));
+  }
+
+  // Benzene (united atom: 6 aromatic carbons): rotating the labels by one atom gives RMSD 0.
+  const auto mols = od::loadMolecules(kData + "/benzene.mol2", od::Role::MobM, ccd());
+  REQUIRE(mols.size() == 1);
+  const auto typing = od::assignAd4Types(mols[0]);
+  std::vector<int> atoms, types;
+  std::vector<od::Vec3f> x;
+  for (std::size_t i = 0; i < mols[0].atoms.size(); ++i)
+    if (typing.type[i] == od::Ad4Type::A) {
+      atoms.push_back(static_cast<int>(i));
+      types.push_back(static_cast<int>(typing.type[i]));
+      const auto& c = mols[0].atoms[i].xyz;
+      x.push_back({static_cast<float>(c[0]), static_cast<float>(c[1]), static_cast<float>(c[2])});
+    }
+  REQUIRE(atoms.size() == 6);
+  const od::SymmetryRmsd c1(mols[0], atoms, types, 256), c2(mols[0], atoms, types, 4);
+  CHECK(c1.usesPermutations());
+  CHECK(c1.permutationCount() == 12);
+  CHECK_FALSE(c2.usesPermutations());
+  // Neighbours along the ring of atom 0, then rotate the labels along the ring.
+  std::vector<int> ringOrder{0};
+  while (ringOrder.size() < 6)
+    for (const auto& b : mols[0].bonds) {
+      const auto ia = std::find(atoms.begin(), atoms.end(), b.a), ib = std::find(atoms.begin(), atoms.end(), b.b);
+      if (ia == atoms.end() || ib == atoms.end()) continue;
+      const int pa = static_cast<int>(ia - atoms.begin()), pb = static_cast<int>(ib - atoms.begin());
+      const int last = ringOrder.back();
+      const int next = pa == last ? pb : pb == last ? pa : -1;
+      if (next >= 0 && std::find(ringOrder.begin(), ringOrder.end(), next) == ringOrder.end()) {
+        ringOrder.push_back(next);
+        break;
+      }
+    }
+  std::vector<od::Vec3f> rot(6);
+  for (int i = 0; i < 6; ++i) rot[ringOrder[i]] = x[ringOrder[(i + 1) % 6]];
+  CHECK(od::fixedRmsd(x, rot) > 1.0);
+  CHECK(c1.rmsd(x, rot) == doctest::Approx(0).epsilon(1e-5));
+  CHECK(c2.rmsd(x, rot) == doctest::Approx(0).epsilon(1e-5));
+  // One-to-one: RMSD >= centroid distance.
+  std::vector<od::Vec3f> moved = rot;
+  for (auto& p : moved) p[0] += 2.5f;
+  CHECK(c1.rmsd(x, moved) >= 2.5 - 1e-4);
+  CHECK(c2.rmsd(x, moved) >= 2.5 - 1e-4);
 }

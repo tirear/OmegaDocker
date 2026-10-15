@@ -93,6 +93,7 @@ add_library(od_core STATIC
   src/orient.cpp
   src/dock9b.cpp
   src/dock9c.cpp
+  src/symrmsd.cpp
   ${OD_CCD_EMBED}
   ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)

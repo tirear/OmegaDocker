@@ -10,6 +10,7 @@
 
 #include "dock9b.hpp"
 #include "energy.hpp"
+#include "symrmsd.hpp"
 
 namespace od {
 
@@ -28,24 +29,27 @@ class MobmHeavyAtoms {
   explicit MobmHeavyAtoms(const EnergySystem& mobSys);
   std::size_t size() const { return index_.size(); }
   std::span<const int> types() const { return type_; }
+  std::span<const int> atoms() const { return atom_; }  // atom indices in the MobM
   // World coordinates, single precision as in 9b: R(float q)(y - float center) + float t.
   std::vector<Vec3f> world(const DockSample& s) const;
 
  private:
   const EnergySystem& sys_;
   std::vector<int> index_;  // coordinate indices
+  std::vector<int> atom_;   // atom indices
   std::vector<int> type_;   // Ad4Type
 };
 
-// RMSD without superposition; each atom of a is paired with the nearest atom
-// of the same type in b (AutoDock symmetry correction).
-double symmetricRmsd(std::span<const Vec3f> a, std::span<const Vec3f> b, std::span<const int> type);
-
 // Steps 1–4: merged = previous topSampleSet followed by the docking samples of
-// the round. Sorted by energy (stable), greedy diversity filter, first topNum.
-// diversityRmsd <= 0 disables the filter.
+// the round. Sorted by energy (stable), greedy diversity filter (RMSD with atom i
+// paired with atom i), first topNum. diversityRmsd <= 0 disables the filter.
 std::vector<RoundSample> selectTopSamples(std::vector<RoundSample> merged, const MobmHeavyAtoms& atoms, int topNum,
                                           double diversityRmsd);
+
+// 9d: in order, removes the samples closer than rmsd (symmetry-corrected) to a
+// kept sample with the same StaM conformation sample.
+std::vector<RoundSample> symmetryFilter(std::vector<RoundSample> top, const MobmHeavyAtoms& atoms,
+                                        const SymmetryRmsd& sym, double rmsd);
 
 // Step 5: removes the samples whose lowest docking energy of the round is
 // above eTopMax, or that have none (absent from lowest). eTopMax: highest

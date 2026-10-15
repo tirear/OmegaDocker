@@ -287,6 +287,7 @@ struct MobState {
   int topNum = 0;
   std::size_t bufferNum = 0;  // sampleBufferNum
   std::unique_ptr<od::MobmHeavyAtoms> heavy;
+  std::unique_ptr<od::SymmetryRmsd> sym;
 };
 
 std::uint64_t pairKey(int stam, int mobm) {
@@ -328,8 +329,17 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
     ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, 4 * static_cast<std::size_t>(ms[i].topNum));
-    od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}", mobSets[i]->name(), ms[i].topNum,
-                            ms[i].bufferNum));
+    const auto s0 = std::chrono::steady_clock::now();
+    ms[i].sym = std::make_unique<od::SymmetryRmsd>(*mobSets[i]->parts()[0].mol, ms[i].heavy->atoms(), ms[i].heavy->types(),
+                                                   static_cast<std::size_t>(opt.symMaxPerm));
+    const double symSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
+    od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
+                            mobSets[i]->name(), ms[i].topNum, ms[i].bufferNum,
+                            ms[i].sym->usesPermutations()
+                                ? std::format("{} automorphism(s)", ms[i].sym->permutationCount())
+                                : std::format("more than {} automorphisms, one-to-one pairing within each AD4 type",
+                                              opt.symMaxPerm),
+                            symSec));
   }
 
   for (int round = 1; round <= opt.maxRound; ++round) {
@@ -358,13 +368,16 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<od::Dock9bStats> st(ms.size());
     std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0), sampleNum(ms.size(), 0), partial(ms.size(), 0);
     std::vector<std::vector<od::RoundSample>> buffer(ms.size());
+    std::vector<double> selectSec(ms.size(), 0);
     // 9c steps 1-4 on the topSampleSet and the waiting docking samples (spec 9).
     auto select = [&](std::size_t i) {
       MobState& m = ms[i];
       std::vector<od::RoundSample> merged = std::move(m.top);
       merged.insert(merged.end(), std::make_move_iterator(buffer[i].begin()), std::make_move_iterator(buffer[i].end()));
       buffer[i].clear();
+      const auto c0 = std::chrono::steady_clock::now();
       m.top = od::selectTopSamples(std::move(merged), *m.heavy, m.topNum, opt.diversityRmsd);
+      selectSec[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
     };
     double gridSec = 0;
     bool gridsReused = false;
@@ -423,7 +436,9 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         }
       }
     }
-    const double dockSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count() - gridSec;
+    double partialSec = 0;
+    for (double s : selectSec) partialSec += s;
+    const double dockSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count() - gridSec - partialSec;
     if (gridsReused)
       od::logInfo("  9b grids of the StaM input conformation reused from the first round");
     else
@@ -458,13 +473,22 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
       const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
       od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}  "
-                              "9c runs {}",
-                              mobSets[i]->name(), m.top.size(), m.topNum, eTop, rmStam, rmMob, partial[i] + 1));
+                              "9c runs {}  {:.2f} s",
+                              mobSets[i]->name(), m.top.size(), m.topNum, eTop, rmStam, rmMob, partial[i] + 1,
+                              selectSec[i]));
       if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5));
     }
     od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));
   }
 
+  for (std::size_t i = 0; i < ms.size(); ++i) {
+    const std::size_t before = ms[i].top.size();
+    const auto f0 = std::chrono::steady_clock::now();
+    ms[i].top = od::symmetryFilter(std::move(ms[i].top), *ms[i].heavy, *ms[i].sym, opt.diversityRmsd);
+    od::logInfo(std::format("9d {:<38} symmetry-corrected RMSD < {} Å: removed {} of {}  {:.2f} s", mobSets[i]->name(),
+                            opt.diversityRmsd, before - ms[i].top.size(), before,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count()));
+  }
   od::logInfo("Final topSampleSet:");
   for (std::size_t i = 0; i < ms.size(); ++i) {
     od::logInfo(std::format("  {:<40} {} sample(s)", mobSets[i]->name(), ms[i].top.size()));
