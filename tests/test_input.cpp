@@ -29,6 +29,7 @@
 #include "minimize.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
+#include "grid.hpp"
 #include "grow.hpp"
 #include "molconfig.hpp"
 #include "rama.hpp"
@@ -1670,4 +1671,148 @@ TEST_CASE("grow: reach toward a loop closure (2KJJ)") {
     CHECK_FALSE(res.ok);
     CHECK(res.reachFails == 1);
   }
+}
+
+namespace {
+
+// StaM 2KJJ in its input conformation and MobM 1L2Y as grid atoms.
+struct GridFixture {
+  StaFixture f;
+  od::MolConfig cfg;
+  std::vector<od::EnergyPart> staParts, mobParts;
+  std::unique_ptr<od::EnergySystem> staSys, mobSys;
+  od::GridAtoms stam, mobm;
+
+  GridFixture() : cfg(f.ok(f.text)) {
+    staParts = {{&f.mols[0], &cfg.molecules[0].tree}};
+    mobParts = {{&f.mols[1], &cfg.molecules[1].tree}};
+    staSys = std::make_unique<od::EnergySystem>(staParts, od::EnergyParams{});
+    mobSys = std::make_unique<od::EnergySystem>(mobParts, od::EnergyParams{});
+    std::vector<od::Vec3> x;
+    staSys->evaluate(staSys->inputAngles(), nullptr, &x);
+    stam = od::gridAtoms(*staSys, staParts, x);
+    mobSys->evaluate(mobSys->inputAngles(), nullptr, &x);
+    mobm = od::gridAtoms(*mobSys, mobParts, x);
+  }
+  od::Vec3 stamCenter() const {
+    od::Vec3 c{};
+    for (const auto& p : stam.xyz)
+      for (int k = 0; k < 3; ++k) c[k] += p[k] / static_cast<double>(stam.size());
+    return c;
+  }
+};
+
+}  // namespace
+
+TEST_CASE("grid: geometry") {
+  const auto g = od::boxGrid({1, 2, 3}, {10, 7.4, 0.375}, 0.375);
+  CHECK(g.n[0] == 29);  // 26.67 -> 27 -> 28 intervals
+  CHECK(g.n[1] == 21);  // 19.73 -> 20
+  CHECK(g.n[2] == 3);   // 1 -> 2
+  for (int c = 0; c < 3; ++c) CHECK(g.origin[c] + 0.5 * (g.n[c] - 1) * g.spacing == doctest::Approx(c + 1.0));
+  CHECK(g.inside(g.origin));
+  CHECK(g.inside(g.max()));
+  CHECK_FALSE(g.inside({g.origin[0] - 1e-6, 2, 3}));
+  // Trilinear interpolation reproduces a linear function and its gradient.
+  std::vector<float> map(g.size());
+  for (int k = 0; k < g.n[2]; ++k)
+    for (int j = 0; j < g.n[1]; ++j)
+      for (int i = 0; i < g.n[0]; ++i) {
+        const auto p = g.point(i, j, k);
+        map[g.index(i, j, k)] = static_cast<float>(2 * p[0] - 3 * p[1] + 0.5 * p[2]);
+      }
+  od::Vec3 grad;
+  const od::Vec3 p{2.1, 1.3, 3.2};
+  CHECK(od::interpolate(g, map, p, &grad) == doctest::Approx(2 * 2.1 - 3 * 1.3 + 0.5 * 3.2).epsilon(1e-5));
+  CHECK(grad[0] == doctest::Approx(2).epsilon(1e-4));
+  CHECK(grad[1] == doctest::Approx(-3).epsilon(1e-4));
+  CHECK(grad[2] == doctest::Approx(0.5).epsilon(1e-4));
+  CHECK(od::interpolate(g, map, g.max()) == doctest::Approx(map.back()));
+}
+
+TEST_CASE("grid: energy and distance grids (2KJJ, 1L2Y)") {
+  GridFixture x;
+  const od::Vec3 c = x.stamCenter();
+  const auto geom = od::boxGrid(c, {20, 20, 20}, 0.375);
+  const auto grids = od::buildEnergyGrids(geom, x.stam, x.mobm.type, {});
+  CHECK(grids.types.size() < x.mobm.size());
+  for (od::Ad4Type t : x.mobm.type) CHECK(grids.mapOf(t) >= 0);
+
+  // At grid points the grid energy equals the pair sum (points away from clashes).
+  std::mt19937 rng(5);
+  std::uniform_int_distribution<int> ui(0, geom.n[0] - 1);
+  od::GridAtoms probe;
+  const auto dist = od::buildDistanceGrid(geom, x.stam, 6.0);
+  int checked = 0;
+  for (int k = 0; k < 4000 && checked < 300; ++k) {
+    const int i = ui(rng), j = ui(rng), l = ui(rng);
+    const std::size_t idx = geom.index(i, j, l);
+    if (dist.d[idx] < 2.5) continue;
+    od::GridAtoms one;
+    const std::size_t a = static_cast<std::size_t>(k) % x.mobm.size();
+    one.xyz = {geom.point(i, j, l)};
+    one.type = {x.mobm.type[a]};
+    one.charge = {x.mobm.charge[a]};
+    one.heavy = {x.mobm.heavy[a]};
+    const double eg = od::gridEnergy(grids, one).energy;
+    const double ep = od::pairInterEnergy(x.stam, one, {});
+    CHECK(eg == doctest::Approx(ep).epsilon(1e-5).scale(1e-3));
+    ++checked;
+  }
+  CHECK(checked >= 100);
+
+  // Distance grid: brute force at grid points, capped.
+  for (int k = 0; k < 500; ++k) {
+    const int i = ui(rng), j = ui(rng), l = ui(rng);
+    const auto p = geom.point(i, j, l);
+    double best = 6.0;
+    for (std::size_t a = 0; a < x.stam.size(); ++a)
+      if (x.stam.heavy[a]) {
+        const double dx = p[0] - x.stam.xyz[a][0], dy = p[1] - x.stam.xyz[a][1], dz = p[2] - x.stam.xyz[a][2];
+        best = std::min(best, std::sqrt(dx * dx + dy * dy + dz * dz));
+      }
+    CHECK(dist.d[geom.index(i, j, l)] == doctest::Approx(best).epsilon(1e-5));
+  }
+
+  // Probe atoms at random points 3-6 Å from the StaM: interpolated energy
+  // close to the pair sum, analytic gradient equal to finite differences.
+  std::uniform_real_distribution<double> u(0, 1);
+  od::GridAtoms m;
+  while (m.size() < 40) {
+    od::Vec3 p;
+    for (int k = 0; k < 3; ++k) p[k] = geom.origin[k] + u(rng) * (geom.n[k] - 1) * geom.spacing;
+    const double d = od::interpolate(geom, dist.d, p);
+    if (d < 3.0 || d >= 6.0) continue;
+    const std::size_t a = m.size() % x.mobm.size();
+    m.xyz.push_back(p);
+    m.type.push_back(x.mobm.type[a]);
+    m.charge.push_back(x.mobm.charge[a]);
+    m.heavy.push_back(x.mobm.heavy[a]);
+  }
+  std::vector<od::Vec3> g;
+  const auto em = od::gridEnergy(grids, m, &g);
+  CHECK(em.outside == 0);
+  CHECK(em.energy == doctest::Approx(od::pairInterEnergy(x.stam, m, {})).epsilon(0.15));  // interpolation error
+  for (std::size_t a = 0; a < m.size(); ++a) {
+    od::GridAtoms one;
+    one.xyz = {m.xyz[a]};
+    one.type = {m.type[a]};
+    one.charge = {m.charge[a]};
+    one.heavy = {m.heavy[a]};
+    CHECK(od::gridEnergy(grids, one).energy == doctest::Approx(od::pairInterEnergy(x.stam, one, {})).epsilon(0.15).scale(1.0));
+    const double h = 1e-5;
+    for (int k = 0; k < 3; ++k) {
+      od::GridAtoms mp = m, mm = m;
+      mp.xyz[a][k] += h;
+      mm.xyz[a][k] -= h;
+      const double fd = (od::gridEnergy(grids, mp).energy - od::gridEnergy(grids, mm).energy) / (2 * h);
+      CHECK(g[a][k] == doctest::Approx(fd).epsilon(1e-3).scale(1e-2));
+    }
+  }
+  // Atoms outside the grid are counted and skipped.
+  od::GridAtoms far = x.mobm;
+  for (auto& p : far.xyz) p[0] += 1000;
+  const auto e = od::gridEnergy(grids, far);
+  CHECK(e.outside == static_cast<int>(far.size()));
+  CHECK(e.energy == 0);
 }

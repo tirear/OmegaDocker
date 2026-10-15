@@ -19,6 +19,7 @@
 #include "csgm1.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
+#include "grid.hpp"
 #include "grow.hpp"
 #include "molconfig.hpp"
 #include "topology.hpp"
@@ -323,6 +324,35 @@ int run(int argc, char** argv) {
   for (std::size_t i = 0; i < mobs.size(); ++i) {
     const auto& s = cfg->molecules[sta.size() + i];
     runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, od::SampleSet::MobM, seed, 1 + i);
+  }
+
+  od::logInfo("9b grids of the input StaM conformation:");
+  {
+    std::vector<od::EnergyPart> parts;
+    for (std::size_t i = 0; i < sta.size(); ++i) parts.push_back({&sta[i], &cfg->molecules[i].tree});
+    const od::EnergySystem sys(parts, energyParams(opt));
+    std::vector<od::Vec3> x;
+    sys.evaluate(sys.inputAngles(), nullptr, &x);
+    const od::GridAtoms stam = od::gridAtoms(sys, parts, x);
+    std::vector<od::Ad4Type> probe;
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+      const od::EnergySystem ms({{&mobs[i], &cfg->molecules[sta.size() + i].tree}}, energyParams(opt));
+      for (od::Ad4Type t : ms.typing(0).type)
+        if (t != od::Ad4Type::Merged && std::find(probe.begin(), probe.end(), t) == probe.end()) probe.push_back(t);
+    }
+    const od::GridGeometry geom = od::boxGrid(*opt.boxCenter, *opt.boxSize, opt.gridSpacing);
+    const auto t0 = std::chrono::steady_clock::now();
+    const od::EnergyGrids grids = od::buildEnergyGrids(geom, stam, probe, energyParams(opt));
+    const auto t1 = std::chrono::steady_clock::now();
+    const od::DistanceGrid dist = od::buildDistanceGrid(geom, stam, std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing);
+    const auto t2 = std::chrono::steady_clock::now();
+    std::string types;
+    for (od::Ad4Type t : grids.types) types += std::string(" ") + od::ad4TypeName(t);
+    od::logInfo(std::format("  {} x {} x {} points, spacing {} Å, StaM atoms {}, type maps{} + elec + desolv: {:.2f} s; "
+                            "distance grid: {:.2f} s",
+                            geom.n[0], geom.n[1], geom.n[2], geom.spacing, stam.size(), types,
+                            std::chrono::duration<double>(t1 - t0).count(),
+                            std::chrono::duration<double>(t2 - t1).count()));
   }
   return 0;
 }

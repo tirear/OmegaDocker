@@ -56,6 +56,8 @@ struct Options {
   double Kclash = 1000.0;
   ConfSampleOpts stam;  // --stam*ConfSampleNum: the StaM group
   ConfSampleOpts mobm;  // --mobm*ConfSampleNum: shared by all MobM
+  double gridSpacing = 0.375;
+  double maxNearDistance = 6.0;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;
