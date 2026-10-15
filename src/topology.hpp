@@ -51,7 +51,7 @@ struct Torsion {
   int unit = -1;                 // backbone unit for backbone angles
   int residue = -1;              // residue of the unit (backbone) or of atoms[1]
   double angle = 0.0;            // input value in degrees, (-180, 180]
-  bool inFlexRange = true;       // StaM: within the docking box extended by staFlexMargin
+  bool inFlexRange = true;       // StaM: within the docking box extended by stamFlexMargin
   bool broken = false;           // the bond is broken and closed by constraints (spec 4.8)
   bool rotatable = false;        // default of spec 4.2 / 4.4
 };
@@ -81,12 +81,12 @@ struct Box {
 
 struct TopologyParams {
   // StaM only: torsions are rotatable by default only in residues (or, without
-  // residue information, at atoms) within the box extended by staFlexMargin.
+  // residue information, at atoms) within the box extended by stamFlexMargin.
   std::optional<Box> box;
-  double staFlexMargin = 4.0;
+  double stamFlexMargin = 4.0;
   // StaM (spec 4.7): false keeps the backbone of fixed residues in place; with
   // false, torsions with backbone atoms on both sides are not rotatable by default.
-  bool staFixedResMovable = false;
+  bool stamFixedResMovable = false;
   // Broken bonds (indices into Molecule::bonds); crosslinkBreaks when not given
   // (metal bonds are kept by default, spec 4.7).
   std::optional<std::vector<int>> brokenBonds;

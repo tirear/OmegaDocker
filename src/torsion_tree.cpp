@@ -107,8 +107,8 @@ std::vector<bool> fixedUnits(const Topology& t, const std::vector<TorsionMode>& 
 }
 
 std::vector<int> anchorAtoms(const Molecule& m, const Topology& t, const std::vector<TorsionMode>& mode,
-                             bool staFixedResMovable) {
-  if (m.role == Role::StaM && !staFixedResMovable && t.backboneType != BackboneType::None) {
+                             bool stamFixedResMovable) {
+  if (m.role == Role::StaM && !stamFixedResMovable && t.backboneType != BackboneType::None) {
     const auto fixed = fixedUnits(t, mode);
     std::vector<int> out;
     for (std::size_t u = 0; u < t.units.size(); ++u)
@@ -151,9 +151,9 @@ int backboneLink(const Molecule& m, const Topology& t, int unit, int next) {
 }
 
 std::vector<Loop> findLoops(const Molecule& m, const Topology& t, const std::vector<TorsionMode>& mode,
-                            bool staFixedResMovable) {
+                            bool stamFixedResMovable) {
   std::vector<Loop> loops;
-  if (m.role != Role::StaM || staFixedResMovable || t.backboneType == BackboneType::None) return loops;
+  if (m.role != Role::StaM || stamFixedResMovable || t.backboneType == BackboneType::None) return loops;
   const auto fixed = fixedUnits(t, mode);
   std::vector<bool> broken(m.bonds.size(), false);
   for (int b : t.brokenBonds) broken[b] = true;
@@ -181,12 +181,12 @@ std::vector<Loop> findLoops(const Molecule& m, const Topology& t, const std::vec
 }
 
 TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::vector<TorsionMode>& mode,
-                             bool staFixedResMovable, std::vector<TreeProblem>& problems) {
+                             bool stamFixedResMovable, std::vector<TreeProblem>& problems) {
   TorsionTree tree;
   const int n = static_cast<int>(m.atoms.size());
   tree.atomCount = n;
-  tree.anchors = anchorAtoms(m, t, mode, staFixedResMovable);
-  tree.loops = findLoops(m, t, mode, staFixedResMovable);
+  tree.anchors = anchorAtoms(m, t, mode, stamFixedResMovable);
+  tree.loops = findLoops(m, t, mode, stamFixedResMovable);
   std::vector<bool> anchor(n, false);
   for (int a : tree.anchors) anchor[a] = true;
   const auto adj = adjacency(m, t.brokenBonds);

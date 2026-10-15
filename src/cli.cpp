@@ -74,8 +74,48 @@ OptionDef sampleOption(const std::string& set, const std::string& name, std::opt
           }};
 }
 
+// --stam<Name> and --mobm<Name> for one CsgmOpts field.
+template <typename T>
+void csgmOption(std::vector<OptionDef>& table, const std::string& name, const std::string& metavar,
+                const std::string& defaultText, const std::string& help,
+                std::function<T(const std::string& opt, const std::string& v)> parse, T CsgmOpts::* field) {
+  for (const std::string set : {"stam", "mobm"}) {
+    const std::string opt = set + name;
+    table.push_back({opt, Kind::Value, metavar, defaultText,
+                     (set == "stam" ? "StaM group, " : "Every MobM, ") + help,
+                     [opt, set, parse, field](Options& o, const std::string& v) {
+                       (set == "stam" ? o.stamCsgm : o.mobmCsgm).*field = parse(opt, v);
+                     }});
+  }
+}
+
+std::vector<OptionDef> csgmOptions() {
+  std::vector<OptionDef> t;
+  csgmOption<bool>(t, "CsgmBuild", "whole|grow", "whole", "9a: apply all torsions at once, or build segment by segment",
+                   [](const std::string& opt, const std::string& v) {
+                     if (v != "whole" && v != "grow") fail("--{}: expected whole or grow but got '{}'", opt, v);
+                     return v == "grow";
+                   },
+                   &CsgmOpts::grow);
+  csgmOption<int>(t, "GrowMaxRetry", "<n>", "16", "CsgmBuild = grow: resamplings of a failing segment before discarding",
+                  parseInt32, &CsgmOpts::growMaxRetry);
+  csgmOption<double>(t, "Csgm1AngleStep", "<deg>", "1", "csgm1a / R: sampled angles are multiples of this step",
+                     parseDouble, &CsgmOpts::csgm1AngleStep);
+  csgmOption<double>(t, "RamaFloor", "<w>", "1e-4", "csgm1b: weight added to every Ramachandran cell", parseDouble,
+                     &CsgmOpts::ramaFloor);
+  return t;
+}
+
+// Inserts the csgm options after --maxL1BatchNum.
+std::vector<OptionDef> withCsgmOptions(std::vector<OptionDef> t) {
+  const auto at = std::find_if(t.begin(), t.end(), [](const OptionDef& d) { return d.name == "maxL1BatchNum"; });
+  const auto c = csgmOptions();
+  t.insert(at + 1, c.begin(), c.end());
+  return t;
+}
+
 const std::vector<OptionDef>& optionTable() {
-  static const std::vector<OptionDef> table = {
+  static const std::vector<OptionDef> table = withCsgmOptions({
       {"sta", Kind::Value, "<file>", "required", "Stationary molecules (StaM); may be given once",
        [](Options& o, const std::string& v) {
          if (!o.sta.empty()) fail("--sta may be given only once");
@@ -105,17 +145,17 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.omegaTolerance = parseDouble("omegaTolerance", v); }},
       {"acceptNonPlanarOmega", Kind::Flag, "", "", "Continue when a fixed omega exceeds --omegaTolerance",
        [](Options& o, const std::string&) { o.acceptNonPlanarOmega = true; }},
-      {"staFlexMargin", Kind::Value, "<dist>", "4", "StaM torsions are rotatable by default within the box extended by this margin (Å)",
-       [](Options& o, const std::string& v) { o.staFlexMargin = parseDouble("staFlexMargin", v); }},
-      {"staFixedResMovable", Kind::Value, "true|false", "false",
+      {"stamFlexMargin", Kind::Value, "<dist>", "4", "StaM torsions are rotatable by default within the box extended by this margin (Å)",
+       [](Options& o, const std::string& v) { o.stamFlexMargin = parseDouble("stamFlexMargin", v); }},
+      {"stamFixedResMovable", Kind::Value, "true|false", "false",
        "StaM: false keeps the backbone of fixed residues in place; true lets the whole chain move by torsions",
-       [](Options& o, const std::string& v) { o.staFixedResMovable = parseBool("staFixedResMovable", v); }},
+       [](Options& o, const std::string& v) { o.stamFixedResMovable = parseBool("stamFixedResMovable", v); }},
       {"maxBreakDist", Kind::Value, "<dist>", "0.5", "Largest closure deviation of a broken bond kept after 9a (Å)",
        [](Options& o, const std::string& v) { o.maxBreakDist = parseDouble("maxBreakDist", v); }},
       {"closureG", Kind::Value, "<k>", "200", "Closure constraint stiffness G (kcal/mol/Å²)",
        [](Options& o, const std::string& v) { o.closureG = parseDouble("closureG", v); }},
       {"reachPerRes", Kind::Value, "<p>,<n>", "3.8,7.0",
-       "csgmBuild = grow: reach per residue of protein / nucleic-acid chains toward a closure (Å)",
+       "CsgmBuild = grow: reach per residue of protein / nucleic-acid chains toward a closure (Å)",
        [](Options& o, const std::string& v) {
          const auto comma = v.find(',');
          if (comma == std::string::npos || v.find(',', comma + 1) != std::string::npos)
@@ -149,17 +189,6 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.maxL1TotalNum = parseInt("maxL1TotalNum", v); }},
       {"maxL1BatchNum", Kind::Value, "<n>", "65536", "9a: largest number of samples processed at once",
        [](Options& o, const std::string& v) { o.maxL1BatchNum = parseInt("maxL1BatchNum", v); }},
-      {"csgmBuild", Kind::Value, "whole|grow", "whole", "9a: apply all torsions at once, or build segment by segment",
-       [](Options& o, const std::string& v) {
-         if (v != "whole" && v != "grow") fail("--csgmBuild: expected whole or grow but got '{}'", v);
-         o.csgmGrow = v == "grow";
-       }},
-      {"growMaxRetry", Kind::Value, "<n>", "16", "csgmBuild = grow: resamplings of a failing segment before discarding",
-       [](Options& o, const std::string& v) { o.growMaxRetry = parseInt32("growMaxRetry", v); }},
-      {"csgm1AngleStep", Kind::Value, "<deg>", "1", "csgm1a: angle changes are multiples of this",
-       [](Options& o, const std::string& v) { o.csgm1AngleStep = parseDouble("csgm1AngleStep", v); }},
-      {"ramaFloor", Kind::Value, "<w>", "1e-4", "csgm1b: weight added to every Ramachandran cell",
-       [](Options& o, const std::string& v) { o.ramaFloor = parseDouble("ramaFloor", v); }},
       {"confMinMaxStep", Kind::Value, "<n>", "100", "9a minimization: largest number of steps",
        [](Options& o, const std::string& v) { o.confMinMaxStep = parseInt32("confMinMaxStep", v); }},
       {"confMinDeltaE", Kind::Value, "<E>", "10", "9a minimization: stop when one step changes the energy by less (kcal/mol)",
@@ -174,7 +203,7 @@ const std::vector<OptionDef>& optionTable() {
        }},
       {"help", Kind::Flag, "", "", "Show this help", [](Options& o, const std::string&) { o.showHelp = true; }},
       {"version", Kind::Flag, "", "", "Show version", [](Options& o, const std::string&) { o.showVersion = true; }},
-  };
+  });;
   return table;
 }
 
@@ -251,11 +280,10 @@ void validateOptions(const Options& o) {
     if (!(v > 0)) fail("--boxSize: all components must be > 0");
   if (o.outPrefix.empty()) fail("--outPrefix is required");
   if (!(o.omegaTolerance >= 0 && o.omegaTolerance <= 90)) fail("--omegaTolerance must be within [0, 90]");
-  if (!(o.staFlexMargin >= 0)) fail("--staFlexMargin must be >= 0");
+  if (!(o.stamFlexMargin >= 0)) fail("--stamFlexMargin must be >= 0");
   if (!(o.maxBreakDist > 0)) fail("--maxBreakDist must be > 0");
   if (!(o.closureG > 0)) fail("--closureG must be > 0");
   if (!(o.reachProtein > 0 && o.reachNucleic > 0)) fail("--reachPerRes values must be > 0");
-  if (o.growMaxRetry < 0) fail("--growMaxRetry must be >= 0");
   if (!(o.clashDistance > 0)) fail("--clashDistance must be > 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
@@ -268,8 +296,11 @@ void validateOptions(const Options& o) {
   }
   if (o.maxL1TotalNum < 1) fail("--maxL1TotalNum must be >= 1");
   if (o.maxL1BatchNum < 1) fail("--maxL1BatchNum must be >= 1");
-  if (!(o.csgm1AngleStep > 0 && o.csgm1AngleStep <= 180)) fail("--csgm1AngleStep must be within (0, 180]");
-  if (!(o.ramaFloor >= 0)) fail("--ramaFloor must be >= 0");
+  for (const auto& [set, c] : {std::pair{"stam", &o.stamCsgm}, std::pair{"mobm", &o.mobmCsgm}}) {
+    if (c->growMaxRetry < 0) fail("--{}GrowMaxRetry must be >= 0", set);
+    if (!(c->csgm1AngleStep > 0 && c->csgm1AngleStep <= 180)) fail("--{}Csgm1AngleStep must be within (0, 180]", set);
+    if (!(c->ramaFloor >= 0)) fail("--{}RamaFloor must be >= 0", set);
+  }
   if (o.confMinMaxStep < 0) fail("--confMinMaxStep must be >= 0");
   if (!(o.confMinDeltaE >= 0)) fail("--confMinDeltaE must be >= 0");
   if (!(o.confMaxDihedralStep > 0)) fail("--confMaxDihedralStep must be > 0");

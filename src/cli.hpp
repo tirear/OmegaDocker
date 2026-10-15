@@ -19,6 +19,14 @@ struct ConfSampleOpts {
   std::optional<int> docking, minL2, initL1, elite;
 };
 
+// csgm parameters of spec 7.5 and 7.8, one set for the StaM group and one shared by all MobM.
+struct CsgmOpts {
+  bool grow = false;  // --<set>CsgmBuild grow
+  int growMaxRetry = 16;
+  double csgm1AngleStep = 1.0;
+  double ramaFloor = 1e-4;
+};
+
 struct Options {
   std::string sta;
   std::vector<std::string> mob;
@@ -33,8 +41,8 @@ struct Options {
   bool outMol2 = false;
   double omegaTolerance = 30.0;
   bool acceptNonPlanarOmega = false;
-  double staFlexMargin = 4.0;
-  bool staFixedResMovable = false;
+  double stamFlexMargin = 4.0;
+  bool stamFixedResMovable = false;
   double maxBreakDist = 0.5;
   double closureG = 200.0;
   double reachProtein = 3.8;  // --reachPerRes <protein>,<nucleic>
@@ -47,10 +55,8 @@ struct Options {
   ConfSampleOpts mobm;  // --mobm*ConfSampleNum: shared by all MobM
   long long maxL1TotalNum = 1000000000;
   long long maxL1BatchNum = 65536;
-  bool csgmGrow = false;  // --csgmBuild grow
-  int growMaxRetry = 16;
-  double csgm1AngleStep = 1.0;
-  double ramaFloor = 1e-4;
+  CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
+  CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;
   double confMinDeltaE = 10.0;
   double confMaxDihedralStep = 10.0;

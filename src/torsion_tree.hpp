@@ -17,7 +17,7 @@ namespace od {
 enum class TorsionMode : std::uint8_t { Fixed, Free, CisTrans };
 
 // Consecutive non-fixed backbone units of a StaM chain (spec 4.7); only with
-// staFixedResMovable = false.
+// stamFixedResMovable = false.
 struct Loop {
   std::vector<int> units;  // chain order (indices into Topology::units)
   int before = -1;         // fixed unit before / after the loop, -1 at a chain end
@@ -64,21 +64,21 @@ struct TreeProblem {
 // Units whose backbone angles are all fixed (spec 4.7).
 std::vector<bool> fixedUnits(const Topology& t, const std::vector<TorsionMode>& mode);
 
-// Anchor atoms (spec 4.7): MobM, or StaM with staFixedResMovable or without
+// Anchor atoms (spec 4.7): MobM, or StaM with stamFixedResMovable or without
 // fixed units: the heavy atom (with a backbone: the CA / C4') nearest the
 // heavy-atom centroid; otherwise the backbone atoms of the fixed units.
 std::vector<int> anchorAtoms(const Molecule& m, const Topology& t, const std::vector<TorsionMode>& mode,
-                             bool staFixedResMovable);
+                             bool stamFixedResMovable);
 
 std::vector<Loop> findLoops(const Molecule& m, const Topology& t, const std::vector<TorsionMode>& mode,
-                            bool staFixedResMovable);
+                            bool stamFixedResMovable);
 
 // Backbone link bond between unit and the next unit (protein C-N, nucleic O3'-P); -1 if none.
 int backboneLink(const Molecule& m, const Topology& t, int unit, int next);
 
 // Builds the tree from the torsion modes and Topology::brokenBonds.
 TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::vector<TorsionMode>& mode,
-                             bool staFixedResMovable, std::vector<TreeProblem>& problems);
+                             bool stamFixedResMovable, std::vector<TreeProblem>& problems);
 
 // Coordinates (atoms, then virtual atoms) for absolute angles in degrees, one
 // per TorsionTree::torsions.

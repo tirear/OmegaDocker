@@ -42,8 +42,8 @@ void printMolecule(const od::Molecule& m) {
 od::TopologyParams topologyParams(const od::Options& opt) {
   od::TopologyParams p;
   p.box = od::Box{*opt.boxCenter, *opt.boxSize};
-  p.staFlexMargin = opt.staFlexMargin;
-  p.staFixedResMovable = opt.staFixedResMovable;
+  p.stamFlexMargin = opt.stamFlexMargin;
+  p.stamFixedResMovable = opt.stamFixedResMovable;
   return p;
 }
 
@@ -158,9 +158,10 @@ void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& part
     od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", name));
     return;
   }
+  const od::CsgmOpts& csgm = set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm;
   od::Csgm1Params cp;
-  cp.angleStep = opt.csgm1AngleStep;
-  cp.ramaFloor = opt.ramaFloor;
+  cp.angleStep = csgm.csgm1AngleStep;
+  cp.ramaFloor = csgm.ramaFloor;
   od::Csgm1GroupSampler sampler;
   for (std::size_t k = 0; k < parts.size(); ++k) sampler.add(od::Csgm1Sampler(*parts[k].mol, *settings[k], cfg, cp));
   const od::ConfSampleNums n = od::confSampleNums(opt, set);
@@ -174,11 +175,11 @@ void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& part
   p.seed = seed;
   p.stream = stream;
   std::optional<od::GrowBuilder> grow;
-  if (opt.csgmGrow) {
+  if (csgm.grow) {
     std::vector<const od::Topology*> topos;
     for (const auto* s : settings) topos.push_back(&s->topology);
     grow.emplace(sys, parts, topos, sampler.segments(),
-                 od::GrowParams{opt.growMaxRetry, opt.clashDistance, opt.reachProtein, opt.reachNucleic});
+                 od::GrowParams{csgm.growMaxRetry, opt.clashDistance, opt.reachProtein, opt.reachNucleic});
     od::logInfo(std::format("  {:<40} grow: {} segments, {} reach checks", name, grow->stepCount(),
                             grow->reachCheckCount()));
   }

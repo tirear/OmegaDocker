@@ -256,7 +256,7 @@ TEST_CASE("topology: protein backbone and side chains (1L2Y)") {
   CHECK(torsionAt(sta[0], all, 8, "CD", "CE").rotatable);
   od::TopologyParams p;
   p.box = od::Box{atomOf(sta[0], "A", 6, "CA").xyz, {1, 1, 1}};
-  p.staFlexMargin = 0;
+  p.stamFlexMargin = 0;
   auto near = od::analyzeTopology(sta[0], p);
   CHECK(countRotatable(near) == 2);  // TRP6 chi1, chi2
   CHECK(torsionAt(sta[0], near, 6, "CA", "CB").rotatable);
@@ -763,8 +763,8 @@ struct StaFixture {
   std::string path;
   std::string text;
 
-  explicit StaFixture(bool staFixedResMovable = false) {
-    params.staFixedResMovable = staFixedResMovable;
+  explicit StaFixture(bool stamFixedResMovable = false) {
+    params.stamFixedResMovable = stamFixedResMovable;
     mols.push_back(od::loadMolecules(kData + "/2KJJ.cif", od::Role::StaM, ccd()).front());
     mols.push_back(od::loadMolecules(kData + "/1L2Y.cif", od::Role::MobM, ccd()).front());
     for (auto& m : mols) {
@@ -959,7 +959,7 @@ TEST_CASE("torsion tree: StaM loops (2KJJ)") {
   CHECK(cfg.molecules[0].chainBreaks.size() == 2);
 }
 
-TEST_CASE("torsion tree: staFixedResMovable (2KJJ)") {
+TEST_CASE("torsion tree: stamFixedResMovable (2KJJ)") {
   StaFixture f(true);
   const auto cfg = f.ok(freeResidues(f.text, "A", 10, 14));
   const od::MolSettings& s = cfg.molecules[0];

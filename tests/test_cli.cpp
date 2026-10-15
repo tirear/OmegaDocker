@@ -31,13 +31,13 @@ TEST_CASE("cli: required options and values") {
   CHECK_FALSE(o.outPdb);
   CHECK(o.omegaTolerance == doctest::Approx(30));
   CHECK_FALSE(o.acceptNonPlanarOmega);
-  CHECK(o.staFlexMargin == doctest::Approx(4));
+  CHECK(o.stamFlexMargin == doctest::Approx(4));
   CHECK_NOTHROW(od::validateOptions(o));
 
-  auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--staFlexMargin=6.5"});
+  auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--stamFlexMargin=6.5"});
   CHECK(t.omegaTolerance == doctest::Approx(20));
   CHECK(t.acceptNonPlanarOmega);
-  CHECK(t.staFlexMargin == doctest::Approx(6.5));
+  CHECK(t.stamFlexMargin == doctest::Approx(6.5));
 }
 
 TEST_CASE("cli: errors") {
@@ -57,9 +57,9 @@ TEST_CASE("cli: errors") {
   o.omegaTolerance = 95;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.omegaTolerance = 30;
-  o.staFlexMargin = -1;
+  o.stamFlexMargin = -1;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
-  o.staFlexMargin = 4;
+  o.stamFlexMargin = 4;
   o.boxSize = od::Vec3{10, 0, 10};
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 }
@@ -114,17 +114,30 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(*s.mobm.initL1 == 17);
   CHECK(*s.mobm.elite == 2);
   CHECK_THROWS_AS(parse({"--dockingConfSampleNum", "8"}), od::Error);
-  o.csgm1AngleStep = 0;
+  o.stamCsgm.csgm1AngleStep = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
-  o.csgm1AngleStep = 1;
+  o.stamCsgm.csgm1AngleStep = 1;
+  o.mobmCsgm.growMaxRetry = -1;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.mobmCsgm.growMaxRetry = 0;
   o.confMaxDihedralStep = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 
-  auto t = parse({"--seed", "42", "--confMinMaxStep", "50", "--maxL1BatchNum=1000", "--ramaFloor", "0"});
+  auto t = parse({"--seed", "42", "--confMinMaxStep", "50", "--maxL1BatchNum=1000", "--mobmRamaFloor", "0",
+                  "--stamCsgmBuild", "grow", "--mobmCsgm1AngleStep=5", "--stamGrowMaxRetry", "3"});
   CHECK(*t.seed == 42);
   CHECK(t.confMinMaxStep == 50);
   CHECK(t.maxL1BatchNum == 1000);
-  CHECK(t.ramaFloor == 0);
+  CHECK(t.mobmCsgm.ramaFloor == 0);
+  CHECK(t.stamCsgm.ramaFloor == doctest::Approx(1e-4));
+  CHECK(t.stamCsgm.grow);
+  CHECK_FALSE(t.mobmCsgm.grow);
+  CHECK(t.mobmCsgm.csgm1AngleStep == 5);
+  CHECK(t.stamCsgm.csgm1AngleStep == 1);
+  CHECK(t.stamCsgm.growMaxRetry == 3);
+  CHECK(t.mobmCsgm.growMaxRetry == 16);
+  CHECK_THROWS_AS(parse({"--csgmBuild", "grow"}), od::Error);
+  CHECK_THROWS_AS(parse({"--mobmCsgmBuild", "partial"}), od::Error);
   CHECK_THROWS_AS(parse({"--seed", "-1"}), od::Error);
   CHECK_THROWS_AS(parse({"--confMinMaxStep", "1.5"}), od::Error);
 }

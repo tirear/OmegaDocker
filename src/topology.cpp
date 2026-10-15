@@ -416,7 +416,7 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
   std::vector<bool> atomIn(m.atoms.size(), true), resIn(m.residues.size(), !restrict);
   if (restrict) {
     for (std::size_t i = 0; i < m.atoms.size(); ++i) {
-      atomIn[i] = g.heavy(static_cast<int>(i)) && insideBox(m.atoms[i].xyz, *p.box, p.staFlexMargin);
+      atomIn[i] = g.heavy(static_cast<int>(i)) && insideBox(m.atoms[i].xyz, *p.box, p.stamFlexMargin);
       if (atomIn[i] && m.atoms[i].residue >= 0) resIn[m.atoms[i].residue] = true;
     }
   }
@@ -449,10 +449,10 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
     t.torsions.push_back(tor);
   }
 
-  // StaM with staFixedResMovable = false: by default every backbone residue is
+  // StaM with stamFixedResMovable = false: by default every backbone residue is
   // fixed, so a torsion with backbone atoms on both sides (e.g. through an
   // inter-chain disulfide) cannot rotate without a break (spec 4.7).
-  if (m.role == Role::StaM && !p.staFixedResMovable && !t.units.empty()) {
+  if (m.role == Role::StaM && !p.stamFixedResMovable && !t.units.empty()) {
     std::vector<bool> fixedAtom(m.atoms.size(), false);
     for (const auto& u : t.units)
       for (int a : u.atoms)

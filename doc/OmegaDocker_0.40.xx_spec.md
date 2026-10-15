@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.12 |
+| 文件版本 | 1.13 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -159,7 +159,7 @@
 - 分類依下列順序，取第一個符合者：金屬 → 芳香 → 環內 → 三鍵／共線（任一端的所有其他重原子鄰居與鍵的夾角 > 170°）→ 雙鍵 → 醯胺（C(=O)–N）→ 共振（其他 C(=X)–Y，X ∈ {O, S, N}，Y ∈ {N, O}）→ 對稱 → 單鍵。
 - 對稱基團：鍵的一端除另一端外，其餘鄰居（至少兩個，含氫）都是只連接該端的重原子，且元素與氫數相同。不依鍵級判斷，因此共振等價的基團（–COO⁻、–NO2、–SO3⁻、–PO3²⁻）也屬於此類；例如 Asp χ2、Glu χ3、C 端 ψ。
 
-**StaM 的範圍限制**：StaM 中，只有「任一重原子位於對接範圍外擴 `staFlexMargin`（預設 4 Å）內」的殘基（無殘基資訊時以原子為單位），其兩面角才依上述規則預設可轉動；其餘預設不可轉動。使用者可在分子設定檔中修改。
+**StaM 的範圍限制**：StaM 中，只有「任一重原子位於對接範圍外擴 `stamFlexMargin`（預設 4 Å）內」的殘基（無殘基資訊時以原子為單位），其兩面角才依上述規則預設可轉動；其餘預設不可轉動。使用者可在分子設定檔中修改。
 
 ### 4.5 環狀結構斷鍵
 
@@ -190,12 +190,12 @@
   - 兩側都含錨點原子 → 該兩面角無法轉動，驗證時報錯（5.3），提示改為不可轉動或在兩者之間加斷鍵。
   - 斷鍵後分出的每一段都必須含錨點原子，否則報錯（5.3）。MobM 與只有一個錨點原子的 StaM，等同「分子不可分成兩段」。
   - 錨點以分子（3.2 的連通分量）為單位；含多條鏈的分子（以交聯鍵相連）共用錨點。
-- StaM：依 `staFixedResMovable`（預設 `false`）決定。
+- StaM：依 `stamFixedResMovable`（預設 `false`）決定。
 
 **固定殘基**：主鏈兩面角全部不可動的殘基（蛋白質 φ、ψ、ω 皆不可動，ω 為 `fixed`；核酸 α–ζ 皆不可動）。
 **loop**：同一條鏈上連續的非固定殘基。
 
-#### `staFixedResMovable = false`（預設）
+#### `stamFixedResMovable = false`（預設）
 - 固定殘基的**主鏈原子**座標在 9a 最佳化中不變；側鏈依 4.4 的設定，不受此限制。
 - 每段 loop 的錨點與斷鍵：
 
@@ -212,7 +212,7 @@
   - 使用者可在設定檔以 `[[molecule.chainBreak]]`（`source = "user"` 或 `"auto-loop"`）改選同一 loop 中其他主鏈相連鍵；每段 loop 只能斷一處（否則中間一段沒有錨點）。
   - 自動斷開處的 ω（或 ζ）若為 `cisTrans`（或可轉動）→ 報錯，提示改為 `fixed` 或改選其他斷鍵位置。
   - `source = "auto-loop"` 只能用於兩個固定段之間 loop 的主鏈相連鍵。
-- 預設可轉動的限制：StaM（`staFixedResMovable = false`）中，非主鏈兩面角若兩側都含主鏈原子（例如未斷開的鏈間雙硫鍵上 Cys 的 χ2、χ3），預設不可轉動。
+- 預設可轉動的限制：StaM（`stamFixedResMovable = false`）中，非主鏈兩面角若兩側都含主鏈原子（例如未斷開的鏈間雙硫鍵上 Cys 的 χ2、χ3），預設不可轉動。
 
 - 交聯鍵（雙硫鍵 S–S 等跨殘基共價鍵）若使扭轉樹形成環，自動在該鍵斷開，並依 4.8 約束閉合。
   - 候選鍵：兩端原子屬於不同殘基、不是主鏈相連鍵（蛋白質 C–N、核酸 O3′–P）、不是金屬配位鍵。
@@ -236,7 +236,7 @@
   - 不符合時報錯並結束，由使用者重新決定。
 - 金屬配位鍵不在環內的分子不使用 `metalBond`。
 
-#### `staFixedResMovable = true`
+#### `stamFixedResMovable = true`
 - 錨點為最靠近分子質心的主鏈單元的 CA（蛋白質）或 C4′（核酸）（無主鏈時為最靠近質心的重原子）；轉動兩面角時，遠離錨點的一側移動。單鏈分子即為「最靠近該鏈質心的殘基」；含多條鏈的分子共用一個錨點。
 - 不自動產生 loop 斷鍵；交聯鍵仍依上述規則處理。
 
@@ -258,7 +258,7 @@
 - 金屬配位斷鍵（`auto-metal`）：配位角度變化大，**只約束距離**——金屬 M 與配位原子 L 的距離維持輸入值 `r₀`：`E = G·(|M−L| − r₀)²`。閉合失敗篩選以 `||M−L| − r₀| > maxBreakDist` 判斷。
 
 - 閉合失敗篩選：9a 最佳化後，任一約束原子對距離 > `maxBreakDist`（預設 0.5 Å）→ 捨棄該樣本。
-- 可達距離篩選（`csgmBuild = grow` 時）：每建一段，若目前末端到閉合目標的距離 > 剩餘殘基數 × `reachPerRes`（蛋白質預設 3.8 Å；核酸預設 7.0 Å），即依 7.8 的規則重抽或捨棄。
+- 可達距離篩選（`CsgmBuild = grow` 時）：每建一段，若目前末端到閉合目標的距離 > 剩餘殘基數 × `reachPerRes`（蛋白質預設 3.8 Å；核酸預設 7.0 Å），即依 7.8 的規則重抽或捨棄。
   - 只用於主鏈連接鍵（蛋白質 C–N、核酸 O3′–P）的斷鍵；交聯斷鍵與金屬配位不檢查。
   - 斷鍵 A–B 的兩端各檢查一次：往 A 建構時目標為 B，往 B 建構時目標為 A；目標原子尚未建構時不檢查。
   - 目前末端：扭轉樹中通往該端的路徑上、本段所含最深的兩面角的移動側鍵原子。
@@ -444,6 +444,10 @@ flowchart TD
 
 ## 7. 9a：構型樣本生成
 
+### 7.0 csgm 參數的分組
+
+7.3–7.8 的 csgm 參數與 7.2 相同分為兩組：StaM 群一組（前綴 `stam`），所有 MobM 共用一組（前綴 `mobm`）。本章中以大寫開頭、不帶前綴的名稱（如 `CsgmBuild`、`GrowMaxRetry`）指該分子所屬的一組，例如 `--stamCsgmBuild`、`--mobmCsgmBuild`。
+
 ### 7.1 樣本表示
 
 - 一個構型樣本 = `float[D]`，D = 該分子（StaM 群則為所有 StaM）可轉動兩面角數。
@@ -483,6 +487,7 @@ if |L2pool| < need:
 從 L2pool 取出 need 個樣本移入 dcss（取出順序：先進先出）
 ```
 
+- 「使用者指定」：StaM 群用 `--stamCsgmGA`，MobM 用 `--mobmCsgmGA`。
 - csgm1 的父代不依賴 dcss。
 - csgm2 的父代、csgm3 的端點 = 目前 dcss 中的樣本（必定 ≥ `eliteConfSampleNum` ≥ 2 個，且都已有 9b 能量）。
 
@@ -505,7 +510,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 ### 7.5 csgm1：憑空產生
 
 #### csgm1a（均勻分佈）
-- 每個可轉動兩面角：`θ = θ_input + Δ`，`Δ` 為 `csgm1AngleStep`（預設 1°，0 < 值 ≤ 180）的整數倍，均勻取自 (−180, 180] 內所有的倍數。
+- 每個可轉動兩面角：`θ = θ_input + Δ`，`Δ` 為 `Csgm1AngleStep`（預設 1°，0 < 值 ≤ 180）的整數倍，均勻取自 (−180, 180] 內所有的倍數。
 - ω 為 `cisTrans` 時：0° 或 180° 各 0.5。
 
 #### csgm1b（序列與結構關係）
@@ -519,7 +524,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 - 鏈端殘基（缺 φ 或 ψ）：不論 `ssType`，一律依 `R`。
 - 只有 φ、ψ 其中之一可轉動的殘基：不論 `ssType`，可轉動的角度依 `R`。
 - 側鏈兩面角與 ω 依 csgm1a。
-- 取值方式：`R` 與 csgm1a 為 `csgm1AngleStep` 的倍數；`O`、自訂 `point` 範圍內、自訂範圍外與 `RAMA_*` 格內為連續均勻分佈。
+- 取值方式：`R` 與 csgm1a 為 `Csgm1AngleStep` 的倍數；`O`、自訂 `point` 範圍內、自訂範圍外與 `RAMA_*` 格內為連續均勻分佈。
 - 自訂類型的範圍外：在 (φ, ψ) 平面均勻取值，落在任一 `point` 範圍內則重抽；若所有 `point` 範圍幾乎涵蓋全部角度（重抽 100000 次仍失敗），改依各 `point` 的相對機率選一個 `point`。
 - 產生順序：先取所有非 φ/ψ 配對的兩面角（含 `cisTrans` 的 ω），再取 φ/ψ 配對；因此 `RAMA_AUTO` 可依同一樣本中已取得的 ω 判斷 cis／trans-Pro。
 - Pro 的 φ 位於環內，預設不可轉動，因此 Pro 殘基依「只有 φ、ψ 其中之一可轉動」的規則取值；`RAMA_TRANSPRO`、`RAMA_CISPRO` 只在該 Pro 環有 `ringBreak` 且 φ 設為可轉動時才實際使用。
@@ -541,7 +546,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 
   - 格式：φ、ψ 各 180 格（2° 一格），週期邊界；檔案中未列出的格點值為 0。
   - 檔案數值是 MolProbity 用的**百分位等高值**，不是機率密度，但隨密度單調增加。本版以該值作為抽樣權重（正規化後），格內再均勻取角度。
-  - 權重下限 `ramaFloor`（預設 1×10⁻⁴，正規化前加上），使所有角度都有被抽到的機會。
+  - 權重下限 `RamaFloor`（預設 1×10⁻⁴，正規化前加上），使所有角度都有被抽到的機會。
 
 ### 7.6 csgm2：基因演算法
 
@@ -549,10 +554,10 @@ nextL1 = min(nextL1, maxL1BatchNum)
 
 | 參數 | 預設（AutoDock-GPU 1.6） |
 |---|---|
-| `tournamentRate` | 60% |
-| `crossoverRate` | 80%（兩點交配） |
-| `mutationRate` | 2% |
-| `absMaxDang` | ±90° |
+| `TournamentRate` | 60% |
+| `CrossoverRate` | 80%（兩點交配） |
+| `MutationRate` | 2% |
+| `AbsMaxDang` | ±90° |
 
 - 父代池：dcss，適應度 = 該樣本在 9b 的最低對接能量。
 - 產生數量：依 7.3、7.4 的 L1 數量。
@@ -565,17 +570,17 @@ nextL1 = min(nextL1, maxL1BatchNum)
 1. 取所有有序配對 (i, j)，i ≠ j，共 k(k−1) 條線。
 2. 對每條線：
    1. 方向 `u = wrap(P_j − P_i) / |…|`；`wrap` 取每一維繞週期後的最短差值。
-   2. 產生兩個垂直向量 v1、v2：隨機向量 r → `v = r − (r·u)u` → 正規化 → 乘上長度。長度為整數，均勻取自 [0°, `peMaxOffset`]（預設 30°）。
+   2. 產生兩個垂直向量 v1、v2：隨機向量 r → `v = r − (r·u)u` → 正規化 → 乘上長度。長度為整數，均勻取自 [0°, `PeMaxOffset`]（預設 30°）。
    3. `A = P_i + v1`、`B = P_j + v2`，直線 L 方向 `w = wrap(B − A)` 正規化。
    4. 隨機選 A 或 B 為基準點 S。
-   5. 延伸長度 `Ltot`：使 `|w|` 最大分量的維度涵蓋 `peCoverAngle`（預設 360°）。
+   5. 延伸長度 `Ltot`：使 `|w|` 最大分量的維度涵蓋 `PeCoverAngle`（預設 360°）。
    6. 新樣本：`S + m·(Ltot/n)·w`，m = 0 … n−1，每一維 wrap 到 (−180°, 180°]。
-3. 新樣本數 = `k(k−1)·n`；n = `peSampleNumPerLine`（預設 4）。
+3. 新樣本數 = `k(k−1)·n`；n = `PeSampleNumPerLine`（預設 4）。
 
 - **每次產生全部 k(k−1) 條線**，依 `--gpuMemLimit` 分批在 GPU 上即時產生、篩選，只有通過的樣本寫入 L2 pool。
 - 規模參考（k = 2000、n = 4）：約 1,600 萬個 L1 樣本；記憶體由分批控制，計算時間隨樣本數線性增加。
 
-### 7.8 建構方式 `csgmBuild`
+### 7.8 建構方式 `CsgmBuild`
 
 適用所有 csgm。
 
@@ -590,7 +595,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 - 每建一段，檢查「兩原子都已建構、且其中一個由本段建構」的重原子對；先檢查碰撞，再檢查可達距離（4.8）。
 - 兩面角移動側的鍵原子（如 χ1 的 CB、φ 的 CA）位於旋轉軸上，位置由父兩面角決定，因此歸屬父兩面角所在的段建構與檢查（否則碰撞會晚一段才發現，重抽本段無法排除）。
 - 碰撞判定同 7.9（重原子、排除 1-2/1-3/1-4、距離 < `clashDistance`）。
-- csgm1：碰撞時重新抽該段的兩面角，最多 `growMaxRetry` 次（預設 16），仍失敗則捨棄該樣本。
+- csgm1：碰撞時重新抽該段的兩面角，最多 `GrowMaxRetry` 次（預設 16），仍失敗則捨棄該樣本。
 - csgm2、csgm3：兩面角已決定，碰撞即捨棄（不重抽）。
 - 搭配 `confMinMaxStep = 0` 時，9a 最佳化只計算能量。
 - 第一次嘗試的取值與 `whole` 相同（先產生完整樣本）；重抽只改變該段的兩面角，已建構的段不變。
@@ -894,11 +899,11 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--resume <dir>` | 無 | 16 |
 | `--gpuMemLimit` | 可用量 90% | 13 |
 | `--omegaTolerance` | 30° | 4.3 |
-| `--staFixedResMovable` | false | 4.7 |
+| `--stamFixedResMovable` | false | 4.7 |
 | `--maxBreakDist` | 0.5 Å | 4.8 |
 | `--closureG` | 200 | 4.5 |
 | `--reachPerRes` | `3.8,7.0`（蛋白質,核酸；Å） | 4.8 |
-| `--staFlexMargin` | 4 Å | 4.4 |
+| `--stamFlexMargin` | 4 Å | 4.4 |
 | `--acceptNonPlanarOmega` | 關閉 | 4.3 |
 | `--stamDockingConfSampleNum`、`--mobmDockingConfSampleNum` | 有可動兩面角時必填 | 7.2 |
 | `--stamMinL2confSampleNum`、`--mobmMinL2confSampleNum` | 2 × docking | 7.2 |
@@ -907,15 +912,15 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--maxL1TotalNum` | 10⁹ | 7.4 |
 | `--maxL1BatchNum` | 65536（CPU 版；GPU 版由 `--gpuMemLimit` 推算） | 7.4 |
 | `--seed` | 隨機（寫入執行紀錄） | 7.9 |
-| `--csgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
-| `--csgmBuild` | `whole` | 7.8 |
-| `--growMaxRetry` | 16 | 7.8 |
-| `--csgm1AngleStep` | 1° | 7.5 |
-| `--ramaFloor` | 1×10⁻⁴ | 7.5 |
-| `--tournamentRate`、`--crossoverRate`、`--mutationRate`、`--absMaxDang` | 60%、80%、2%、90° | 7.6 |
-| `--peMaxOffset` | 30° | 7.7 |
-| `--peCoverAngle` | 360° | 7.7 |
-| `--peSampleNumPerLine` | 4 | 7.7 |
+| `--stamCsgmGA`、`--mobmCsgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
+| `--stamCsgmBuild`、`--mobmCsgmBuild` | `whole` | 7.8 |
+| `--stamGrowMaxRetry`、`--mobmGrowMaxRetry` | 16 | 7.8 |
+| `--stamCsgm1AngleStep`、`--mobmCsgm1AngleStep` | 1° | 7.5 |
+| `--stamRamaFloor`、`--mobmRamaFloor` | 1×10⁻⁴ | 7.5 |
+| `--{stam,mobm}TournamentRate`、`--{stam,mobm}CrossoverRate`、`--{stam,mobm}MutationRate`、`--{stam,mobm}AbsMaxDang` | 60%、80%、2%、90° | 7.6 |
+| `--stamPeMaxOffset`、`--mobmPeMaxOffset` | 30° | 7.7 |
+| `--stamPeCoverAngle`、`--mobmPeCoverAngle` | 360° | 7.7 |
+| `--stamPeSampleNumPerLine`、`--mobmPeSampleNumPerLine` | 4 | 7.7 |
 | `--clashDistance` | 1.8 Å | 7.9 |
 | `--Emax` | 1000 kcal/mol | 7.9 |
 | `--EclashBase` | 10000 kcal/mol | 7.9 |
@@ -949,7 +954,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--diversityRmsd` | 2.0 Å | 9 |
 | `--lbfgsMemory` | 7 | 12 |
 
-樣本數參數（7.2）：StaM 群用 `--stam*`，所有 MobM 共用 `--mobm*`，不提供個別 MobM 的覆寫。
+樣本數參數（7.2）與 csgm 參數（7.0）：StaM 群用 `--stam*`，所有 MobM 共用 `--mobm*`，不提供個別 MobM 的覆寫。StaM 專用的參數也使用 `stam` 前綴（`--stamFlexMargin`、`--stamFixedResMovable`）。
 
 ---
 
@@ -1090,7 +1095,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | Q2 | 版本號 0.40.0 |
 | Q3 | `--sta` 檔案內全部為 StaM；`--mob` 每個檔案只有一個分子，可多次指定 |
 | Q4 | 樣本數參數：命令列共同值 + 分子設定檔覆寫 |
-| Q5 | StaM 依 `staFixedResMovable`（預設 false）：固定殘基主鏈不動、loop 由固定端建構並在另一端斷鍵；true 時錨點為最靠近質心的殘基（4.7） |
+| Q5 | StaM 依 `stamFixedResMovable`（預設 false）：固定殘基主鏈不動、loop 由固定端建構並在另一端斷鍵；true 時錨點為最靠近質心的殘基（4.7） |
 | Q6 | 9b 不調整 StaM 兩面角 |
 | Q7 | 決定性 posm 不重做 |
 | Q8 | L2 pool 先進先出、不設上限、整批處理完 |
@@ -1142,9 +1147,11 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | csgm1 取值方式、FIRE 細節（dt₀ 0.1、dt_max 1.0、整步等比例縮小、回傳最低能量點）、計數式亂數（7.5、7.9） |
 | — | 樣本數參數分為 StaM 群（`--stam*`）與所有 MobM 共用（`--mobm*`），不提供個別 MobM 覆寫（7.2） |
 | — | `grow` 的段、建構順序與可達距離檢查的細節；可達距離只用於主鏈連接鍵的斷鍵（4.8、7.8） |
+| — | 參數前綴統一為 `stam`／`mobm`；csgm 參數分為 StaM 群與 MobM 兩組（7.0） |
+| — | 加入 loop 閉合演算法（演算法待定，見 17.2） |
 
 ### 17.2 待確認
-（目前無）
+- loop 閉合演算法的選擇（CCD 或 KIC）、在 9a 中的位置（csgm 產生後、9a 最佳化前）與對應參數。
 
 ---
 
@@ -1176,3 +1183,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.10 | 2026-10-15 | 輸入結構中距離固定的重原子對碰撞時報錯結束；記錄 AD4 類型與 Meeko 0.8.0 的比對（7.9） |
 | 1.11 | 2026-10-15 | 實作 csgm1a、csgm1b、FIRE 與 9a 的 L2 pool 補充（7.3–7.5、7.9）；新增 `--dockingConfSampleNum` 等樣本數參數、`--maxL1BatchNum`、`--csgm1AngleStep`、`--ramaFloor`、`--confMinMaxStep`、`--confMinDeltaE`、`--confMaxDihedralStep`、`--seed` |
 | 1.12 | 2026-10-15 | 樣本數參數分為 `--stam*` 與 `--mobm*` 兩組（7.2）；實作 `csgmBuild = grow`（7.8）與可達距離檢查（4.8）；新增 `--csgmBuild`、`--growMaxRetry`、`--reachPerRes` |
+| 1.13 | 2026-10-15 | `--staFlexMargin`、`--staFixedResMovable` 改名為 `--stamFlexMargin`、`--stamFixedResMovable`；csgm 參數分為 `--stam*`／`--mobm*` 兩組（7.0、14）；決定加入 loop 閉合演算法（17） |

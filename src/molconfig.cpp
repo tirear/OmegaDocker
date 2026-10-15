@@ -570,7 +570,7 @@ void checkRamaTypes(const Molecule& m, const Layout& l, const std::vector<std::s
 }
 
 // Loop breaks, then the torsion tree (spec 4.7, 4.8).
-void planTree(const Molecule& m, const AtomRefs& refs, const std::string& where, int molLine, bool staFixedResMovable,
+void planTree(const Molecule& m, const AtomRefs& refs, const std::string& where, int molLine, bool stamFixedResMovable,
               MolSettings& s, Errors& e) {
   const std::size_t errorsBefore = e.count();
   Topology& t = s.topology;
@@ -584,7 +584,7 @@ void planTree(const Molecule& m, const AtomRefs& refs, const std::string& where,
   std::vector<int> torsionOfBond(m.bonds.size(), -1);
   for (std::size_t i = 0; i < t.torsions.size(); ++i) torsionOfBond[t.torsions[i].bond] = static_cast<int>(i);
 
-  const auto loops = findLoops(m, t, s.mode, staFixedResMovable);
+  const auto loops = findLoops(m, t, s.mode, stamFixedResMovable);
   std::set<int> links;  // backbone links of loops between fixed residues
   for (const Loop& l : loops) {
     if (l.before < 0 || l.after < 0) continue;
@@ -618,7 +618,7 @@ void planTree(const Molecule& m, const AtomRefs& refs, const std::string& where,
   if (e.count() > errorsBefore) return;
 
   std::vector<TreeProblem> problems;
-  s.tree = buildTorsionTree(m, t, s.mode, staFixedResMovable, problems);
+  s.tree = buildTorsionTree(m, t, s.mode, stamFixedResMovable, problems);
   for (const TreeProblem& p : problems) {
     if (p.kind == TreeProblem::Kind::BothSidesFixed) {
       const auto& a = t.torsions[p.torsion].atoms;
@@ -677,7 +677,7 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
   TopologyParams p = base;
   p.brokenBonds = readBreaks(mt, m, refs, where, s.metalBond, s, e);
   // StaM with fixed residues may be split at loop breaks; checked with the tree.
-  const bool singleAnchor = m.role == Role::MobM || base.staFixedResMovable || bt == BackboneType::None;
+  const bool singleAnchor = m.role == Role::MobM || base.stamFixedResMovable || bt == BackboneType::None;
   if (const int parts = componentCount(m, *p.brokenBonds) - componentCount(m, {}); singleAnchor && parts > 0)
     e.add(lineOf(mt), where, std::format("the broken bonds (ringBreak / chainBreak) split the molecule into {} parts; "
                                          "only bonds in rings can be broken",
@@ -802,7 +802,7 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
       if (!seen.contains(static_cast<int>(k))) e.add(lineOf(mt), where + ".residue", std::format("residue {} is missing", keyOf[k]));
   if (protein) checkRamaTypes(m, l, keyOf, ssLine, where, s, e);
   readTorsions(mt, "torsion", l.molTorsions, refs, -1, where, s, e);
-  if (e.count() == errorsBefore) planTree(m, refs, where, lineOf(mt), base.staFixedResMovable, s, e);
+  if (e.count() == errorsBefore) planTree(m, refs, where, lineOf(mt), base.stamFixedResMovable, s, e);
   return s;
 }
 
