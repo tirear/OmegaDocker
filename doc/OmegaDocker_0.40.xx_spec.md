@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.10 |
+| 文件版本 | 1.11 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -487,13 +487,15 @@ nextL1 = min(nextL1, maxL1BatchNum)
 ```
 
 - `nowL2`：加入後 L2 pool 的樣本數；`addedL2`：本批新增數；`L1`：本批產生數。
-- `maxL1BatchNum`：由 `--gpuMemLimit` 推算的單批上限；超過時分批處理。
+- `maxL1BatchNum`：由 `--gpuMemLimit` 推算的單批上限；超過時分批處理。CPU 版以 `--maxL1BatchNum`（預設 65536）指定。
+- 一批（L1 個）全部處理完才檢查是否達到 `minL2confSampleNum`，因此 L2 pool 可能超過該數。
+- 單次補充的累計 L1 達 `maxL1TotalNum` 仍未達到 `minL2confSampleNum` → 報錯並結束；最後一批的數量不超過剩餘額度。
 - `maxL1TotalNum`（預設 10⁹）：單次補充的累計 L1 上限；達到時報錯並結束（避免產率為 0 時無限迴圈）。
 
 ### 7.5 csgm1：憑空產生
 
 #### csgm1a（均勻分佈）
-- 每個可轉動兩面角：`θ = θ_input + Δ`，`Δ` 為整數，均勻取自 (−180, 180]，以 `csgm1AngleStep`（預設 1°）為單位。
+- 每個可轉動兩面角：`θ = θ_input + Δ`，`Δ` 為 `csgm1AngleStep`（預設 1°，0 < 值 ≤ 180）的整數倍，均勻取自 (−180, 180] 內所有的倍數。
 - ω 為 `cisTrans` 時：0° 或 180° 各 0.5。
 
 #### csgm1b（序列與結構關係）
@@ -507,6 +509,10 @@ nextL1 = min(nextL1, maxL1BatchNum)
 - 鏈端殘基（缺 φ 或 ψ）：不論 `ssType`，一律依 `R`。
 - 只有 φ、ψ 其中之一可轉動的殘基：不論 `ssType`，可轉動的角度依 `R`。
 - 側鏈兩面角與 ω 依 csgm1a。
+- 取值方式：`R` 與 csgm1a 為 `csgm1AngleStep` 的倍數；`O`、自訂 `point` 範圍內、自訂範圍外與 `RAMA_*` 格內為連續均勻分佈。
+- 自訂類型的範圍外：在 (φ, ψ) 平面均勻取值，落在任一 `point` 範圍內則重抽；若所有 `point` 範圍幾乎涵蓋全部角度（重抽 100000 次仍失敗），改依各 `point` 的相對機率選一個 `point`。
+- 產生順序：先取所有非 φ/ψ 配對的兩面角（含 `cisTrans` 的 ω），再取 φ/ψ 配對；因此 `RAMA_AUTO` 可依同一樣本中已取得的 ω 判斷 cis／trans-Pro。
+- Pro 的 φ 位於環內，預設不可轉動，因此 Pro 殘基依「只有 φ、ψ 其中之一可轉動」的規則取值；`RAMA_TRANSPRO`、`RAMA_CISPRO` 只在該 Pro 環有 `ringBreak` 且 φ 設為可轉動時才實際使用。
 - 內建 Ramachandran 類型，資料取自 Richardson Lab 的 Top8000 `rama8000-*.data`（CC BY 4.0，見第 15 節）：
 
 | 類型名稱 | 資料檔 | 適用殘基 |
@@ -629,6 +635,12 @@ nextL1 = min(nextL1, maxL1BatchNum)
 `E_max` 不再作為停止條件，但仍是 L1 → L2 的篩選條件。
 
 **最佳化方法**：預設 FIRE（第 12 節）；每步每個兩面角變化上限 `confMaxDihedralStep`（預設 10°）。
+- 最佳化的目標函數為含閉合約束的總能量；篩選用的能量（比較 `E_max`）不含閉合約束（4.5）。
+- FIRE 細節：變數為兩面角（rad），質量 1；`dt₀ = 0.1`、`dt_max = 1.0`；每步先依 FIRE 規則調整速度，再 `v += dt·F`、`Δx = dt·v`；任一兩面角的變化超過 `confMaxDihedralStep` 時，整個 `Δx` 等比例縮小（保持方向）。
+- 每步計算一次能量與梯度；`confMinMaxStep = 0` 時只計算能量。
+- 回傳最佳化過程中能量最低的構型（不一定是最後一步）。
+
+**亂數**：每個樣本的亂數由 (`--seed`, 分子串流, 樣本序號) 決定，與執行緒數及分批方式無關；StaM 群為串流 0，第 i 個 MobM 為串流 i。未指定 `--seed` 時隨機產生，並寫入執行紀錄。
 
 ### 7.10 StaM 的特殊情況
 
@@ -877,6 +889,8 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `initL1confSampleNum` | minL2 | 7.2 |
 | `eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
 | `--maxL1TotalNum` | 10⁹ | 7.4 |
+| `--maxL1BatchNum` | 65536（CPU 版；GPU 版由 `--gpuMemLimit` 推算） | 7.4 |
+| `--seed` | 隨機（寫入執行紀錄） | 7.9 |
 | `--csgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
 | `--csgmBuild` | `whole` | 7.8 |
 | `--growMaxRetry` | 16 | 7.8 |
@@ -893,6 +907,7 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | `--confMinMethod` | `fire` | 7.9 |
 | `--confMinMaxStep` | 100 | 7.9 |
 | `--confMinDeltaE` | 10 kcal/mol | 7.9 |
+| `--confMaxDihedralStep` | 10° | 7.9 |
 | `--gridMode` | 依主鏈可動與否 | 8.1 |
 | `--gridSpacing` | 0.375 Å | 8.1 |
 | `--deltaThreshold` | 1×10⁻⁴ kcal/mol | 8.1 |
@@ -1108,9 +1123,10 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | — | 9a 能量：AD4 原子類型（非極性氫併入重原子）、參數取自 AutoDock-GPU 1.6；函式形式同其 GPU kernel；梯度為精確導數（7.9） |
 | — | 原子對排除 1-2/1-3/1-4 與距離固定的原子對；碰撞懲罰只用於參與計算的重原子對（7.9） |
 | — | 距離固定的重原子對在輸入結構中若碰撞，報錯結束（7.9） |
+| — | csgm1 取值方式、FIRE 細節（dt₀ 0.1、dt_max 1.0、整步等比例縮小、回傳最低能量點）、計數式亂數（7.5、7.9） |
 
 ### 17.2 待確認
-（目前無）
+- StaM 群的樣本數參數（7.2）的指定方式：目前命令列的 `--dockingConfSampleNum` 等同時套用到 StaM 群與所有 MobM；分子設定檔的個別覆寫尚未實作。
 
 ---
 
@@ -1140,3 +1156,4 @@ nextL1 = min(nextL1, maxL1BatchNum)
 | 1.8 | 2026-10-14 | 實作扭轉樹與閉合約束：錨點與移動側通則、錨點原子、loop 斷鍵在讀取設定檔時決定、預設可轉動限制（4.7）；複製原子取法（4.8）；驗證規則（5.3） |
 | 1.9 | 2026-10-14 | 實作 9a 能量：AD4 原子類型、參數、原子對能量與梯度、參與計算的原子對、碰撞懲罰（7.9）；新增 `--clashDistance`、`--Emax`、`--EclashBase`、`--Kclash` |
 | 1.10 | 2026-10-15 | 輸入結構中距離固定的重原子對碰撞時報錯結束；記錄 AD4 類型與 Meeko 0.8.0 的比對（7.9） |
+| 1.11 | 2026-10-15 | 實作 csgm1a、csgm1b、FIRE 與 9a 的 L2 pool 補充（7.3–7.5、7.9）；新增 `--dockingConfSampleNum` 等樣本數參數、`--maxL1BatchNum`、`--csgm1AngleStep`、`--ramaFloor`、`--confMinMaxStep`、`--confMinDeltaE`、`--confMaxDihedralStep`、`--seed` |

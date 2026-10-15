@@ -2,15 +2,20 @@
 // Copyright (C) 2026 Gao Quan-Ze.
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-#include <cstdio>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <format>
 #include <numeric>
+#include <random>
+#include <span>
 
 #include "ccd.hpp"
 #include "cli.hpp"
 #include "log.hpp"
 #include "read_input.hpp"
+#include "conf9a.hpp"
+#include "csgm1.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
 #include "molconfig.hpp"
@@ -142,6 +147,46 @@ void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>
                           e.filterEnergy(), e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.clashPairs, e.closure));
 }
 
+// First 9a refill of the L2 pool with csgm1 (spec 7.3).
+void runFirst9a(const std::string& name, const std::vector<od::EnergyPart>& parts,
+                const std::vector<const od::MolSettings*>& settings, const od::MolConfig& cfg, const od::Options& opt,
+                std::uint64_t seed, std::uint64_t stream) {
+  const od::EnergySystem sys(parts, energyParams(opt));
+  if (sys.torsionCount() == 0) {
+    od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", name));
+    return;
+  }
+  od::Csgm1Params cp;
+  cp.angleStep = opt.csgm1AngleStep;
+  cp.ramaFloor = opt.ramaFloor;
+  od::Csgm1GroupSampler sampler;
+  for (std::size_t k = 0; k < parts.size(); ++k) sampler.add(od::Csgm1Sampler(*parts[k].mol, *settings[k], cfg, cp));
+  const od::ConfSampleNums n = od::confSampleNums(opt);
+  od::Fill9aParams p;
+  p.minL2 = n.minL2;
+  p.maxL1Batch = opt.maxL1BatchNum;
+  p.maxL1Total = opt.maxL1TotalNum;
+  p.Emax = opt.Emax;
+  p.maxBreakDist = opt.maxBreakDist;
+  p.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep};
+  p.seed = seed;
+  p.stream = stream;
+  std::uint64_t counter = 0;
+  std::vector<od::ConfSample> pool;
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto st = od::fillL2Pool(sys, [&](od::Rng& r, std::span<double> a) { sampler.sample(r, a); }, n.initL1, p,
+                                 counter, pool);
+  const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::vector<float> e;
+  for (const auto& s : pool) e.push_back(s.energy);
+  std::sort(e.begin(), e.end());
+  od::logInfo(std::format("  {:<40} L1 {:>9} in {} batch(es)  -> L2 {:>7}  (rejected: E >= Emax {}, not closed {})  "
+                          "steps/sample {:.1f}  {:.2f} s",
+                          name, st.l1, st.batches, st.added, st.overEmax, st.notClosed,
+                          static_cast<double>(st.minSteps) / static_cast<double>(st.l1), sec));
+  od::logInfo(std::format("    L2 energies: min {:.3f}  median {:.3f}  max {:.3f}", e.front(), e[e.size() / 2], e.back()));
+}
+
 // DSSP residue counts, e.g. "H 12  E 10  . 5".
 void printDssp(const od::Topology& t) {
   if (t.dsspSS.empty()) return;
@@ -238,6 +283,22 @@ int run(int argc, char** argv) {
   }
   for (std::size_t i = 0; i < mobs.size(); ++i)
     printInputEnergy(mobs[i].id, {{&mobs[i], &cfg->molecules[sta.size() + i].tree}}, opt);
+
+  const std::uint64_t seed = opt.seed ? *opt.seed : (static_cast<std::uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}();
+  od::logInfo(std::format("9a first refill (csgm1), seed {}:", seed));
+  {
+    std::vector<od::EnergyPart> parts;
+    std::vector<const od::MolSettings*> settings;
+    for (std::size_t i = 0; i < sta.size(); ++i) {
+      parts.push_back({&sta[i], &cfg->molecules[i].tree});
+      settings.push_back(&cfg->molecules[i]);
+    }
+    runFirst9a("StaM group", parts, settings, *cfg, opt, seed, 0);
+  }
+  for (std::size_t i = 0; i < mobs.size(); ++i) {
+    const auto& s = cfg->molecules[sta.size() + i];
+    runFirst9a(mobs[i].id, {{&mobs[i], &s.tree}}, {&s}, *cfg, opt, seed, 1 + i);
+  }
   return 0;
 }
 

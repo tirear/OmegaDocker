@@ -8,18 +8,25 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
-#include <numbers>
-#include <random>
 #include <fstream>
+#include <numbers>
+#include <optional>
+#include <random>
+#include <set>
+#include <span>
 #include <sstream>
 #include <string>
 
+#include <omp.h>
 #include <unistd.h>
 
 #include "ad4.hpp"
 #include "ad4_pair.hpp"
 #include "ccd.hpp"
+#include "conf9a.hpp"
+#include "csgm1.hpp"
 #include "log.hpp"
+#include "minimize.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
 #include "molconfig.hpp"
@@ -1245,4 +1252,261 @@ TEST_CASE("energy: clash between fixed atoms in the input (2KJJ)") {
     CHECK(std::string(e.what()).find("distance cannot change") != std::string::npos);
     CHECK(std::string(e.what()).find("1.000 Å") != std::string::npos);
   }
+}
+
+namespace {
+
+// 1L2Y as MobM with the omega of Gly 11 (before Pro 12) set to cisTrans, and
+// the Pro 12 ring broken at CD-N so that its phi is rotatable.
+struct Csgm1Fixture {
+  ConfigFixture f;
+  std::optional<od::MolConfig> cfg;
+  Csgm1Fixture() {
+    std::string text = od::defaultMolConfigText(f.inputs);
+    const auto mol = text.find("id           = \"mob:1L2Y.cif:A\"");
+    auto i = text.find("resSeq  = 11\n", mol);
+    REQUIRE(i != std::string::npos);
+    i = text.find("omega   = \"fixed\"", i);
+    REQUIRE(i != std::string::npos);
+    text.replace(i, 17, "omega   = \"cisTrans\"");
+    i = text.find("resSeq  = 12\n", mol);
+    REQUIRE(i != std::string::npos);
+    i = text.find("phi     = false", i);
+    REQUIRE(i != std::string::npos);
+    text.replace(i, 15, "phi     = true");
+    i = text.find("csgm1        = \"1a\"\n", mol);
+    REQUIRE(i != std::string::npos);
+    text.insert(i + 20, "\n  [[molecule.ringBreak]]\n  bond = [\"A:12:CD\", \"A:12:N\"]\n");
+    std::ofstream(f.path) << text;
+    std::vector<std::string> errors;
+    cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+    for (const auto& e : errors) MESSAGE(e);
+    REQUIRE(cfg);
+  }
+  od::MolSettings& s() { return cfg->molecules[0]; }
+  const od::Molecule& m() { return f.mols[0]; }
+  int unitOf(int seq) {
+    const auto& t = s().topology;
+    for (std::size_t u = 0; u < t.units.size(); ++u)
+      if (m().residues[t.units[u].residue].info.seq == seq) return static_cast<int>(u);
+    return -1;
+  }
+  int treeIndex(int seq, od::BackboneAngle a) {
+    const auto& t = s().topology;
+    for (std::size_t k = 0; k < s().tree.torsions.size(); ++k) {
+      const auto& tor = t.torsions[s().tree.torsions[k].torsion];
+      if (tor.backbone == a && m().residues[t.units[tor.unit].residue].info.seq == seq) return static_cast<int>(k);
+    }
+    return -1;
+  }
+};
+
+}  // namespace
+
+TEST_CASE("csgm1: csgm1a angles and cisTrans omega") {
+  Csgm1Fixture x;
+  const int omega = x.treeIndex(11, od::BackboneAngle::Omega);
+  REQUIRE(omega >= 0);
+  for (double step : {1.0, 7.5, 100.0}) {
+    const od::Csgm1Sampler smp(x.m(), x.s(), *x.cfg, {step, 1e-4});
+    REQUIRE(smp.size() == static_cast<int>(x.s().tree.torsions.size()));
+    std::vector<double> a(smp.size());
+    int cis = 0, offGrid = 0;
+    double sumCos = 0;
+    const int n = 4000;
+    std::set<long> deltas;
+    for (int k = 0; k < n; ++k) {
+      od::Rng rng(7, 1, k);
+      smp.sample(rng, a);
+      for (int i = 0; i < smp.size(); ++i) {
+        CHECK((a[i] > -180.0 && a[i] <= 180.0));
+        if (i == omega) continue;
+        const double d = od::wrapDeg(a[i] - x.s().tree.torsions[i].inputAngle);
+        const double q = d / step;
+        if (std::abs(q - std::round(q)) > 1e-9 && std::abs(std::abs(d) - 180.0) > 1e-9) ++offGrid;
+        if (i == 0) {
+          deltas.insert(std::lround(q));
+          sumCos += std::cos(d * std::numbers::pi / 180.0);
+        }
+      }
+      CHECK((a[omega] == 0.0 || a[omega] == 180.0));
+      cis += a[omega] == 0.0;
+    }
+    CHECK(offGrid == 0);
+    CHECK(cis == doctest::Approx(n / 2).epsilon(0.08));
+    if (step == 100.0) CHECK(deltas.size() == 3);  // -100, 0, 100
+    else CHECK(std::abs(sumCos / n) < 0.05);
+  }
+}
+
+TEST_CASE("csgm1: csgm1b types") {
+  Csgm1Fixture x;
+  auto& s = x.s();
+  s.csgm1 = od::Csgm1::B;
+  od::SsType custom{"A", false, {{-58, -48, 0.6}, {-120, 130, 0.3}}};
+  x.cfg->ssTypes.push_back(custom);
+  x.cfg->ssHalfWidth = 10;
+  x.cfg->ssOriginalProb = 0.8;
+  s.ssType[x.unitOf(3)] = "O";
+  s.ssType[x.unitOf(4)] = "A";
+  s.ssType[x.unitOf(5)] = "RAMA_GENERAL";
+  s.ssType[x.unitOf(10)] = "RAMA_GLY";
+  s.ssType[x.unitOf(12)] = "RAMA_AUTO";  // Pro after the cisTrans omega
+  s.ssType[x.unitOf(16)] = "RAMA_AUTO";  // Arg before Pro 17: pre-Pro
+  s.ssType[x.unitOf(6)] = "R";
+  const od::Csgm1Sampler smp(x.m(), s, *x.cfg, {});
+  auto idx = [&](int seq, od::BackboneAngle a) {
+    const int i = x.treeIndex(seq, a);
+    REQUIRE(i >= 0);
+    return i;
+  };
+  const int phi3 = idx(3, od::BackboneAngle::Phi), psi3 = idx(3, od::BackboneAngle::Psi);
+  const int phi4 = idx(4, od::BackboneAngle::Phi), psi4 = idx(4, od::BackboneAngle::Psi);
+  const int phi5 = idx(5, od::BackboneAngle::Phi), psi5 = idx(5, od::BackboneAngle::Psi);
+  const int phi10 = idx(10, od::BackboneAngle::Phi), psi10 = idx(10, od::BackboneAngle::Psi);
+  const int phi12 = idx(12, od::BackboneAngle::Phi), psi12 = idx(12, od::BackboneAngle::Psi);
+  const int phi16 = idx(16, od::BackboneAngle::Phi), psi16 = idx(16, od::BackboneAngle::Psi);
+  const int omega = idx(11, od::BackboneAngle::Omega), phi6 = idx(6, od::BackboneAngle::Phi);
+  const auto& tt = s.tree.torsions;
+  auto in = [](double a, double c, double hw) { return std::abs(od::wrapDeg(a - c)) <= hw + 1e-9; };
+  auto rs = [](od::RamaClass c) { return od::RamaSampler(od::ramaGrid(c), 1e-4); };
+  const auto general = rs(od::RamaClass::General), gly = rs(od::RamaClass::Gly), prePro = rs(od::RamaClass::PrePro);
+  const auto transPro = rs(od::RamaClass::TransPro), cisPro = rs(od::RamaClass::CisPro);
+
+  const int n = 20000;
+  int oIn = 0, p1 = 0, p2 = 0, outside = 0, phi6Grid = 0;
+  double ll[6] = {};  // general/Gly at 5, general/Gly at 10, general/pre-Pro at 16
+  double llPro[2][2] = {};  // [cis][trans-Pro, cis-Pro]
+  int count[2] = {0, 0};
+  std::vector<double> a(smp.size());
+  for (int k = 0; k < n; ++k) {
+    od::Rng rng(11, 2, k);
+    smp.sample(rng, a);
+    oIn += in(a[phi3], tt[phi3].inputAngle, 10) && in(a[psi3], tt[psi3].inputAngle, 10);
+    const bool i1 = in(a[phi4], -58, 10) && in(a[psi4], -48, 10);
+    const bool i2 = in(a[phi4], -120, 10) && in(a[psi4], 130, 10);
+    p1 += i1;
+    p2 += i2;
+    outside += !i1 && !i2;
+    ll[0] += std::log(general.probability(a[phi5], a[psi5]));
+    ll[1] += std::log(gly.probability(a[phi5], a[psi5]));
+    ll[2] += std::log(general.probability(a[phi10], a[psi10]));
+    ll[3] += std::log(gly.probability(a[phi10], a[psi10]));
+    ll[4] += std::log(general.probability(a[phi16], a[psi16]));
+    ll[5] += std::log(prePro.probability(a[phi16], a[psi16]));
+    const int c = a[omega] == 0.0;
+    ++count[c];
+    llPro[c][0] += std::log(transPro.probability(a[phi12], a[psi12]));
+    llPro[c][1] += std::log(cisPro.probability(a[phi12], a[psi12]));
+    const double d6 = od::wrapDeg(a[phi6] - tt[phi6].inputAngle);
+    phi6Grid += std::abs(d6 - std::round(d6)) < 1e-9;
+  }
+  // O: 0.8 within the box, plus the uniform part falling into it.
+  CHECK(oIn / double(n) == doctest::Approx(0.8 + 0.2 * (21.0 / 360) * (21.0 / 360)).epsilon(0.03));
+  CHECK(p1 / double(n) == doctest::Approx(0.6).epsilon(0.03));
+  CHECK(p2 / double(n) == doctest::Approx(0.3).epsilon(0.05));
+  CHECK(outside / double(n) == doctest::Approx(0.1).epsilon(0.1));
+  CHECK(ll[0] > ll[1]);
+  CHECK(ll[3] > ll[2]);
+  CHECK(ll[5] > ll[4]);
+  CHECK(count[0] > n / 3);
+  CHECK(count[1] > n / 3);
+  CHECK(llPro[0][0] > llPro[0][1]);  // trans omega: trans-Pro
+  CHECK(llPro[1][1] > llPro[1][0]);  // cis omega: cis-Pro
+  CHECK(phi6Grid == n);              // R: csgm1a
+}
+
+TEST_CASE("minimize: FIRE") {
+  // E = sum k_i (x_i - c_i)^2 with x in radians.
+  const std::vector<double> c{30, -150, 170}, k{1, 10, 100};
+  constexpr double rad = std::numbers::pi / 180.0;
+  std::vector<std::vector<double>> visited;
+  const od::TorsionObjective f = [&](std::span<const double> x, std::vector<double>& g) {
+    visited.emplace_back(x.begin(), x.end());
+    g.assign(x.size(), 0.0);
+    double e = 0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+      const double d = od::wrapDeg(x[i] - c[i]) * rad;
+      e += k[i] * d * d;
+      g[i] = 2 * k[i] * d;
+    }
+    return e;
+  };
+  std::vector<double> x{-100, 100, -170};
+  od::MinParams p{1000, 1e-12, 10.0};
+  const auto r = od::minimizeFire(f, x, p);
+  for (std::size_t i = 0; i < x.size(); ++i) CHECK(std::abs(od::wrapDeg(x[i] - c[i])) < 0.01);
+  CHECK(r.energy < 1e-6);
+  CHECK(r.evaluations == r.steps + 1);
+  double big = 0;
+  for (std::size_t s = 1; s < visited.size(); ++s)
+    for (std::size_t i = 0; i < x.size(); ++i) big = std::max(big, std::abs(visited[s][i] - visited[s - 1][i]));
+  CHECK(big <= 10.0 + 1e-9);
+  CHECK(big > 9.0);
+
+  // Step limit and energy-change stop.
+  x = {-100, 100, -170};
+  CHECK(od::minimizeFire(f, x, {7, 0.0, 10.0}).steps == 7);
+  x = {-100, 100, -170};
+  const auto r2 = od::minimizeFire(f, x, {1000, 1.0, 10.0});
+  CHECK(r2.steps < 1000);
+  x = {-100, 100, -170};
+  const auto r0 = od::minimizeFire(f, x, {0, 1.0, 10.0});
+  CHECK(r0.steps == 0);
+  CHECK(x[0] == -100);
+}
+
+TEST_CASE("9a: L2 pool refill (1L2Y)") {
+  Csgm1Fixture x;
+  const od::Molecule& m = x.m();
+  const od::EnergySystem sys({{&m, &x.s().tree}}, {});
+  const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
+  const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) { smp.sample(r, a); };
+  od::Fill9aParams p;
+  p.minL2 = 24;
+  p.maxL1Batch = 10;
+  p.seed = 5;
+  p.stream = 1;
+  auto run = [&](int threads, std::vector<od::ConfSample>& pool) {
+    const int before = omp_get_max_threads();
+    omp_set_num_threads(threads);
+    std::uint64_t counter = 0;
+    const auto st = od::fillL2Pool(sys, gen, 6, p, counter, pool);
+    omp_set_num_threads(before);
+    CHECK(counter == static_cast<std::uint64_t>(st.l1));
+    return st;
+  };
+  std::vector<od::ConfSample> a, b;
+  const auto st = run(1, a);
+  run(4, b);
+  CHECK(static_cast<int>(a.size()) >= p.minL2);
+  CHECK(st.added == static_cast<long long>(a.size()));
+  CHECK(st.l1 == st.added + st.overEmax + st.notClosed);
+  REQUIRE(a.size() == b.size());
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    CHECK(a[i].angles == b[i].angles);
+    CHECK(a[i].energy == b[i].energy);
+  }
+  for (const auto& s : a) {
+    const std::vector<double> ang(s.angles.begin(), s.angles.end());
+    const auto e = sys.evaluate(ang);
+    CHECK(e.filterEnergy() < p.Emax);
+    CHECK(e.filterEnergy() == doctest::Approx(s.energy).epsilon(1e-4));
+    CHECK(e.closureMaxDeviation <= p.maxBreakDist + 1e-4);
+  }
+  // Minimization lowers the energy of a random sample.
+  std::vector<double> ang(sys.torsionCount());
+  od::Rng rng(5, 9, 0);
+  smp.sample(rng, ang);
+  const double e0 = sys.evaluate(ang).total();
+  od::minimizeConf(sys, ang, {});
+  CHECK(sys.evaluate(ang).total() <= e0);
+
+  // No sample can pass: stops at maxL1Total.
+  p.Emax = -1e9;
+  p.maxL1Total = 30;
+  std::vector<od::ConfSample> c;
+  std::uint64_t counter = 0;
+  CHECK_THROWS_AS(od::fillL2Pool(sys, gen, 6, p, counter, c), od::Error);
+  CHECK(counter == 30);
 }

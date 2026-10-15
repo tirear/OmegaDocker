@@ -35,8 +35,11 @@ OD_HD inline void ad4VdwHb(T r, T AC, T BD, int m, int n, T reqm, T halfSmooth, 
     s = r - halfSmooth;
     ds = 1;
   }
-  const T rm = std::pow(s, T(-m));
-  const T rn = std::pow(s, T(-n));
+  const T inv = T(1) / s;
+  T rn = 1;
+  for (int k = 0; k < n; ++k) rn *= inv;
+  T rm = rn;
+  for (int k = n; k < m; ++k) rm *= inv;
   e = AC * rm - BD * rn;
   dedr = ds * (n * BD * rn - m * AC * rm) / s;
 }

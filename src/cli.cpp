@@ -4,6 +4,7 @@
 
 #include "cli.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <format>
 #include <functional>
@@ -43,6 +44,19 @@ Vec3 parseVec3(const std::string& opt, const std::string& s) {
     start = comma + 1;
   }
   return v;
+}
+
+long long parseInt(const std::string& opt, const std::string& s) {
+  long long v = 0;
+  auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+  if (ec != std::errc() || p != s.data() + s.size()) fail("--{}: '{}' is not an integer", opt, s);
+  return v;
+}
+
+int parseInt32(const std::string& opt, const std::string& s) {
+  const long long v = parseInt(opt, s);
+  if (v < -2147483647LL || v > 2147483647LL) fail("--{}: '{}' is out of range", opt, s);
+  return static_cast<int>(v);
 }
 
 bool parseBool(const std::string& opt, const std::string& s) {
@@ -99,6 +113,34 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.EclashBase = parseDouble("EclashBase", v); }},
       {"Kclash", Kind::Value, "<k>", "1000", "Quadratic part of the clash penalty (kcal/mol/Å²)",
        [](Options& o, const std::string& v) { o.Kclash = parseDouble("Kclash", v); }},
+      {"dockingConfSampleNum", Kind::Value, "<n>", "required", "Conformation samples docked per round (dcss size, >= 4)",
+       [](Options& o, const std::string& v) { o.dockingConfSampleNum = parseInt32("dockingConfSampleNum", v); }},
+      {"minL2confSampleNum", Kind::Value, "<n>", "2 x docking", "9a: refill the L2 pool to at least this many samples",
+       [](Options& o, const std::string& v) { o.minL2confSampleNum = parseInt32("minL2confSampleNum", v); }},
+      {"initL1confSampleNum", Kind::Value, "<n>", "minL2", "9a: samples generated in the first batch",
+       [](Options& o, const std::string& v) { o.initL1confSampleNum = parseInt32("initL1confSampleNum", v); }},
+      {"eliteConfSampleNum", Kind::Value, "<n>", "max(2, ceil(docking/4))", "csgm1 is used while the dcss has fewer samples",
+       [](Options& o, const std::string& v) { o.eliteConfSampleNum = parseInt32("eliteConfSampleNum", v); }},
+      {"maxL1TotalNum", Kind::Value, "<n>", "1000000000", "9a: largest number of samples generated in one refill",
+       [](Options& o, const std::string& v) { o.maxL1TotalNum = parseInt("maxL1TotalNum", v); }},
+      {"maxL1BatchNum", Kind::Value, "<n>", "65536", "9a: largest number of samples processed at once",
+       [](Options& o, const std::string& v) { o.maxL1BatchNum = parseInt("maxL1BatchNum", v); }},
+      {"csgm1AngleStep", Kind::Value, "<deg>", "1", "csgm1a: angle changes are multiples of this",
+       [](Options& o, const std::string& v) { o.csgm1AngleStep = parseDouble("csgm1AngleStep", v); }},
+      {"ramaFloor", Kind::Value, "<w>", "1e-4", "csgm1b: weight added to every Ramachandran cell",
+       [](Options& o, const std::string& v) { o.ramaFloor = parseDouble("ramaFloor", v); }},
+      {"confMinMaxStep", Kind::Value, "<n>", "100", "9a minimization: largest number of steps",
+       [](Options& o, const std::string& v) { o.confMinMaxStep = parseInt32("confMinMaxStep", v); }},
+      {"confMinDeltaE", Kind::Value, "<E>", "10", "9a minimization: stop when one step changes the energy by less (kcal/mol)",
+       [](Options& o, const std::string& v) { o.confMinDeltaE = parseDouble("confMinDeltaE", v); }},
+      {"confMaxDihedralStep", Kind::Value, "<deg>", "10", "9a minimization: largest change of one torsion per step",
+       [](Options& o, const std::string& v) { o.confMaxDihedralStep = parseDouble("confMaxDihedralStep", v); }},
+      {"seed", Kind::Value, "<n>", "random", "Random seed (written to the log)",
+       [](Options& o, const std::string& v) {
+         const long long s = parseInt("seed", v);
+         if (s < 0) fail("--seed must be >= 0");
+         o.seed = static_cast<std::uint64_t>(s);
+       }},
       {"help", Kind::Flag, "", "", "Show this help", [](Options& o, const std::string&) { o.showHelp = true; }},
       {"version", Kind::Flag, "", "", "Show version", [](Options& o, const std::string&) { o.showVersion = true; }},
   };
@@ -136,6 +178,15 @@ Options parseCommandLine(int argc, const char* const* argv) {
   return o;
 }
 
+ConfSampleNums confSampleNums(const Options& o) {
+  ConfSampleNums n;
+  n.docking = o.dockingConfSampleNum.value_or(0);
+  n.minL2 = o.minL2confSampleNum.value_or(2 * n.docking);
+  n.initL1 = o.initL1confSampleNum.value_or(n.minL2);
+  n.elite = o.eliteConfSampleNum.value_or(std::max(2, (n.docking + 3) / 4));
+  return n;
+}
+
 void validateOptions(const Options& o) {
   if (o.sta.empty()) fail("--sta is required");
   if (o.mob.empty()) fail("At least one --mob is required");
@@ -151,6 +202,20 @@ void validateOptions(const Options& o) {
   if (!(o.clashDistance > 0)) fail("--clashDistance must be > 0");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
+  if (!o.dockingConfSampleNum) fail("--dockingConfSampleNum is required");
+  const ConfSampleNums n = confSampleNums(o);
+  if (n.docking < 4) fail("--dockingConfSampleNum must be >= 4");
+  if (n.minL2 < 2 * n.docking) fail("--minL2confSampleNum must be >= 2 x --dockingConfSampleNum ({})", 2 * n.docking);
+  if (n.initL1 < n.minL2) fail("--initL1confSampleNum must be >= --minL2confSampleNum ({})", n.minL2);
+  if (n.elite < 2 || n.elite > n.docking / 2)
+    fail("--eliteConfSampleNum must be within [2, --dockingConfSampleNum / 2] = [2, {}]", n.docking / 2);
+  if (o.maxL1TotalNum < 1) fail("--maxL1TotalNum must be >= 1");
+  if (o.maxL1BatchNum < 1) fail("--maxL1BatchNum must be >= 1");
+  if (!(o.csgm1AngleStep > 0 && o.csgm1AngleStep <= 180)) fail("--csgm1AngleStep must be within (0, 180]");
+  if (!(o.ramaFloor >= 0)) fail("--ramaFloor must be >= 0");
+  if (o.confMinMaxStep < 0) fail("--confMinMaxStep must be >= 0");
+  if (!(o.confMinDeltaE >= 0)) fail("--confMinDeltaE must be >= 0");
+  if (!(o.confMaxDihedralStep > 0)) fail("--confMaxDihedralStep must be > 0");
   if (!o.outPdb && !o.outCif && !o.outSdf && !o.outMol2)
     fail("All output formats are disabled (--outPdb, --outCif, --outSdf, --outMol2)");
 }

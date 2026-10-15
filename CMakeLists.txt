@@ -85,6 +85,9 @@ add_library(od_core STATIC
   src/torsion_tree.cpp
   src/ad4.cpp
   src/energy.cpp
+  src/csgm1.cpp
+  src/minimize.cpp
+  src/conf9a.cpp
   ${OD_CCD_EMBED}
   ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)

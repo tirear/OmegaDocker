@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +36,18 @@ struct Options {
   double Emax = 1000.0;
   double EclashBase = 10000.0;
   double Kclash = 1000.0;
+  std::optional<int> dockingConfSampleNum;
+  std::optional<int> minL2confSampleNum;
+  std::optional<int> initL1confSampleNum;
+  std::optional<int> eliteConfSampleNum;
+  long long maxL1TotalNum = 1000000000;
+  long long maxL1BatchNum = 65536;
+  double csgm1AngleStep = 1.0;
+  double ramaFloor = 1e-4;
+  int confMinMaxStep = 100;
+  double confMinDeltaE = 10.0;
+  double confMaxDihedralStep = 10.0;
+  std::optional<std::uint64_t> seed;  // random when not given
 
   bool showHelp = false;
   bool showVersion = false;
@@ -42,6 +55,12 @@ struct Options {
 
 // Parses argv; throws od::Error on invalid input.
 Options parseCommandLine(int argc, const char* const* argv);
+
+// Sample numbers of spec 7.2 with their defaults applied.
+struct ConfSampleNums {
+  int docking = 0, minL2 = 0, initL1 = 0, elite = 0;
+};
+ConfSampleNums confSampleNums(const Options& o);
 
 // Checks required parameters and value ranges; throws od::Error.
 void validateOptions(const Options& o);
