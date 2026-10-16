@@ -155,6 +155,16 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.mobm.elite = 5;
   CHECK_NOTHROW(od::validateOptions(o));
+  o.mobmCsgm.mutationRate = 101;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.mobmCsgm.mutationRate = 2;
+  o.stamCsgm.tournamentRate = -1;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.stamCsgm.tournamentRate = 60;
+  o.stamCsgm.absMaxDang = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.stamCsgm.absMaxDang = 180;
+  CHECK_NOTHROW(od::validateOptions(o));
 
   auto s = parse({"--stam_dockingConfSampleNum=12", "--stam_minL2confSampleNum=30", "--stam_initL1confSampleNum=40", "--stam_eliteConfSampleNum=4", "--mobm_dockingConfSampleNum=8", "--mobm_minL2confSampleNum=16", "--mobm_initL1confSampleNum=17", "--mobm_eliteConfSampleNum=2"});
   CHECK(*s.stam.docking == 12);
@@ -191,6 +201,15 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(t.mobmCsgm.growMaxRetry == 16);
   CHECK_THROWS_AS(parse({"--csgmBuild", "grow"}), od::Error);
   CHECK_THROWS_AS(parse({"--mobm_csgmBuild=partial"}), od::Error);
+  auto ga = parse({"--stam_tournamentRate=70", "--mobm_crossoverRate=50", "--mobm_mutationRate=5", "--mobm_absMaxDang=45",
+                   "--stam_csgmGA=csgm2"});
+  CHECK(ga.stamCsgm.tournamentRate == 70);
+  CHECK(ga.mobmCsgm.tournamentRate == 60);
+  CHECK(ga.mobmCsgm.crossoverRate == 50);
+  CHECK(ga.mobmCsgm.mutationRate == 5);
+  CHECK(ga.mobmCsgm.absMaxDang == 45);
+  CHECK_THROWS_AS(parse({"--mobm_csgmGA=csgm3"}), od::Error);  // not implemented yet
+  CHECK_THROWS_AS(parse({"--mobm_csgmGA=csgm1"}), od::Error);
   CHECK_THROWS_AS(parse({"--seed=-1"}), od::Error);
   CHECK_THROWS_AS(parse({"--conf9a_minMaxStep=1.5"}), od::Error);
 }

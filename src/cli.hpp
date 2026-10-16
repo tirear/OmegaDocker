@@ -29,6 +29,11 @@ struct CsgmOpts {
   int growMaxRetry = 16;
   double csgm1AngleStep = 1.0;
   double ramaFloor = 1e-4;
+  // csgm2 (spec 7.6); rates in percent as AutoDock-GPU.
+  double tournamentRate = 60.0;
+  double crossoverRate = 80.0;
+  double mutationRate = 2.0;
+  double absMaxDang = 90.0;
 };
 
 struct Options {

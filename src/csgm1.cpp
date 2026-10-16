@@ -234,6 +234,13 @@ void Csgm1GroupSampler::sampleSegment(Rng& rng, int segment, std::span<double> a
   }
 }
 
+std::vector<bool> Csgm1GroupSampler::cisTransMask() const {
+  std::vector<bool> m;
+  for (const auto& p : parts_)
+    for (int i = 0; i < p.size(); ++i) m.push_back(p.cisTrans(i));
+  return m;
+}
+
 void Csgm1GroupSampler::sample(Rng& rng, std::span<double> a) const {
   int o = 0;
   for (const auto& p : parts_) {

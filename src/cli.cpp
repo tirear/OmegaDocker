@@ -169,7 +169,23 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                  csgm(o).grow = s == "grow";
                },
                [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).grow ? "grow" : "whole"}; }});
-  t.push_back(integer(set + ".growMaxRetry", "<n>", "16", who + "csgmBuild = grow: resamplings of a failing segment before discarding",
+  t.push_back({set + ".csgmGA", Type::Str, "csgm2", "csgm2",
+               who + "9a: method once the dcss has eliteConfSampleNum samples (csgm3 is not implemented yet)",
+               [](Options&, const Tokens& v) {
+                 const std::string& s = one(v);
+                 if (s == "csgm3") fail("csgm3 is not implemented yet");
+                 if (s != "csgm2") fail("expected csgm2 but got '{}'", s);
+               },
+               [](const Options&) -> std::optional<Tokens> { return Tokens{"csgm2"}; }});
+  t.push_back(real(set + ".tournamentRate", "<%>", "60", who + "csgm2: probability (%) that the fitter of two candidates is chosen",
+                   [csgm](auto& o) -> auto& { return csgm(o).tournamentRate; }));
+  t.push_back(real(set + ".crossoverRate", "<%>", "80", who + "csgm2: probability (%) of two-point crossover",
+                   [csgm](auto& o) -> auto& { return csgm(o).crossoverRate; }));
+  t.push_back(real(set + ".mutationRate", "<%>", "2", who + "csgm2: mutation probability (%) per torsion",
+                   [csgm](auto& o) -> auto& { return csgm(o).mutationRate; }));
+  t.push_back(real(set + ".absMaxDang", "<deg>", "90", who + "csgm2: largest torsion change of a mutation",
+                   [csgm](auto& o) -> auto& { return csgm(o).absMaxDang; }));
+  t.push_back(integer(set + ".growMaxRetry", "<n>", "16", who + "csgmBuild = grow, csgm1: resamplings of a failing segment before discarding",
                       [csgm](auto& o) -> auto& { return csgm(o).growMaxRetry; }));
   t.push_back(real(set + ".csgm1AngleStep", "<deg>", "1", who + "csgm1a / R: sampled angles are multiples of this step",
                    [csgm](auto& o) -> auto& { return csgm(o).csgm1AngleStep; }));
@@ -659,6 +675,10 @@ void validateOptions(const Options& o) {
     check(c->growMaxRetry >= 0, set + ".growMaxRetry", ">= 0");
     check(c->csgm1AngleStep > 0 && c->csgm1AngleStep <= 180, set + ".csgm1AngleStep", "within (0, 180]");
     check(c->ramaFloor >= 0, set + ".ramaFloor", ">= 0");
+    check(c->tournamentRate >= 0 && c->tournamentRate <= 100, set + ".tournamentRate", "within [0, 100]");
+    check(c->crossoverRate >= 0 && c->crossoverRate <= 100, set + ".crossoverRate", "within [0, 100]");
+    check(c->mutationRate >= 0 && c->mutationRate <= 100, set + ".mutationRate", "within [0, 100]");
+    check(c->absMaxDang > 0 && c->absMaxDang <= 180, set + ".absMaxDang", "within (0, 180]");
   }
   check(o.confMinMaxStep >= 0, "conf9a.minMaxStep", ">= 0");
   check(o.confMinDeltaE >= 0, "conf9a.minDeltaE", ">= 0");

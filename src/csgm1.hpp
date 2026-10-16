@@ -39,6 +39,7 @@ class Csgm1Sampler {
   Csgm1Sampler(const Molecule& m, const MolSettings& settings, const MolConfig& config, const Csgm1Params& params);
 
   int size() const { return static_cast<int>(input_.size()); }
+  bool cisTrans(int i) const { return kind_[i] == Kind::CisTrans; }
   void sample(Rng& rng, std::span<double> anglesDeg) const;
 
   // Torsions sampled together (csgmBuild = grow, spec 7.8): a phi/psi pair of
@@ -84,6 +85,8 @@ class Csgm1GroupSampler {
   void add(Csgm1Sampler s) { parts_.push_back(std::move(s)); }
   int size() const;
   void sample(Rng& rng, std::span<double> anglesDeg) const;
+  // Per concatenated angle: torsion is a cisTrans omega.
+  std::vector<bool> cisTransMask() const;
   // Segments of all parts, with indices into the concatenated angles.
   std::vector<std::vector<int>> segments() const;
   void sampleSegment(Rng& rng, int segment, std::span<double> anglesDeg) const;

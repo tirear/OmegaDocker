@@ -226,7 +226,7 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
             break;
           }
       if (ok) break;
-      if (attempt >= maxRetry_) return res;
+      if (attempt >= maxRetry_ || !resample) return res;
       resample(rng, st.segment, a);
       ++res.retries;
     }

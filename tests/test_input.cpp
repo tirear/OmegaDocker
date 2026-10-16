@@ -30,6 +30,7 @@
 #include "ccd.hpp"
 #include "conf9a.hpp"
 #include "csgm1.hpp"
+#include "csgm2.hpp"
 #include "dock9b.hpp"
 #include "dock9c.hpp"
 #include "log.hpp"
@@ -1394,6 +1395,76 @@ TEST_CASE("csgm1: csgm1a angles and cisTrans omega") {
     if (step == 100.0) CHECK(deltas.size() == 3);  // -100, 0, 100
     else CHECK(std::abs(sumCos / n) < 0.05);
   }
+}
+
+TEST_CASE("csgm2: tournament, crossover and mutation") {
+  const std::vector<float> g0(8, 10.0f), g1(8, -20.0f), g2(8, 50.0f);
+  const std::vector<bool> noCis(8, false);
+  std::vector<double> a(8);
+  // Without crossover and mutation the offspring copies the first parent.
+  od::Csgm2Params copy{1.0, 0.0, 0.0, 90.0};
+  std::vector<od::Csgm2Parent> pp{{&g0, -5.0f}, {&g1, -1.0f}};
+  for (std::uint64_t k = 0; k < 200; ++k) {
+    od::Rng r(1, 2, k);
+    od::csgm2Offspring(r, pp, noCis, copy, a);
+    // tournamentRate 1: the fitter candidate always wins, so g1 only when both candidates are g1.
+    CHECK((a[0] == 10.0 || a[0] == -20.0));
+    for (double x : a) CHECK(x == a[0]);
+  }
+  int g0Count = 0;
+  for (std::uint64_t k = 0; k < 4000; ++k) {
+    od::Rng r(1, 2, k);
+    od::csgm2Offspring(r, pp, noCis, copy, a);
+    g0Count += a[0] == 10.0;
+  }
+  CHECK(g0Count == doctest::Approx(3000).epsilon(0.05));  // P(fitter in the pair) = 3/4
+  // tournamentRate 0: the less fit candidate wins.
+  od::Csgm2Params worse{0.0, 0.0, 0.0, 90.0};
+  int g1Count = 0;
+  for (std::uint64_t k = 0; k < 4000; ++k) {
+    od::Rng r(1, 3, k);
+    od::csgm2Offspring(r, pp, noCis, worse, a);
+    g1Count += a[0] == -20.0;
+  }
+  CHECK(g1Count == doctest::Approx(3000).epsilon(0.05));
+  // Crossover: two-point (first, second, first parent) or single-point when the points coincide (first, second).
+  od::Csgm2Params cross{0.5, 1.0, 0.0, 90.0};
+  std::vector<od::Csgm2Parent> p3{{&g0, 0.0f}, {&g1, 0.0f}, {&g2, 0.0f}};
+  int mixed = 0;
+  for (std::uint64_t k = 0; k < 500; ++k) {
+    od::Rng r(4, 5, k);
+    od::csgm2Offspring(r, p3, noCis, cross, a);
+    int changes = 0;
+    for (int i = 1; i < 8; ++i) changes += a[i] != a[i - 1];
+    CHECK(changes <= 2);
+    mixed += changes > 0;
+    if (changes == 2) CHECK(a[7] == a[0]);  // two-point: both ends from the first parent
+  }
+  CHECK(mixed > 100);
+  // Mutation: every gene within absMaxDang of the parent value, wrapped; cisTrans genes switch 0 <-> 180.
+  const std::vector<float> h{170.0f, 0.0f, 180.0f, -100.0f};
+  std::vector<bool> cis{false, true, true, false};
+  std::vector<od::Csgm2Parent> ph{{&h, 0.0f}};
+  od::Csgm2Params mut{0.6, 0.0, 1.0, 30.0};
+  std::vector<double> b(4);
+  for (std::uint64_t k = 0; k < 500; ++k) {
+    od::Rng r(6, 7, k);
+    od::csgm2Offspring(r, ph, cis, mut, b);
+    CHECK(b[0] > -180.0);
+    CHECK(b[0] <= 180.0);
+    CHECK(std::abs(od::wrapDeg(b[0] - 170.0)) <= 30.0);
+    CHECK(b[1] == 180.0);
+    CHECK(b[2] == 0.0);
+    CHECK(std::abs(b[3] + 100.0) <= 30.0);
+  }
+  // Same (seed, stream, index): same offspring.
+  std::vector<double> c1(8), c2(8);
+  od::Rng r1(9, 9, 9), r2(9, 9, 9);
+  od::csgm2Offspring(r1, p3, noCis, od::Csgm2Params{}, c1);
+  od::csgm2Offspring(r2, p3, noCis, od::Csgm2Params{}, c2);
+  CHECK(c1 == c2);
+  od::Rng r3(1, 1, 1);
+  CHECK_THROWS_AS(od::csgm2Offspring(r3, std::vector<od::Csgm2Parent>{}, noCis, od::Csgm2Params{}, c1), od::Error);
 }
 
 TEST_CASE("csgm1: csgm1b types") {

@@ -86,6 +86,7 @@ add_library(od_core STATIC
   src/ad4.cpp
   src/energy.cpp
   src/csgm1.cpp
+  src/csgm2.cpp
   src/minimize.cpp
   src/conf9a.cpp
   src/grow.cpp

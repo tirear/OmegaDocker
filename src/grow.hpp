@@ -20,7 +20,7 @@ namespace od {
 // backbone links for reach. A failing segment is resampled.
 
 struct GrowParams {
-  int maxRetry = 16;           // growMaxRetry; 0 with csgm2 / csgm3 (no resampling)
+  int maxRetry = 16;           // growMaxRetry (csgm1; csgm2 builds without resampling)
   double clashDistance = 1.8;
   double reachProtein = 3.8;   // reachPerRes (Å per residue)
   double reachNucleic = 7.0;
@@ -45,7 +45,8 @@ class GrowBuilder {
               const GrowParams& p);
 
   // anglesDeg holds a complete sample; failing segments are resampled with
-  // resample (at most maxRetry times each). ok = false: the sample is discarded.
+  // resample (at most maxRetry times each; never when resample is empty, as
+  // for csgm2). ok = false: the sample is discarded.
   // coords (optional): coordinates of the built sample, as EnergySystem::evaluate.
   GrowResult build(Rng& rng, std::span<double> anglesDeg, const SegmentSampler& resample,
                    std::vector<Vec3>* coords = nullptr) const;

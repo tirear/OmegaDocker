@@ -25,6 +25,7 @@
 #include "read_input.hpp"
 #include "conf9a.hpp"
 #include "csgm1.hpp"
+#include "csgm2.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
 #include "dock9b.hpp"
@@ -182,6 +183,8 @@ class ConfSet {
     cp.ramaFloor = csgm_.ramaFloor;
     for (std::size_t k = 0; k < parts_.size(); ++k)
       sampler_.add(od::Csgm1Sampler(*parts_[k].mol, *settings_[k], cfg, cp));
+    cisTrans_ = sampler_.cisTransMask();
+    ga_ = {csgm_.tournamentRate / 100.0, csgm_.crossoverRate / 100.0, csgm_.mutationRate / 100.0, csgm_.absMaxDang};
     n_ = od::confSampleNums(opt, set);
     p_.minL2 = n_.minL2;
     p_.maxL1Batch = csgm_.maxL1BatchNum;
@@ -230,9 +233,10 @@ class ConfSet {
   int eliteNum() const { return movable() ? n_.elite : 1; }
 
   // Moves need samples from the L2 pool into samples(), refilling the pool by
-  // 9a first when it has fewer (spec 7.3); returns their ids.
-  std::vector<int> take(int need) {
-    if (static_cast<int>(pool_.size()) < need) refill();
+  // 9a first when it has fewer (spec 7.3); returns their ids. dcss: the samples
+  // left in the dcss with their lowest ranking energy of the last round.
+  std::vector<int> take(int need, const std::vector<std::pair<int, float>>& dcss) {
+    if (static_cast<int>(pool_.size()) < need) refill(dcss);
     std::vector<int> ids;
     for (int k = 0; k < need; ++k) {
       ids.push_back(static_cast<int>(samples_.size()));
@@ -243,10 +247,17 @@ class ConfSet {
   }
 
  private:
-  // csgm2 / csgm3 are not implemented yet: every refill uses csgm1.
-  void refill() {
+  // csgm1 while the dcss has fewer than eliteConfSampleNum samples, csgm2 otherwise (csgm3 is not implemented yet).
+  void refill(const std::vector<std::pair<int, float>>& dcss) {
+    const bool ga = static_cast<int>(dcss.size()) >= n_.elite;
+    std::vector<od::Csgm2Parent> parents;
+    for (const auto& [id, e] : dcss) parents.push_back({&samples_[id].angles, e});
     const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { sampler_.sampleSegment(r, seg, a); };
     const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) {
+      if (ga) {
+        od::csgm2Offspring(r, parents, cisTrans_, ga_, a);
+        return !grow_ || grow_->build(r, a, {}).ok;
+      }
       sampler_.sample(r, a);
       return !grow_ || grow_->build(r, a, resample).ok;
     };
@@ -257,9 +268,9 @@ class ConfSet {
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     nextL1_ = st.nextL1;
     const long long minimized = st.l1 - st.growFailed;
-    od::logInfo(std::format("  9a {:<37} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, E >= Emax {}, "
+    od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, E >= Emax {}, "
                             "not closed {})  steps/sample {:.1f}  {:.2f} s",
-                            name_, st.l1, st.batches, st.added, pool_.size(), st.growFailed, st.overEmax, st.notClosed,
+                            name_, ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(), st.growFailed, st.overEmax, st.notClosed,
                             minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   }
 
@@ -270,6 +281,8 @@ class ConfSet {
   const od::CsgmOpts& csgm_;
   od::EnergySystem sys_;
   od::Csgm1GroupSampler sampler_;
+  std::vector<bool> cisTrans_;
+  od::Csgm2Params ga_;
   std::optional<od::GrowBuilder> grow_;
   od::ConfSampleNums n_;
   od::Fill9aParams p_;
@@ -310,6 +323,7 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
 struct MobState {
   std::vector<int> stamDcss, mobDcss;  // sample ids
   std::unordered_map<std::uint64_t, float> pairLowest;  // (StaM id, MobM id) -> lowest docking energy, +inf if none
+  std::unordered_map<int, float> stamLowest, mobLowest;  // dcss sample -> lowest ranking energy of the last round (csgm2 fitness)
   std::vector<od::RoundSample> top;
   int topNum = 0;
   std::size_t bufferNum = 0;  // sampleBufferNum
@@ -646,18 +660,20 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     od::logInfo(std::format("Round {} of {}:", round, opt.maxRound));
     // 9a: refill the dcss (spec 7.3).
     for (std::size_t i = 0; i < ms.size(); ++i) {
-      auto fill = [](ConfSet& set, std::vector<int>& dcss) {
+      auto fill = [](ConfSet& set, std::vector<int>& dcss, const std::unordered_map<int, float>& lowest) {
         if (!set.movable()) {
           dcss = {0};  // the input conformation (spec 7.1)
           return;
         }
         const int need = set.dockingNum() - static_cast<int>(dcss.size());
         if (need <= 0) return;
-        const auto ids = set.take(need);
+        std::vector<std::pair<int, float>> fit;
+        for (int id : dcss) fit.emplace_back(id, lowest.at(id));
+        const auto ids = set.take(need, fit);
         dcss.insert(dcss.end(), ids.begin(), ids.end());
       };
-      fill(stamSet, ms[i].stamDcss);
-      fill(*mobSets[i], ms[i].mobDcss);
+      fill(stamSet, ms[i].stamDcss, ms[i].stamLowest);
+      fill(*mobSets[i], ms[i].mobDcss, ms[i].mobLowest);
     }
     if (stamSet.movable() && !std::isfinite(stamRef)) stamRef = stamSet.minEnergy();
     const float shift = stamSet.movable() ? stamRef - stamSet.minEnergy() : 0.0f;
@@ -789,6 +805,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       const float eTop = od::topMaxEnergy(m.top);
       const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
       const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
+      m.stamLowest = std::move(stamLowest);
+      m.mobLowest = std::move(mobLowest);
       od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}  "
                               "9c runs {}  {:.2f} s",
                               mobSets[i]->name(), m.top.size(), m.topNum, eTop + shift, rmStam, rmMob, partial[i] + 1,

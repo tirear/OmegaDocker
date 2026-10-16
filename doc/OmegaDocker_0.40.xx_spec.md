@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.36 |
+| 文件版本 | 1.37 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -491,7 +491,8 @@ if |L2pool| < need:
 
 - 「使用者指定」：StaM 群用 `stam.csgmGA`，MobM 用 `mobm.csgmGA`。
 - csgm1 的父代不依賴 dcss。
-- 目前尚未實作 csgm2、csgm3，也尚未提供 `stam.csgmGA`、`mobm.csgmGA`：所有補充都使用 csgm1。
+- 目前只實作 csgm2；`csgmGA` 只接受 `csgm2`（`csgm3` 報錯「尚未實作」）。
+- StaM 群：L2 pool 由所有 MobM 共用（7.10），補充時的 dcss 是觸發補充的那個 MobM 的 StaM dcss，適應度也是對該 MobM 的值；產生的樣本進入共用的 L2 pool，之後可能被其他 MobM 取用。
 - csgm2 的父代、csgm3 的端點 = 目前 dcss 中的樣本（必定 ≥ `eliteConfSampleNum` ≥ 2 個，且都已有 9b 能量）。
 
 ### 7.4 下一批 L1 數量
@@ -562,9 +563,16 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `MutationRate` | 2% |
 | `AbsMaxDang` | ±90° |
 
-- 父代池：dcss，適應度 = 該樣本在 9b 的最低對接能量。
+- 父代池：dcss，適應度 = 該樣本在上一輪 9c 的本輪最低排序能量（9 節步驟 5 所用的值，含 StaM 分子內能量項）；越低越好。通過 9c dcss 篩選的樣本都有有限值。
 - 產生數量：依 7.3、7.4 的 L1 數量。
 - 不沿用 OmegaDocker v0.34 kernel4 的錦標賽寫法（該處能量與候選者索引不對應）。
+- 每個子代的操作（同 AutoDock-GPU 1.6 kernel4，基因只有兩面角，順序同樣本表示 7.1）：
+  1. 從父代池均勻取 4 個候選（可重複），兩兩做二元錦標賽：以機率 `TournamentRate` 選適應度較好者，否則選另一個；得到父代 1、2。
+  2. 以機率 `CrossoverRate` 交配：兩個交配點 c0 ≤ c1 均勻取自 0 … D−2；c0 ≠ c1 時為兩點交配（i ≤ c0 或 i > c1 取父代 1，其餘取父代 2），c0 = c1 時為單點交配（i ≤ c0 取父代 1，其餘取父代 2）。不交配時複製父代 1。
+  3. 每個基因以機率 `MutationRate` 突變：加上 [−`AbsMaxDang`, `AbsMaxDang`) 的均勻亂數後 wrap 到 (−180°, 180°]。`cisTrans` 的 ω 改為在 0° 與 180° 間切換（與 0° 相差 < 90° → 180°，否則 → 0°），以符合 4.2 只產生 0°／180° 的規定。
+- 不做菁英保留：父代仍留在 dcss 中，子代只進入 L1。
+- 機率參數以百分比指定（0–100，同 AutoDock-GPU）；`AbsMaxDang` 範圍 (0, 180]。
+- 亂數：每個子代的亂數只依 (seed, 分子的串流, 樣本序號)（7.9），與執行緒數無關。
 
 ### 7.7 csgm3：Path Exploring
 
@@ -599,7 +607,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 兩面角移動側的鍵原子（如 χ1 的 CB、φ 的 CA）位於旋轉軸上，位置由父兩面角決定，因此歸屬父兩面角所在的段建構與檢查（否則碰撞會晚一段才發現，重抽本段無法排除）。
 - 碰撞判定同 7.9（重原子、排除 1-2/1-3/1-4、距離 < `clashDistance`）。
 - csgm1：碰撞時重新抽該段的兩面角，最多 `GrowMaxRetry` 次（預設 16），仍失敗則捨棄該樣本。
-- csgm2、csgm3：兩面角已決定，碰撞即捨棄（不重抽）。
+- csgm2、csgm3：兩面角已決定，碰撞或可達距離檢查失敗即捨棄（不重抽，不使用 `GrowMaxRetry`）。
 - 搭配 `confMinMaxStep = 0` 時，9a 最佳化只計算能量。
 - 第一次嘗試的取值與 `whole` 相同（先產生完整樣本）；重抽只改變該段的兩面角，已建構的段不變。
 - 捨棄的樣本計入 L1，但不進行 9a 最佳化。
@@ -1206,12 +1214,13 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `{stam,mobm}.eliteConfSampleNum` | `--{stam,mobm}_eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
 | `{stam,mobm}.maxL1TotalNum` | `--{stam,mobm}_maxL1TotalNum` | 10⁹ | 7.4 |
 | `{stam,mobm}.maxL1BatchNum` | `--{stam,mobm}_maxL1BatchNum` | 65536（CPU 版；GPU 版由 `gpu.memLimit` 推算） | 7.4 |
-| `{stam,mobm}.csgmGA`（未實作） | `--{stam,mobm}_csgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
+| `{stam,mobm}.csgmGA` | `--{stam,mobm}_csgmGA` | `csgm2` | 7.3（`csgm2`；`csgm3` 未實作） |
 | `{stam,mobm}.csgmBuild` | `--{stam,mobm}_csgmBuild` | `whole` | 7.8 |
 | `{stam,mobm}.growMaxRetry` | `--{stam,mobm}_growMaxRetry` | 16 | 7.8 |
 | `{stam,mobm}.csgm1AngleStep` | `--{stam,mobm}_csgm1AngleStep` | 1° | 7.5 |
 | `{stam,mobm}.ramaFloor` | `--{stam,mobm}_ramaFloor` | 1×10⁻⁴ | 7.5 |
-| `{stam,mobm}.tournamentRate`、`.crossoverRate`、`.mutationRate`、`.absMaxDang`（未實作） | `--{stam,mobm}_tournamentRate` 等 | 60%、80%、2%、90° | 7.6 |
+| `{stam,mobm}.tournamentRate`、`.crossoverRate`、`.mutationRate` | `--{stam,mobm}_tournamentRate` 等 | 60、80、2（%） | 7.6 |
+| `{stam,mobm}.absMaxDang` | `--{stam,mobm}_absMaxDang` | 90° | 7.6 |
 | `{stam,mobm}.peMaxOffset`（未實作） | `--{stam,mobm}_peMaxOffset` | 30° | 7.7 |
 | `{stam,mobm}.peCoverAngle`（未實作） | `--{stam,mobm}_peCoverAngle` | 360° | 7.7 |
 | `{stam,mobm}.peSampleNumPerLine`（未實作） | `--{stam,mobm}_peSampleNumPerLine` | 4 | 7.7 |
@@ -1526,3 +1535,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.34 | 2026-10-16 | 搖動權重改為 w_k = exp(−ΔE_k × `rrtScaling`)，新增 `--rrtScaling`（預設 1/RT），與熵項的 RT 分開（10.2、14） |
 | 1.35 | 2026-10-16 | od_0100 的所有參數（含 `temperature`、`unboundCandidateNum`、`shaking.radius`、`shaking.step`、`shaking.rrtScaling`）放入參數檔，命令列選項改為覆寫參數檔；新增 `--feC0`、`--feTors`、`--feInter*`、`--feIntra*`、`--feEntropy*`；`rrtScaling` 預設暫定 4，不再依 `temperature`（10.2、14） |
 | 1.36 | 2026-10-16 | 參數檔 `--paramFile`（TOML）涵蓋所有執行參數，命令列 `--<表>_<鍵>=<值>` 覆寫；取代 `--feParamFile` 與 `--fe*` 選項，舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；寫出 `params.used.toml`（取代 `feparams.used.toml`）；隨機 seed 限 63 位元（14.1、14.2，並更新各節的參數名稱） |
+| 1.37 | 2026-10-16 | 實作 csgm2（7.6）：適應度為上一輪 9c 的本輪最低排序能量；AutoDock-GPU 1.6 的錦標賽、兩點／單點交配與突變只作用在兩面角；`cisTrans` 的 ω 突變為 0°／180° 切換；不做菁英保留；StaM 群以觸發補充的 MobM 的 dcss 為父代（7.3）；`grow` 搭配 csgm2 時失敗即捨棄（7.8）；新增 `csgmGA`、`tournamentRate`、`crossoverRate`、`mutationRate`、`absMaxDang`（14.2） |
