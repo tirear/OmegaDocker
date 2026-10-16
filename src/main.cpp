@@ -17,9 +17,11 @@
 #include <optional>
 #include <random>
 #include <span>
+#include <string_view>
 #include <unordered_map>
 
 #include "ccd.hpp"
+#include "checkpoint.hpp"
 #include "cli.hpp"
 #include "log.hpp"
 #include "read_input.hpp"
@@ -231,6 +233,38 @@ class ConfSet {
     for (std::size_t k = 0; k < v.size() && k < static_cast<std::size_t>(n); ++k) out.push_back(v[k]->angles);
     return out;
   }
+  // Checkpoint state (spec 16.3): random stream counter, L1 batch state, L2 pool and dcss samples.
+  void save(od::BinWriter& w) const {
+    w.put(counter_);
+    w.put<std::uint8_t>(first_);
+    w.put(nextL1_);
+    for (const auto* v : {&pool_, &samples_}) {
+      w.put<std::uint64_t>(v->size());
+      for (const auto& s : *v) {
+        w.putVec(s.angles);
+        w.put(s.energy);
+      }
+    }
+  }
+  void load(od::BinReader& r) {
+    counter_ = r.get<std::uint64_t>();
+    first_ = r.get<std::uint8_t>() != 0;
+    nextL1_ = r.get<long long>();
+    for (auto* v : {&pool_, &samples_}) {
+      const auto n = r.get<std::uint64_t>();
+      v->clear();
+      for (std::uint64_t k = 0; k < n; ++k) {
+        od::ConfSample s;
+        s.angles = r.getVec<float>();
+        s.energy = r.get<float>();
+        if (s.angles.size() != static_cast<std::size_t>(sys_.torsionCount()))
+          od::fail("checkpoint: {}: {} torsions in a sample, {} expected", name_, s.angles.size(), sys_.torsionCount());
+        v->push_back(std::move(s));
+      }
+    }
+    if (samples_.empty() && !movable()) od::fail("checkpoint: {}: input conformation sample missing", name_);
+  }
+  std::size_t sampleCount() const { return samples_.size(); }
   int dockingNum() const { return movable() ? n_.docking : 1; }
   int eliteNum() const { return movable() ? n_.elite : 1; }
 
@@ -347,6 +381,89 @@ struct MobState {
 
 std::uint64_t pairKey(int stam, int mobm) {
   return static_cast<std::uint64_t>(stam) << 32 | static_cast<std::uint32_t>(mobm);
+}
+
+// Maps are written sorted by key.
+template <typename K>
+void putMap(od::BinWriter& w, const std::unordered_map<K, float>& m) {
+  std::vector<std::pair<K, float>> v(m.begin(), m.end());
+  std::sort(v.begin(), v.end());
+  std::vector<K> keys;
+  std::vector<float> values;
+  for (const auto& [k, e] : v) {
+    keys.push_back(k);
+    values.push_back(e);
+  }
+  w.putVec(keys);
+  w.putVec(values);
+}
+
+template <typename K>
+std::unordered_map<K, float> getMap(od::BinReader& r) {
+  const auto keys = r.getVec<K>();
+  const auto values = r.getVec<float>();
+  if (keys.size() != values.size()) od::fail("checkpoint state: corrupt map");
+  std::unordered_map<K, float> m;
+  for (std::size_t k = 0; k < keys.size(); ++k) m.emplace(keys[k], values[k]);
+  return m;
+}
+
+// Checkpoint state of one MobM (spec 16.3).
+void saveMobState(od::BinWriter& w, const MobState& m) {
+  w.putVec(m.stamDcss);
+  w.putVec(m.mobDcss);
+  putMap(w, m.pairLowest);
+  putMap(w, m.stamLowest);
+  putMap(w, m.mobLowest);
+  w.put<std::uint64_t>(m.top.size());
+  for (const auto& r : m.top) {
+    w.put(r.stam);
+    w.put(r.mobm);
+    w.put(r.stamRel);
+    w.put(r.s.pose);
+    w.put(r.s.center);
+    w.putVec(r.s.angles);
+    w.put(r.s.energy);
+    w.put(r.s.inter);
+    w.put(r.s.interClash);
+    w.put(r.s.intra);
+    w.put(r.s.closureMaxDeviation);
+    w.put(r.s.steps);
+  }
+}
+
+void loadMobState(od::BinReader& r, MobState& m, std::size_t stamSamples, std::size_t mobSamples, int mobTorsions) {
+  m.stamDcss = r.getVec<int>();
+  m.mobDcss = r.getVec<int>();
+  m.pairLowest = getMap<std::uint64_t>(r);
+  m.stamLowest = getMap<int>(r);
+  m.mobLowest = getMap<int>(r);
+  const auto n = r.get<std::uint64_t>();
+  m.top.clear();
+  for (std::uint64_t k = 0; k < n; ++k) {
+    od::RoundSample x;
+    x.stam = r.get<int>();
+    x.mobm = r.get<int>();
+    x.stamRel = r.get<float>();
+    x.s.pose = r.get<od::Pose>();
+    x.s.center = r.get<od::Vec3>();
+    x.s.angles = r.getVec<float>();
+    x.s.energy = r.get<float>();
+    x.s.inter = r.get<float>();
+    x.s.interClash = r.get<float>();
+    x.s.intra = r.get<float>();
+    x.s.closureMaxDeviation = r.get<float>();
+    x.s.steps = r.get<int>();
+    m.top.push_back(std::move(x));
+  }
+  auto bad = [](int id, std::size_t count) { return id < 0 || static_cast<std::size_t>(id) >= count; };
+  for (int id : m.stamDcss)
+    if (bad(id, stamSamples)) od::fail("checkpoint state: StaM sample id {} out of range", id);
+  for (int id : m.mobDcss)
+    if (bad(id, mobSamples)) od::fail("checkpoint state: MobM sample id {} out of range", id);
+  for (const auto& x : m.top)
+    if (bad(x.stam, stamSamples) || bad(x.mobm, mobSamples) || x.s.angles.size() != static_cast<std::size_t>(mobTorsions))
+      od::fail("checkpoint state: invalid topSampleSet entry");
 }
 
 // shift: added to RoundSample::rank so that the StaM term is relative to the current lowest StaM energy.
@@ -539,6 +656,12 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
 
     const std::string dir = opt.outPrefix + "/" + safeName(mob.name());
     std::filesystem::create_directories(dir);
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {  // output of an earlier run (e.g. before --resume)
+      const std::string n = e.path().filename().string();
+      if (e.is_regular_file() && (n.starts_with("pose_") || n.starts_with("stam_") || n == "summary.tsv" ||
+                                  (n.starts_with("rank_") && n.ends_with(".tsv"))))
+        std::filesystem::remove(e.path());
+    }
     int fallback = 0;
     std::map<int, std::vector<std::string>> stamFiles;
     std::vector<std::vector<std::string>> poseFiles(top.size());
@@ -628,9 +751,75 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
   }
 }
 
+// Checkpoints (spec 16).
+struct Checkpointing {
+  std::string params;                // params.toml of each checkpoint
+  std::vector<od::InputHash> inputs;
+  std::string resumeDir;             // empty: new run
+  int resumeRound = 0;
+  std::string stateSha256;
+};
+
+// topSampleSet of a checkpoint (spec 16.2): 9b ranking energies, no 9d recalculation.
+void writeTopSnapshot(const std::string& dir, const ConfSet& stamSet, const std::vector<std::unique_ptr<ConfSet>>& mobSets,
+                      const std::vector<MobState>& ms, const od::Options& opt, float shift) {
+  const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
+  for (std::size_t i = 0; i < ms.size(); ++i) {
+    const ConfSet& mob = *mobSets[i];
+    const std::string d = dir + "/" + safeName(mob.name());
+    std::filesystem::create_directories(d);
+    std::ofstream f(d + "/topSampleSet.tsv");
+    if (!f) od::fail("cannot write {}/topSampleSet.tsv", d);
+    f << "rank\tpose_files\tstam_sample\tmobm_sample\tE_9b_grid\tinter\tinter_clash\tmobm_intra\tstam_term\n";
+    std::map<int, bool> stamDone;
+    for (std::size_t k = 0; k < ms[i].top.size(); ++k) {
+      const auto& r = ms[i].top[k];
+      std::string files;
+      if (k < static_cast<std::size_t>(opt.outMinPerRank)) {
+        bool fb = false;
+        if (!stamDone[r.stam]) {
+          stamDone[r.stam] = true;
+          const auto& sa = stamSet.sample(r.stam).angles;
+          od::writeStructure(d + std::format("/stam_{}", r.stam),
+                             structParts(stamSet.sys(), stamSet.parts(), stamSet.sys().coordinates(std::span<const float>(sa))),
+                             fmt, std::format("StaM conformation sample {}", r.stam), fb);
+        }
+        const auto y = mob.sys().coordinates(std::span<const float>(r.s.angles));
+        files = joinNames(od::writeStructure(d + std::format("/top_{:04}", k + 1),
+                                             structParts(mob.sys(), mob.parts(), od::dockWorld(y, r.s)), fmt,
+                                             std::format("{} topSampleSet {} (StaM sample {}, MobM sample {}) E {:.3f}",
+                                                         mob.name(), k + 1, r.stam, r.mobm, r.rank() + shift),
+                                             fb));
+      }
+      f << std::format("{}\t{}\t{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\n", k + 1, files.empty() ? "-" : files, r.stam,
+                       r.mobm, r.rank() + shift, r.s.inter, r.s.interClash, r.s.intra, r.stamRel + shift);
+    }
+  }
+}
+
+void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::unique_ptr<ConfSet>>& mobSets,
+                     const std::vector<MobState>& ms, float stamRef, const od::Options& opt, const Checkpointing& ck,
+                     float shift) {
+  const auto t0 = std::chrono::steady_clock::now();
+  od::BinWriter w;
+  od::putStateHeader(w);
+  w.put<std::int32_t>(round);
+  w.put<std::uint64_t>(mobSets.size());
+  stamSet.save(w);
+  for (const auto& m : mobSets) m->save(w);
+  w.put(stamRef);
+  for (const auto& m : ms) saveMobState(w, m);
+  const od::Manifest man{od::kVersion, round, ck.inputs, od::sha256Hex(w.data())};
+  const std::string dir = od::commitCheckpoint(
+      opt.outPrefix, round, {{"state.bin", w.data()}, {"params.toml", ck.params}, {"manifest.toml", od::manifestText(man)}},
+      [&](const std::string& tmp) { writeTopSnapshot(tmp, stamSet, mobSets, ms, opt, shift); });
+  od::logInfo(std::format("  checkpoint {} ({:.1f} MB state)  {:.2f} s", dir, static_cast<double>(w.data().size()) / 1e6,
+                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+}
+
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
 void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const od::Options& opt,
-               const od::FeParams& fp, std::uint64_t seed) {
+               const od::FeParams& fp, std::uint64_t seed, const Checkpointing& ck) {
   std::vector<od::Ad4Type> probe;
   for (const auto& m : mobSets)
     for (od::Ad4Type t : m->sys().typing(0).type)
@@ -670,7 +859,27 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   }
 
   float stamRef = std::numeric_limits<float>::infinity();  // fixed reference of RoundSample::stamRel (spec 9)
-  for (int round = 1; round <= opt.maxRound; ++round) {
+  int firstRound = 1;
+  if (!ck.resumeDir.empty()) {
+    const std::string path = od::checkpointDir(ck.resumeDir, ck.resumeRound) + "/state.bin";
+    std::string data = od::readFile(path);
+    if (od::sha256Hex(data) != ck.stateSha256) od::fail("{}: SHA-256 differs from manifest.toml (damaged checkpoint)", path);
+    od::BinReader r(std::move(data));
+    od::checkStateHeader(r);
+    if (r.get<std::int32_t>() != ck.resumeRound || r.get<std::uint64_t>() != mobSets.size())
+      od::fail("{}: round or MobM count differs from manifest.toml", path);
+    stamSet.load(r);
+    for (auto& m : mobSets) m->load(r);
+    stamRef = r.get<float>();
+    for (std::size_t i = 0; i < ms.size(); ++i)
+      loadMobState(r, ms[i], stamSet.sampleCount(), mobSets[i]->sampleCount(), mobSets[i]->sys().torsionCount());
+    if (!r.atEnd()) od::fail("{}: unexpected data at the end", path);
+    firstRound = ck.resumeRound + 1;
+    od::logInfo(std::format("Resumed from {} (round {} completed)", path, ck.resumeRound));
+    if (firstRound > opt.maxRound)
+      od::logInfo(std::format("  dock9c.maxRound {}: no further rounds", opt.maxRound));
+  }
+  for (int round = firstRound; round <= opt.maxRound; ++round) {
     od::logInfo(std::format("Round {} of {}:", round, opt.maxRound));
     // 9a: refill the dcss (spec 7.3).
     for (std::size_t i = 0; i < ms.size(); ++i) {
@@ -834,6 +1043,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5, shift));
     }
     od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));
+    writeCheckpoint(round, stamSet, mobSets, ms, stamRef, opt, ck, shift);
   }
 
   for (std::size_t i = 0; i < ms.size(); ++i) {
@@ -871,6 +1081,77 @@ void printDssp(const od::Topology& t) {
   od::logInfo("    DSSP" + line);
 }
 
+// SHA-256 of the input files (spec 16.3).
+std::vector<od::InputHash> inputHashes(const od::Options& opt) {
+  std::vector<od::InputHash> v;
+  auto add = [&](const std::string& role, const std::string& path) {
+    v.push_back({role, std::filesystem::absolute(path).lexically_normal().string(), od::sha256File(path)});
+  };
+  add("stamFile", opt.stamFile);
+  for (const auto& f : opt.mobmFiles) add("mobmFiles", f);
+  add("molConfig", opt.molConfig);
+  for (const auto& f : opt.ccd) add("ccd", f);
+  return v;
+}
+
+// --resume (spec 16.4): parameters of the last checkpoint, then the command line
+// (input files may be given again, e.g. when moved); only dock9c.maxRound may differ.
+od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpointing& ck) {
+  if (!cli.paramFile.empty()) od::fail("--paramFile cannot be used with --resume (the checkpoint parameters are used)");
+  if (!cli.outPrefix.empty()) od::fail("--outPrefix cannot be used with --resume (the run continues in the --resume directory)");
+  const std::string dir = cli.resume;
+  const int round = od::latestCheckpoint(dir);
+  if (round == 0) od::fail("--resume: no complete checkpoint in {}/checkpoint", dir);
+  const std::string cdir = od::checkpointDir(dir, round);
+  const od::Manifest man = od::readManifest(cdir + "/manifest.toml");
+  if (man.version != od::kVersion)
+    od::fail("{}: written by OmegaDocker {}, this is {}", cdir, man.version, od::kVersion);
+  std::vector<std::string> args{argv[0], "--paramFile=" + cdir + "/params.toml", "--outPrefix=" + dir};
+  for (int i = 1; i < argc; ++i)
+    if (!std::string_view(argv[i]).starts_with("--resume=")) args.push_back(argv[i]);
+  for (const auto& h : man.inputs) {
+    if (h.role == "stamFile" && cli.stamFile.empty()) args.push_back("--stamFile=" + h.path);
+    if (h.role == "mobmFiles" && cli.mobmFiles.empty()) args.push_back("--mobmFiles=" + h.path);
+    if (h.role == "molConfig" && cli.molConfig.empty()) args.push_back("--molConfig=" + h.path);
+  }
+  auto parse = [&](const std::vector<std::string>& a) {
+    std::vector<const char*> p;
+    for (const auto& s : a) p.push_back(s.c_str());
+    return od::parseCommandLine(static_cast<int>(p.size()), p.data());
+  };
+  od::Options opt = parse(args);
+  opt.resume = dir;
+  const od::Options stored = parse({argv[0], "--paramFile=" + cdir + "/params.toml"});
+  od::Options cmp = opt;
+  cmp.maxRound = stored.maxRound;
+  const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
+  if (a != b) {
+    auto lines = [](const std::string& s) {
+      std::vector<std::string> v;
+      std::string table;
+      std::size_t p = 0;
+      for (std::size_t q; (q = s.find('\n', p)) != std::string::npos; p = q + 1) {
+        if (q == p || s[p] == '#') continue;
+        if (s[p] == '[') table = s.substr(p + 1, q - p - 2) + ".";
+        else v.push_back(table + s.substr(p, q - p));
+      }
+      return v;
+    };
+    const auto la = lines(a), lb = lines(b);
+    std::string diff;
+    for (std::size_t k = 0; k < std::max(la.size(), lb.size()); ++k) {
+      const std::string x = k < la.size() ? la[k] : "", y = k < lb.size() ? lb[k] : "";
+      if (x != y) diff += std::format("\n  checkpoint: {}\n  now:        {}", x, y);
+    }
+    od::fail("--resume: only dock9c.maxRound may differ from the checkpoint parameters:{}", diff);
+  }
+  ck.resumeDir = dir;
+  ck.resumeRound = round;
+  ck.stateSha256 = man.stateSha256;
+  ck.inputs = man.inputs;
+  return opt;
+}
+
 int run(int argc, char** argv) {
   od::Options opt = od::parseCommandLine(argc, argv);
   if (opt.showHelp) {
@@ -881,6 +1162,8 @@ int run(int argc, char** argv) {
     od::logInfo(std::format("OmegaDocker {}", od::kVersion));
     return 0;
   }
+  Checkpointing ck;
+  if (!opt.resume.empty()) opt = resumeOptions(argc, argv, opt, ck);
   od::validateOptions(opt);
 
   od::CcdLibrary ccd;
@@ -937,6 +1220,17 @@ int run(int argc, char** argv) {
     od::fail("{}: {} problem(s) found:{}\nDefault molecule configuration written to {}", opt.molConfig, errors.size(),
              list, path);
   }
+  {
+    const auto now = inputHashes(opt);
+    if (!ck.resumeDir.empty()) {
+      if (now.size() != ck.inputs.size()) od::fail("--resume: the number of input files differs from the checkpoint");
+      for (std::size_t k = 0; k < now.size(); ++k)
+        if (now[k].role != ck.inputs[k].role || now[k].sha256 != ck.inputs[k].sha256)
+          od::fail("--resume: {} {} differs from the checkpoint ({}; SHA-256 {} vs {})", now[k].role, now[k].path,
+                   ck.inputs[k].path, now[k].sha256, ck.inputs[k].sha256);
+    }
+    ck.inputs = now;
+  }
   od::logInfo(std::format("Molecule configuration {}:", opt.molConfig));
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     const od::MolSettings& s = cfg->molecules[i];
@@ -976,7 +1270,8 @@ int run(int argc, char** argv) {
     const std::string path = opt.outPrefix + "/params.used.toml";
     std::ofstream f(path);
     if (!f) od::fail("cannot write {}", path);
-    f << od::paramsText(opt);
+    ck.params = od::paramsText(opt);
+    f << ck.params;
     od::logInfo(std::format("parameters used (defaults < {} < command line) written to {}",
                             opt.paramFile.empty() ? "no --paramFile" : opt.paramFile, path));
   }
@@ -1001,7 +1296,7 @@ int run(int argc, char** argv) {
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
   for (const auto& c : mobSets)
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
-  runRounds(*stamSet, mobSets, opt, opt.fe, seed);
+  runRounds(*stamSet, mobSets, opt, opt.fe, seed, ck);
   return 0;
 }
 

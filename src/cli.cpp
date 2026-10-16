@@ -399,6 +399,12 @@ const std::vector<CliOption>& cliOptions() {
       {"molConfig", "<file>", "Molecule configuration file (TOML)", false,
        [](Options& o, const std::string& v) { o.molConfig = v; }},
       {"outPrefix", "<path>", "Output directory; required", false, [](Options& o, const std::string& v) { o.outPrefix = v; }},
+      {"resume", "<path>",
+       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound may change", false,
+       [](Options& o, const std::string& v) {
+         if (v.empty()) fail("--resume requires a directory");
+         o.resume = v;
+       }},
       {"help", "", "Show this help", true, [](Options& o, const std::string&) { o.showHelp = true; }},
       {"version", "", "Show version", true, [](Options& o, const std::string&) { o.showVersion = true; }},
   };
@@ -705,7 +711,8 @@ std::string usageText() {
   std::string s = std::format(
       "OmegaDocker {}\n\n"
       "Usage: omegadocker --stamFile=<file> --mobmFiles=<file> [--mobmFiles=<file> ...] --outPrefix=<path>\n"
-      "                   [--paramFile=<file>] [--<table>_<key>=<value> ...]\n\n"
+      "                   [--paramFile=<file>] [--<table>_<key>=<value> ...]\n"
+      "       omegadocker --resume=<path> [--dock9c_maxRound=<n>]\n\n"
       "Every option takes its value after '='. A parameter <table>.<key> of the parameter file is\n"
       "overridden by --<table>_<key>=<value>; arrays are comma separated; booleans are true/false, 1/0 or yes/no.\n"
       "Priority: built-in default < --paramFile < command line.\n\nCommand line only:\n",

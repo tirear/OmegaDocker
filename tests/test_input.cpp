@@ -32,6 +32,7 @@
 #include "csgm1.hpp"
 #include "csgm2.hpp"
 #include "csgm3.hpp"
+#include "checkpoint.hpp"
 #include "dock9b.hpp"
 #include "dock9c.hpp"
 #include "log.hpp"
@@ -2869,3 +2870,76 @@ TEST_CASE("write_struct: PDB, mmCIF, SDF and mol2") {
   std::filesystem::remove_all(dir);
 }
 
+
+TEST_CASE("checkpoint: SHA-256, binary state and directories") {
+  CHECK(od::sha256Hex(std::string()) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  CHECK(od::sha256Hex(std::string("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  CHECK(od::sha256Hex(std::string("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  CHECK(od::sha256Hex(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  const auto dir = std::filesystem::temp_directory_path() / std::format("od_ckpt_{}", ::getpid());
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  {
+    std::ofstream f(dir / "in.txt", std::ios::binary);
+    f << "abc";
+  }
+  CHECK(od::sha256File((dir / "in.txt").string()) == od::sha256Hex(std::string("abc")));
+
+  od::BinWriter w;
+  od::putStateHeader(w);
+  w.put<int>(-7);
+  w.putVec(std::vector<float>{1.5f, -2.25f});
+  w.putVec(std::vector<int>{});
+  w.put<double>(0.1);
+  od::BinReader r(w.data());
+  od::checkStateHeader(r);
+  CHECK(r.get<int>() == -7);
+  CHECK(r.getVec<float>() == std::vector<float>{1.5f, -2.25f});
+  CHECK(r.getVec<int>().empty());
+  CHECK(r.get<double>() == 0.1);
+  CHECK(r.atEnd());
+  CHECK_THROWS_AS(r.get<char>(), od::Error);
+  od::BinReader cut(w.data().substr(0, w.data().size() - 3));
+  od::checkStateHeader(cut);
+  cut.get<int>();
+  cut.getVec<float>();
+  cut.getVec<int>();
+  CHECK_THROWS_AS(cut.get<double>(), od::Error);
+  od::BinReader junk(std::string(16, 'x'));
+  CHECK_THROWS_AS(od::checkStateHeader(junk), od::Error);
+
+  const od::Manifest m{"0.40.0", 3, {{"stamFile", "/a b/s.cif", "11"}, {"mobmFiles", "/m'1.sdf", "22"}}, "ff"};
+  const std::string out = dir.string();
+  CHECK(od::latestCheckpoint(out) == 0);
+  for (int round : {1, 2, 3}) {
+    od::Manifest mr = m;
+    mr.round = round;
+    const auto d = od::commitCheckpoint(out, round, {{"state.bin", "S"}, {"manifest.toml", od::manifestText(mr)}},
+                                        [](const std::string& tmp) { std::ofstream(tmp + "/extra.txt") << "e"; });
+    CHECK(d == od::checkpointDir(out, round));
+    CHECK(std::filesystem::exists(d + "/extra.txt"));
+  }
+  CHECK(std::filesystem::read_symlink(dir / "checkpoint" / "last") == "round_3");
+  CHECK(od::latestCheckpoint(out) == 3);
+  // An incomplete directory (no manifest) and a temporary one are ignored.
+  std::filesystem::create_directories(dir / "checkpoint" / "round_9");
+  std::filesystem::create_directories(dir / "checkpoint" / "round_10.tmp");
+  CHECK(od::latestCheckpoint(out) == 3);
+  const od::Manifest back = od::readManifest(od::checkpointDir(out, 3) + "/manifest.toml");
+  CHECK(back.version == "0.40.0");
+  CHECK(back.round == 3);
+  CHECK(back.stateSha256 == "ff");
+  REQUIRE(back.inputs.size() == 2);
+  CHECK(back.inputs[0].path == "/a b/s.cif");
+  CHECK(back.inputs[1].role == "mobmFiles");
+  CHECK(back.inputs[1].path == "/m'1.sdf");
+  CHECK(back.inputs[1].sha256 == "22");
+  CHECK(od::readFile(od::checkpointDir(out, 2) + "/state.bin") == "S");
+  // Rewriting a round replaces it.
+  od::commitCheckpoint(out, 2, {{"state.bin", "T"}, {"manifest.toml", od::manifestText(m)}}, {});
+  CHECK(od::readFile(od::checkpointDir(out, 2) + "/state.bin") == "T");
+  CHECK_FALSE(std::filesystem::exists(od::checkpointDir(out, 2) + "/extra.txt"));
+  CHECK(std::filesystem::read_symlink(dir / "checkpoint" / "last") == "round_2");
+  std::filesystem::remove_all(dir);
+}

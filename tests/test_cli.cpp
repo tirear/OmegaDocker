@@ -59,6 +59,14 @@ TEST_CASE("cli: required options and values") {
   CHECK(t.stamFlexMargin == doctest::Approx(6.5));
 }
 
+TEST_CASE("cli: --resume") {
+  auto o = parse({"--resume=/tmp/run1", "--dock9c_maxRound=9"});
+  CHECK(o.resume == "/tmp/run1");
+  CHECK(o.maxRound == 9);
+  CHECK_THROWS_AS(parse({"--resume="}), od::Error);
+  CHECK_THROWS_AS(parse({"--resume"}), od::Error);
+}
+
 TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(parse({"--stamFile=a", "--stamFile=b"}), od::Error);
   CHECK_THROWS_AS(parse({"--unknown"}), od::Error);

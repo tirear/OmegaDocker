@@ -48,6 +48,7 @@ struct Options {
   std::vector<std::string> mobmFiles;  // --mobmFiles
   std::string molConfig;
   std::string outPrefix;
+  std::string resume;                  // --resume: output directory of the interrupted run (spec 16.4)
   // --paramFile and command line.
   std::vector<std::string> ccd;
   std::optional<Vec3> boxCenter;

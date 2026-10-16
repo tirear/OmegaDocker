@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.38 |
+| 文件版本 | 1.39 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1073,6 +1073,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 排序：9b（E_9b）與 `dock9d.freeEnergy` 啟用的每種方法，各自對整個 topSampleSet 由低到高排序（穩定排序，相同值依 9b 順序）。
 - 輸出樣本：每種排序的前 `output.minPerRank` 個（預設 40）的聯集；topSampleSet 不足時依實際數量。
 - 輸出目錄：每個 MobM 一個 `<outPrefix>/<MobM id>/`；MobM id 中英數字與 `._+-` 以外的字元改為 `_`（例：`mobm_BTN_ideal.sdf_1`）。
+- 寫出前先刪除該目錄中先前執行留下的 `pose_*`、`stam_*`、`summary.tsv`、`rank_*.tsv`（例如 `--resume` 前以較小 `maxRound` 完成的輸出），避免殘留舊檔；其他檔案不動。
 - 結構檔：
   - 每個輸出樣本：MobM 座標（含所有氫原子），檔名 `pose_NNNN`，編號依 9b 排序在輸出樣本中的名次（從 1 起）。
   - 每個被輸出樣本使用的 StaM 構型：`stam_<StaM 構型樣本 ID>`。
@@ -1178,7 +1179,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 布林值：`true`/`false`、`1`/`0`、`yes`/`no`（參數檔中只能寫 TOML 的 `true`/`false`）。
   - 陣列以逗號分隔：`--box_center=0,0,0`、`--ccd=a.cif,b.cif`、`--dock9d_freeEnergy=adgpu_16,od_0100`；空值為空陣列。
   - 同一選項出現多次時，最後一個有效；`--paramFile` 在命令列中的位置不影響優先順序。
-- 只能在命令列的選項：`--paramFile`、`--stamFile`、`--mobmFiles`（可多次）、`--molConfig`、`--outPrefix`、`--resume`（未實作）、`--help`、`--version`。
+- 只能在命令列的選項：`--paramFile`、`--stamFile`、`--mobmFiles`（可多次）、`--molConfig`、`--outPrefix`、`--resume`、`--help`、`--version`。
 - 參數檔可有 `formatVersion = 1`（可省略；有寫時必須為 1）。`ccd` 等檔案路徑相對於執行時的目前目錄。
 - 檢查：
   - 型別與數值格式：參數檔的問題（附行號）與命令列的問題（附原始引數）一起列出後結束，在讀取分子之前完成。
@@ -1195,7 +1196,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | `--molConfig` | 無 | 5 |
 | — | `--outPrefix` | 必填 | 10 |
 | — | `--paramFile` | 無 | 14.1 |
-| — | `--resume`（未實作） | 無 | 16 |
+| — | `--resume` | 無 | 16 |
 | `seed` | `--seed` | 隨機（寫入執行紀錄與 `params.used.toml`） | 7.9 |
 | `ccd` | `--ccd` | `[]` | 3.1 |
 | `box.center`、`box.size` | `--box_center`、`--box_size` | 必填 | 3.3 |
@@ -1399,9 +1400,25 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 亂數狀態 | 所有亂數產生器狀態（v0.34.0 未保存；新版保存，使接續結果與不中斷時相同） |
 
 - 網格不存入檢查點（可由 StaM 構型重算）。
+- 檔案（`round_<r>/`）：
+  - `manifest.toml`：`version`、`round`（已完成輪次）、`state_sha256`、`[[inputs]]`（`role` = `stamFile`／`mobmFiles`／`molConfig`／`ccd`，絕對路徑，SHA-256）。
+  - `params.toml`：全部參數（同 `params.used.toml` 的格式，含實際使用的 `seed`）。
+  - `state.bin`：二進位狀態，開頭為識別碼、位元組順序標記與格式版本（1）；以主機位元組順序寫出，在不同位元組順序的機器上讀取時報錯。
+  - `<MobM 目錄>/topSampleSet.tsv`：目前 topSampleSet 的全部樣本（rank、結構檔、StaM／MobM 樣本 ID、9c 排序能量 `E_9b_grid`、inter、inter_clash、mobm_intra、stam_term），前 `output.minPerRank` 個另寫結構檔 `top_<rank>`、`stam_<id>`（格式依 `output.*`）；未做 9d 對稱篩選與精確重算。
+- 亂數狀態：所有亂數都是計數器式（7.9、8.3）。9a 只需保存每個構型集（StaM 群、各 MobM）的樣本計數器；9b 的串流由（輪次、MobM、StaM 樣本 ID、MobM 樣本 ID）決定，不需保存。另保存 7.4 的 nextL1 與是否已做過第一次補充。
+- 其他狀態：StaM 分子內能量的固定參考值（9）、各 MobM 的已對接構型配對最低能量（posm2 略過已對接配對用）、上一輪 dcss 的本輪最低排序能量（csgm2 適應度）。
+- `state.bin` 的 SHA-256 記在 `manifest.toml`；接續時不一致 → 報錯（檢查點損壞）。
+- 寫入順序：檔案先寫入 `round_<r>.tmp/`，完成後 rename 為 `round_<r>/`（已存在時先刪除），再以暫存 symlink rename 更新 `last`。
 
 ### 16.4 接續
 - `--resume=<outPrefix>`（只能在命令列）：從最後一個完整的檢查點的下一輪開始。
+  - 「最後一個完整的檢查點」：`checkpoint/` 下有 `manifest.toml` 的 `round_<r>/` 中 r 最大者（不依賴 `last`，因此 rename 之後、更新 `last` 之前中斷也能取得最新一輪）；`.tmp` 目錄忽略。
+  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
+  - 不可同時使用 `--paramFile`、`--outPrefix`（報錯）；輸出寫回 `--resume` 指定的目錄。
+  - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
+  - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
+  - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
+  - `gpuMemLimit`（`gpu.memLimit`）尚未實作，目前只有 `maxRound` 可修改。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpuMemLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -1546,3 +1563,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.36 | 2026-10-16 | 參數檔 `--paramFile`（TOML）涵蓋所有執行參數，命令列 `--<表>_<鍵>=<值>` 覆寫；取代 `--feParamFile` 與 `--fe*` 選項，舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；寫出 `params.used.toml`（取代 `feparams.used.toml`）；隨機 seed 限 63 位元（14.1、14.2，並更新各節的參數名稱） |
 | 1.37 | 2026-10-16 | 實作 csgm2（7.6）：適應度為上一輪 9c 的本輪最低排序能量；AutoDock-GPU 1.6 的錦標賽、兩點／單點交配與突變只作用在兩面角；`cisTrans` 的 ω 突變為 0°／180° 切換；不做菁英保留；StaM 群以觸發補充的 MobM 的 dcss 為父代（7.3）；`grow` 搭配 csgm2 時失敗即捨棄（7.8）；新增 `csgmGA`、`tournamentRate`、`crossoverRate`、`mutationRate`、`absMaxDang`（14.2） |
 | 1.38 | 2026-10-16 | 實作 csgm3（7.7）：線的編號與亂數（每條線一個亂數狀態）、r 為常態分佈、D = 1 與端點相同時的處理、`cisTrans` 的 ω 取較近的 0°／180°；csgm3 每次的 L1 固定為 k(k−1)·n，不使用 7.4 的 nextL1（7.4）；`csgmGA` 接受 `csgm3`，新增 `peMaxOffset`、`peCoverAngle`、`peSampleNumPerLine`（14.2） |
+| 1.39 | 2026-10-16 | 實作檢查點與 `--resume`（16）：檔案內容與格式、亂數狀態只需保存 9a 計數器、寫入順序、以有 `manifest.toml` 的最大輪次為最新檢查點、接續時的參數比較（只忽略 `maxRound`，同值可重複指定）、可重新指定搬移後的輸入檔（SHA-256 須相同）、不可同時使用 `--paramFile`／`--outPrefix`；9d 輸出前刪除舊的輸出檔（10.3） |
