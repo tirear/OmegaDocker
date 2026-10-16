@@ -166,7 +166,7 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
     std::string list;
     for (std::size_t i = 0; i < fixedClashes.size() && i < 50; ++i) list += fixedClashes[i];
     if (fixedClashes.size() > 50) list += std::format("\n  ... ({} more)", fixedClashes.size() - 50);
-    fail("input structure: {} pair(s) of heavy atoms closer than --clashDistance {} Å whose distance cannot change "
+    fail("input structure: {} pair(s) of heavy atoms closer than energy.clashDistance {} Å whose distance cannot change "
          "(make torsions between them rotatable or fix the input):{}",
          fixedClashes.size(), params_.clashDistance, list);
   }

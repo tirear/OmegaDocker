@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.35 |
+| 文件版本 | 1.36 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -58,7 +58,7 @@
 
 規則：
 - **不自行推斷鍵級**。mmCIF 中查不到 CCD 定義的殘基 → 報錯並結束。
-- 內附標準胺基酸、核苷酸的 CCD 子集；使用者可用 `--ccd <file>` 提供額外的 CCD 檔。
+- 內附標準胺基酸、核苷酸的 CCD 子集；使用者可用 `ccd <file>` 提供額外的 CCD 檔。
 - **氫原子由使用者提供**（質子化狀態由使用者負責）。程式不新增、不刪除氫原子。
 - 鍵長、鍵角必須合理；程式不修正。
 
@@ -86,13 +86,13 @@
 ### 3.2 分子的劃分與角色指定
 
 - 一個 **分子** = 鍵結圖中的一個連通元件（connected component）。
-- `--stamFile <file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
-- `--mobmFiles <file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
+- `--stamFile=<file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
+- `--mobmFiles=<file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
 - 每個 MobM 視為獨立的對接任務（見第 11 節）。
 
 ### 3.3 對接範圍
 
-- `--boxCenter x,y,z`、`--boxSize x,y,z`（Å）。
+- `box.center x,y,z`、`box.size x,y,z`（Å）。
 - 能量網格與距離網格涵蓋此範圍。
 - posm1、posm2 只產生使 MobM 所有探針原子都在範圍內的 pos（8.4）；8.5 仍保留「超出範圍」檢查。
 
@@ -131,7 +131,7 @@
 ### 4.3 ω 檢查
 
 - 若 ω 為 `fixed`，且輸入角度與 0° 和 180° 的差距 **都** 大於 `omegaTolerance`（預設 30°）→ 警告並結束程式。
-- 使用 `--acceptNonPlanarOmega` 可接受此情況並繼續。
+- 使用 `topology.acceptNonPlanarOmega` 可接受此情況並繼續。
 
 ### 4.4 側鏈與非主鏈分子的兩面角分類
 
@@ -167,7 +167,7 @@
 - 斷開後，環內鍵依 4.4 重新判斷是否可轉動。
 - `ringBreak` 的鍵必須在環內（以未斷開的鍵結圖判斷），且不可為芳香鍵或金屬配位鍵（金屬配位鍵見 4.7 的 `metalBond`）。
 - 被斷開的鍵（`ringBreak`、`chainBreak`）本身的兩面角由閉合約束決定（4.8），不可設為可轉動。
-- 以距離約束恢復斷鍵，方式見 4.8。每對約束原子：能量 `E = G·d²`、梯度 `2G·d`（`G` 預設 200，`--closureG`）。
+- 以距離約束恢復斷鍵，方式見 4.8。每對約束原子：能量 `E = G·d²`、梯度 `2G·d`（`G` 預設 200，`energy.closureG`）。
 - 源自 OmegaDocker v0.34.0 的 G 原子對做法（`pdbqtAddDistFix.pl`），新版不再需要前處理腳本，並修正兩個已知問題：
   1. 梯度只有正確值一半（`calcLigandEneGra.cu` 中累加 `G·d`）。
   2. 「距離過遠」判斷因 `else if` 結構，實際門檻變成 `collDistance` 而非 `inRangeDist`。
@@ -263,7 +263,7 @@
   - 斷鍵 A–B 的兩端各檢查一次：往 A 建構時目標為 B，往 B 建構時目標為 A；目標原子尚未建構時不檢查。
   - 目前末端：扭轉樹中通往該端的路徑上、本段所含最深的兩面角的移動側鍵原子。
   - 剩餘殘基數：從目前末端所在殘基到目標原子所在殘基（同一條鏈上，含兩端）的殘基數；不在同一條鏈時不檢查。
-  - 命令列：`--reachPerRes <蛋白質>,<核酸>`。
+  - 命令列：`topology.reachPerRes <蛋白質>,<核酸>`。
 
 ---
 
@@ -448,7 +448,7 @@ flowchart TD
 
 ### 7.0 csgm 參數的分組
 
-7.4 的批次與上限（`MaxL1TotalNum`、`MaxL1BatchNum`）及 7.3–7.8 的 csgm 參數與 7.2 相同分為兩組：StaM 群一組（前綴 `stam`），所有 MobM 共用一組（前綴 `mobm`）。本章中以大寫開頭、不帶前綴的名稱（如 `CsgmBuild`、`GrowMaxRetry`）指該分子所屬的一組，例如 `--stamCsgmBuild`、`--mobmCsgmBuild`。
+7.4 的批次與上限（`MaxL1TotalNum`、`MaxL1BatchNum`）及 7.3–7.8 的 csgm 參數與 7.2 相同分為兩組：StaM 群一組（前綴 `stam`），所有 MobM 共用一組（前綴 `mobm`）。本章中以大寫開頭、不帶前綴的名稱（如 `CsgmBuild`、`GrowMaxRetry`）指該分子所屬的一組，例如 `stam.csgmBuild`、`mobm.csgmBuild`。
 
 ### 7.1 樣本表示
 
@@ -489,9 +489,9 @@ if |L2pool| < need:
 從 L2pool 取出 need 個樣本移入 dcss（取出順序：先進先出）
 ```
 
-- 「使用者指定」：StaM 群用 `--stamCsgmGA`，MobM 用 `--mobmCsgmGA`。
+- 「使用者指定」：StaM 群用 `stam.csgmGA`，MobM 用 `mobm.csgmGA`。
 - csgm1 的父代不依賴 dcss。
-- 目前尚未實作 csgm2、csgm3，也尚未提供 `--stamCsgmGA`、`--mobmCsgmGA`：所有補充都使用 csgm1。
+- 目前尚未實作 csgm2、csgm3，也尚未提供 `stam.csgmGA`、`mobm.csgmGA`：所有補充都使用 csgm1。
 - csgm2 的父代、csgm3 的端點 = 目前 dcss 中的樣本（必定 ≥ `eliteConfSampleNum` ≥ 2 個，且都已有 9b 能量）。
 
 ### 7.4 下一批 L1 數量
@@ -505,10 +505,10 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ```
 
 - `nowL2`：加入後 L2 pool 的樣本數；`addedL2`：本批新增數；`L1`：本批產生數。
-- `MaxL1BatchNum`：由 `--gpuMemLimit` 推算的單批上限；超過時分批處理。CPU 版以 `--stamMaxL1BatchNum`／`--mobmMaxL1BatchNum`（預設 65536）指定。
+- `MaxL1BatchNum`：由 `gpu.memLimit` 推算的單批上限；超過時分批處理。CPU 版以 `stam.maxL1BatchNum`／`mobm.maxL1BatchNum`（預設 65536）指定。
 - 一批（L1 個）全部處理完才檢查是否達到 `minL2confSampleNum`，因此 L2 pool 可能超過該數。
 - 單次補充的累計 L1 達 `MaxL1TotalNum` 仍未達到 `minL2confSampleNum` → 報錯並結束；最後一批的數量不超過剩餘額度。
-- `MaxL1TotalNum`（`--stamMaxL1TotalNum`／`--mobmMaxL1TotalNum`，預設 10⁹）：單次補充的累計 L1 上限；達到時報錯並結束（避免產率為 0 時無限迴圈）。
+- `MaxL1TotalNum`（`stam.maxL1TotalNum`／`mobm.maxL1TotalNum`，預設 10⁹）：單次補充的累計 L1 上限；達到時報錯並結束（避免產率為 0 時無限迴圈）。
 
 ### 7.5 csgm1：憑空產生
 
@@ -580,7 +580,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    6. 新樣本：`S + m·(Ltot/n)·w`，m = 0 … n−1，每一維 wrap 到 (−180°, 180°]。
 3. 新樣本數 = `k(k−1)·n`；n = `PeSampleNumPerLine`（預設 4）。
 
-- **每次產生全部 k(k−1) 條線**，依 `--gpuMemLimit` 分批在 GPU 上即時產生、篩選，只有通過的樣本寫入 L2 pool。
+- **每次產生全部 k(k−1) 條線**，依 `gpu.memLimit` 分批在 GPU 上即時產生、篩選，只有通過的樣本寫入 L2 pool。
 - 規模參考（k = 2000、n = 4）：約 1,600 萬個 L1 樣本；記憶體由分批控制，計算時間隨樣本數線性增加。
 
 ### 7.8 建構方式 `CsgmBuild`
@@ -646,7 +646,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 排除 1-2、1-3、1-4（以全部鍵判斷，含已斷開的鍵與金屬配位鍵）。
 - 排除距離不隨兩面角改變的原子對（同 AutoDock-GPU `get_intraE_contributors` 的情況 1、3、4）：同一剛體段的原子；兩面角軸上的原子與軸另一側剛體段的原子。所有 StaM 的錨點段同屬固定座標，StaM 群中不同分子的固定部分之間也排除。
 - 碰撞懲罰只用於上述原子對中的重原子對。
-- 輸入結構檢查：距離不隨兩面角改變的原子對（不含 1-2、1-3、1-4）中，若有重原子對距離 < `--clashDistance`，列出這些原子對（最多 50 對）並報錯結束；StaM 群與每個 MobM 各自檢查。
+- 輸入結構檢查：距離不隨兩面角改變的原子對（不含 1-2、1-3、1-4）中，若有重原子對距離 < `energy.clashDistance`，列出這些原子對（最多 50 對）並報錯結束；StaM 群與每個 MobM 各自檢查。
 - 閉合用的虛擬複製原子不參與上述能量。
 
 **最佳化變數**：只有該分子的兩面角（不含平移、定向）。
@@ -664,7 +664,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 每步計算一次能量與梯度；`confMinMaxStep = 0` 時只計算能量。
 - 回傳最佳化過程中能量最低的構型（不一定是最後一步）。
 
-**亂數**：每個樣本的亂數由 (`--seed`, 分子串流, 樣本序號) 決定，與執行緒數及分批方式無關；StaM 群為串流 0，第 i 個 MobM 為串流 i。未指定 `--seed` 時隨機產生，並寫入執行紀錄。
+**亂數**：每個樣本的亂數由 (`seed`, 分子串流, 樣本序號) 決定，與執行緒數及分批方式無關；StaM 群為串流 0，第 i 個 MobM 為串流 i。未指定 `seed` 時隨機產生，並寫入執行紀錄。
 
 ### 7.10 StaM 的特殊情況
 
@@ -758,7 +758,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 定向放不下時，該 L1pos 計為「超出範圍」並捨棄，不重新抽定向（避免定向分佈偏向放得下的定向）。
 - 亂數：第 k 個 L1pos 只由 `(seed, 構型配對的串流, k)` 決定；串流由（輪次（從 1 起）、MobM 編號（從 0 起）、StaM 構型樣本 ID、MobM 構型樣本 ID）雜湊而得，與執行緒數無關。
 - 數量：`posm1SampleNum`（每個構型配對，預設 1000，含捨棄者）。
-- 所有 L1pos 都被捨棄時輸出警告，提示 `--boxSize` 可能太小。
+- 所有 L1pos 都被捨棄時輸出警告，提示 `box.size` 可能太小。
 
 #### 8.4.2 posm2：均勻完整取樣
 - 定向：Hopf 格點（`rotStep`，預設 7.5°）。
@@ -863,8 +863,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 **分批（sampleBuffer）**：
 - 9b 產生的對接樣本先放入每個 MobM 各自的 sampleBuffer；每當其中的樣本數 ≥ `sampleBufferNum`，就先對「目前的 topSampleSet ∪ sampleBuffer」執行步驟 1–4（合併時 topSampleSet 在前），清空 sampleBuffer 後回到 9b 繼續；本輪全部對接完後，再對剩下的樣本執行一次步驟 1–4，然後做步驟 5。
-- 中間的 9c（本輪最後一次以外）在步驟 4 保留 `midTopSampleFactor` × `topSampleNum` 個；本輪最後一次保留 `topSampleNum` 個。`midTopSampleFactor` 預設 1（每次都保留 `topSampleNum` 個）；使用 `--midKeepSkipped` 時預設 2。不使用 `--midKeepSkipped` 時，大於 1 實測無明顯改善（見下），僅供實驗。
-- 保留池（`--midKeepSkipped`，預設關閉）：中間的 9c 不只保留通過多樣性篩選的樣本，也保留被跳過的樣本。
+- 中間的 9c（本輪最後一次以外）在步驟 4 保留 `midTopSampleFactor` × `topSampleNum` 個；本輪最後一次保留 `topSampleNum` 個。`midTopSampleFactor` 預設 1（每次都保留 `topSampleNum` 個）；使用 `dock9c.midKeepSkipped` 時預設 2。不使用 `dock9c.midKeepSkipped` 時，大於 1 實測無明顯改善（見下），僅供實驗。
+- 保留池（`dock9c.midKeepSkipped`，預設關閉）：中間的 9c 不只保留通過多樣性篩選的樣本，也保留被跳過的樣本。
   1. 合併「保留池 ∪ sampleBuffer」（保留池在前，本輪開始時為上一輪的 topSampleSet），依能量穩定排序。
   2. 執行多樣性篩選，直到保留 `midTopSampleFactor` × `topSampleNum` 個；最後一個保留樣本的能量為 E_cut（保留數不足時 E_cut = +∞）。
   3. 新的保留池 = 所有能量 ≤ E_cut 的樣本（保留的與被跳過的）。
@@ -877,10 +877,10 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 9b 在一個構型配對內也分批最佳化：每批 `sampleBufferNum` 個 L2pos（依 L1pos 序號），每批結束後把對接樣本放入 sampleBuffer 並檢查是否達到上限。批次邊界只由對接順序決定，與執行緒數無關。
 - 分批的結果與一次做完不一定相同（9b 的對接樣本相同：每個樣本的最佳化只取決於 seed、構型配對與 L1pos 序號）。不使用多樣性篩選時兩者相同。差異有兩個來源：
   - 截掉後空出位置：某次 9c 中樣本 S 排在保留數之外而被丟棄；之後更低能量的樣本 L 使已保留的 K 被跳過，空出位置。一次做完時 S 會入選。`midTopSampleFactor` > 1 針對此來源。
-  - 被之後消失的樣本擋掉：S 因與已保留的 K 太相似而被跳過；之後 K 又因更低能量的 L 被跳過，而 S 與 L 不相似。一次做完時 S 會入選。此來源與保留數無關；`--midKeepSkipped` 針對此來源。
+  - 被之後消失的樣本擋掉：S 因與已保留的 K 太相似而被跳過；之後 K 又因更低能量的 L 被跳過，而 S 與 L 不相似。一次做完時 S 會入選。此來源與保留數無關；`dock9c.midKeepSkipped` 針對此來源。
 - 步驟 5 的本輪最低能量跨批累計，不受分批影響。
 - `sampleBufferNum` 太小時，每批可平行處理的樣本少，平行效率較差。
-- 實測（BTN 對 2KJJ，StaM 不可動，posm2、`--rotStep 15`、`--posStep 2`、`--mobmDockingConfSampleNum 4`，1 輪 5,444,698 個對接樣本；CPU 執行，9b 約 290–298 s，各設定相同）。「分批」為 `sampleBufferNum` 65536（`topSampleNum` 20000 時實際為 max(4, `midTopSampleFactor` + 2) × 20000，即 ×1、×2 為 80000，×4 為 120000）；「一次」為 `sampleBufferNum` 2,000,000,000，即全部對接完才執行 9c。「共同」：最終 topSampleSet（9d 篩選後）中與「一次」相同的樣本數；「較差名次」：依能量排序後逐名次比較，能量高於「一次」的名次數。
+- 實測（BTN 對 2KJJ，StaM 不可動，posm2、`dock9b.rotStep 15`、`dock9b.posStep 2`、`mobm.dockingConfSampleNum 4`，1 輪 5,444,698 個對接樣本；CPU 執行，9b 約 290–298 s，各設定相同）。「分批」為 `sampleBufferNum` 65536（`topSampleNum` 20000 時實際為 max(4, `midTopSampleFactor` + 2) × 20000，即 ×1、×2 為 80000，×4 為 120000）；「一次」為 `sampleBufferNum` 2,000,000,000，即全部對接完才執行 9c。「共同」：最終 topSampleSet（9d 篩選後）中與「一次」相同的樣本數；「較差名次」：依能量排序後逐名次比較，能量高於「一次」的名次數。
 
   | topSampleNum | 方式 | 9c 次數 | 9c 時間 | 主機記憶體 | topSampleSet 最高能量 | 最終數 | 共同 | 較差名次 |
   |---|---|---|---|---|---|---|---|---|
@@ -903,7 +903,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
   （×n：`midTopSampleFactor` = n。能量單位 kcal/mol。）
 
-  保留池（`--midKeepSkipped`；K×n：`midTopSampleFactor` = n；`sampleBufferNum` 同上，保留池上限 = `sampleBufferNum`；「保留池」：最大保留池大小；「相同」：執行紀錄的 same as a single 9c）：
+  保留池（`dock9c.midKeepSkipped`；K×n：`midTopSampleFactor` = n；`sampleBufferNum` 同上，保留池上限 = `sampleBufferNum`；「保留池」：最大保留池大小；「相同」：執行紀錄的 same as a single 9c）：
 
   | topSampleNum | 方式 | 9c 時間 | 主機記憶體 | topSampleSet 最高能量 | 最終數 | 共同 | 較差名次 | 保留池 | E_drop | 相同 |
   |---|---|---|---|---|---|---|---|---|---|---|
@@ -945,8 +945,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 9c 時間增加為不使用保留池的 1–6 倍，但仍不到總時間的 8%。
 - 使用建議（主機記憶體與 topSampleSet 完整度的取捨）：
   - 只需要最佳的少數結果：預設（不使用保留池）即可，主機記憶體最少。
-  - 需要完整的 topSampleSet（例如大量候選結合點位）：使用 `--midKeepSkipped`，並視記憶體加大 `--sampleBufferNum`；執行紀錄顯示「not guaranteed」時，表示加大 `--sampleBufferNum` 仍可能改善。保留池大小可參考執行紀錄的 largest pool。
-  - 記憶體足夠時，可直接以很大的 `--sampleBufferNum` 一次做完（對接樣本約每個 0.4 KB，以本例估計）。
+  - 需要完整的 topSampleSet（例如大量候選結合點位）：使用 `dock9c.midKeepSkipped`，並視記憶體加大 `dock9c.sampleBufferNum`；執行紀錄顯示「not guaranteed」時，表示加大 `dock9c.sampleBufferNum` 仍可能改善。保留池大小可參考執行紀錄的 largest pool。
+  - 記憶體足夠時，可直接以很大的 `dock9c.sampleBufferNum` 一次做完（對接樣本約每個 0.4 KB，以本例估計）。
 4. **取前 `topSampleNum` 個** 為新的 topSampleSet。
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
@@ -989,7 +989,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ### 10.2 結合自由能
 
-- `--freeEnergy <list>`：`adgpu_16`、`od_0100`，以逗號分隔；`none` 表示不計算。預設 `od_0100`。
+- `dock9d.freeEnergy <list>`：`adgpu_16`、`od_0100`，以逗號分隔；`none` 表示不計算。預設 `od_0100`。
 - 兩種方法都不計入碰撞懲罰與閉合約束；含碰撞懲罰的樣本在輸出表中標記（`clash = yes`）。
 - 其他評分函數留待後續版本（18 節 F2）。
 
@@ -1009,7 +1009,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
     - 預設暫定 4（1/RT 在 298.15 K 時為 1.6878），**尚未校準**，之後擬合最佳化。
     - 與熵項的 RT 無關：`temperature` 只決定 −TS 的 RT（R = 1.987204259 × 10⁻³ kcal/(mol·K)）。
     - `rrtScaling` ≥ 0；0 時所有格點權重相同，f_i = 1。
-  - 可佔據比例：f_i = Σ_k w_k / 點數，介於 (0, 1]；步長變小時收斂，不受 `--gridSpacing` 影響。
+  - 可佔據比例：f_i = Σ_k w_k / 點數，介於 (0, 1]；步長變小時收斂，不受 `grid.spacing` 影響。
 - 熵項（未乘係數）：(−TS)_X = −RT × Σ_{i∈X} ln f_i（≥ 0），X 為 StaM 群或 MobM 的重原子。v0.33.0 的 nts 少了負號，且 `molRandomness` 在每個原子重設，只計入最後一個原子；兩者在此修正。
   - 複合物中的 (−TS)_X 依原子所屬分子分為 StaM 與 MobM 兩部分，搖動時兩者都受對方影響。距離所有 MobM 原子 ≥ 20.48 Å + `shaking.radius` 的 StaM 原子不受 MobM 影響，直接使用該 StaM 構型單獨時的值（結果相同）。
 - 能量項 t = vdW、hbond、elec、desolv（AD4 各項，已含 AD4 權重；hbond 為 12-10 原子對）。
@@ -1041,24 +1041,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | `od_0100.shaking.step` | 0.2 Å | 搖動格點間距（> 0） |
 | — | `od_0100.shaking.rrtScaling` | 4（暫定） | 搖動權重的 reverse RT scaling（≥ 0，mol/kcal） |
 
-- 預設值與 1.32 的 `enthalpyScaling` 0.7564（來源待查）、`entropyScaling` 0.9 結果相同，**尚未校準**；CUDA 版與 OpenCL 版完成後，以標準資料最佳化。
-- 參數檔 `--feParamFile <file>`（TOML）與命令列：
-  - 優先順序：內建預設 < 參數檔 < 命令列。參數檔中未列出的鍵維持預設；同一選項在命令列出現多次時，最後一個有效。
-  - 參數檔只能有 `[od_0100]`、`[od_0100.inter]`、`[od_0100.intra]`、`[od_0100.entropy]`、`[od_0100.shaking]` 與上兩表的鍵；值為有限的數（整數亦可），`unboundCandidateNum` 須為整數；係數不限正負（擬合可能得到負值），其他參數的範圍見上表。
-  - 每個鍵都有對應的命令列選項，用來覆寫參數檔：
-
-| 選項 | 參數檔鍵 |
-|---|---|
-| `--feC0`、`--feTors` | `od_0100.c0`、`od_0100.tors` |
-| `--feInterVdw`、`--feInterHbond`、`--feInterElec`、`--feInterDesolv` | `od_0100.inter.*` |
-| `--feIntraVdw`、`--feIntraHbond`、`--feIntraElec`、`--feIntraDesolv` | `od_0100.intra.*` |
-| `--feEntropyStam`、`--feEntropyMobm` | `od_0100.entropy.*` |
-| `--temperature`、`--unboundCandidateNum` | `od_0100.temperature`、`od_0100.unboundCandidateNum` |
-| `--shakingRadius`、`--shakingStep`、`--rrtScaling` | `od_0100.shaking.*` |
-
-  - 檢查在合併後進行：參數檔的問題（附行號）與命令列的問題（附鍵與給定值）一起列出後結束。參數檔在讀取分子後、建立分子設定檔前讀取，錯誤不會等到 9d 才出現。
-  - 啟用 od_0100 時，合併後實際使用的值寫入 `<outPrefix>/feparams.used.toml`（含公式說明），可作為參數檔的範本，也可用來重現結果。
-- 係數都是線性的：`summary.tsv` 輸出未乘係數的各分項（10.3），一次對接的結果即可離線以最小平方法擬合，不需重新執行。`shaking.radius`、`shaking.step`、`shaking.rrtScaling`、`unboundCandidateNum` 改變時需重新計算；`temperature` 只經由 RT 線性影響熵項，與 s_X 的效果重疊。
+- 係數預設值沿用 1.32 的 `enthalpyScaling` 0.7564（來源待查）與 `entropyScaling` 0.9；所有預設值（含 `shaking.rrtScaling` 4）**尚未校準**，CUDA 版與 OpenCL 版完成後，以標準資料最佳化。
+- 這些參數是參數檔（第 14 節）的 `[od_0100]` 表，命令列以 `--od_0100_<鍵>=<值>` 覆寫（例如 `--od_0100_shaking_rrtScaling=2`、`--od_0100_inter_vdw=0.5`）。係數不限正負（擬合可能得到負值），其他參數的範圍見上表。實際使用的值寫入 `<outPrefix>/params.used.toml`。
+- 係數都是線性的：`summary.tsv` 輸出未乘係數的各分項（10.3），一次對接的結果即可離線以最小平方法擬合，不需重新執行。`shaking.radius`、`shaking.step`、`shaking.rrtScaling`、`unboundCandidateNum` 改變時需重新計算；`temperature` 只經由 RT 線性影響熵項，與 s_X 的效果重疊，擬合時固定為 298.15 K。
 - 方法名稱維持 `od_0100`（代表預計在 OmegaDocker v1.0.0 正式支援的版本）；係數改變不改名稱，以參數檔區分。
 - 半徑與步長實測（前 40 名，r = 1.4 Å／步長 0.2 為參考）：
   - 半徑固定時，步長 0.2–0.4 的 Δ(−TS) 平均值差 0.1–0.3 kcal/mol；步長 0.25 的最大差 0.16（BTN）、0.60（1L2Y），時間約一半。
@@ -1068,8 +1053,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ### 10.3 排序與輸出
 
-- 排序：9b（E_9b）與 `--freeEnergy` 啟用的每種方法，各自對整個 topSampleSet 由低到高排序（穩定排序，相同值依 9b 順序）。
-- 輸出樣本：每種排序的前 `--outMinPerRank` 個（預設 40）的聯集；topSampleSet 不足時依實際數量。
+- 排序：9b（E_9b）與 `dock9d.freeEnergy` 啟用的每種方法，各自對整個 topSampleSet 由低到高排序（穩定排序，相同值依 9b 順序）。
+- 輸出樣本：每種排序的前 `output.minPerRank` 個（預設 40）的聯集；topSampleSet 不足時依實際數量。
 - 輸出目錄：每個 MobM 一個 `<outPrefix>/<MobM id>/`；MobM id 中英數字與 `._+-` 以外的字元改為 `_`（例：`mobm_BTN_ideal.sdf_1`）。
 - 結構檔：
   - 每個輸出樣本：MobM 座標（含所有氫原子），檔名 `pose_NNNN`，編號依 9b 排序在輸出樣本中的名次（從 1 起）。
@@ -1085,19 +1070,19 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 | 格式 | 參數 | 預設 | 副檔名 |
 |---|---|---|---|
-| PDB | `--outPdb` | `true` | `.pdb` |
-| mmCIF | `--outCif` | `false` | `.cif` |
-| SDF / MOL | `--outSdf` | `false` | `.sdf` |
-| mol2 | `--outMol2` | `false` | `.mol2` |
+| PDB | `output.pdb` | `true` | `.pdb` |
+| mmCIF | `output.cif` | `false` | `.cif` |
+| SDF / MOL | `output.sdf` | `false` | `.sdf` |
+| mol2 | `output.mol2` | `false` | `.mol2` |
 
 - 四個參數各自獨立，值為 `true` / `false`。
 - 四個皆為 `false` → 報錯並結束。
 - 部分電荷：每個原子的部分電荷（Gasteiger 或輸入檔的電荷；計算時非極性氫的電荷併入重原子）。mol2 寫入原子欄位；SDF 以 `atom.dprop.PartialCharge` 資料欄位寫入；PDB、mmCIF 不寫部分電荷，寫入形式電荷。
-- PDB 已啟用但超過 PDB 格式上限（原子數 > 99999、鏈 ID 超過 1 個字元、殘基名稱超過 3 個字元、殘基編號超出 −999–9999）時，該檔改輸出 mmCIF（即使 `--outCif = false`），並在執行紀錄中警告；若 `--outCif = true`，則該檔只輸出 mmCIF 一份。
+- PDB 已啟用但超過 PDB 格式上限（原子數 > 99999、鏈 ID 超過 1 個字元、殘基名稱超過 3 個字元、殘基編號超出 −999–9999）時，該檔改輸出 mmCIF（即使 `output.cif = false`），並在執行紀錄中警告；若 `output.cif = true`，則該檔只輸出 mmCIF 一份。
 - 各格式的寫法：
   - 沒有殘基資訊的分子（SDF、mol2 輸入）：殘基 `UNL`，鏈 `L`（MobM）或 `S`（StaM），編號 1；沒有原子名稱時以元素符號加流水號命名（`C1`、`C2`、…）。
   - PDB：標準胺基酸與核苷酸為 `ATOM`，其他為 `HETATM`；每條鏈後加 `TER`；`HETATM` 的鍵與殘基間主鏈以外的鍵（雙硫鍵、交聯、金屬配位）寫成 `CONECT`。
-  - mmCIF：`_atom_site`；殘基間主鏈以外的鍵寫成 `_struct_conn`（`disulf`、`metalc`、`covale`）；非標準殘基內的鍵寫成 `_chem_comp_bond`（本程式讀取 mmCIF 時仍以 CCD 為準，`UNL` 需另以 `--ccd` 提供）。
+  - mmCIF：`_atom_site`；殘基間主鏈以外的鍵寫成 `_struct_conn`（`disulf`、`metalc`、`covale`）；非標準殘基內的鍵寫成 `_chem_comp_bond`（本程式讀取 mmCIF 時仍以 CCD 為準，`UNL` 需另以 `ccd` 提供）。
   - SDF：原子數與鍵數 ≤ 999 時 V2000，否則 V3000；鍵級為 Kekulé 形式，金屬配位鍵寫成單鍵；形式電荷寫入 `M  CHG`；多個分子（StaM 群）各一筆紀錄。
   - mol2：SYBYL 原子類型由元素、鍵級與芳香性判定；鍵類型 `1`／`2`／`3`／`ar`／`am`（金屬配位鍵為 `1`）；附 `@<TRIPOS>SUBSTRUCTURE`；多個分子各一個 `@<TRIPOS>MOLECULE`。mol2 沒有形式電荷欄位，讀取時形式電荷可能落在等價的共振原子上。
 
@@ -1133,7 +1118,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - two-loop recursion，初始 Hessian 取 `(sᵀy / yᵀy)·I`；`sᵀy ≤ 10⁻¹²` 的步不存入記憶。
   - 方向不是下降方向時清空記憶，改用最陡下降方向。
   - Armijo 條件 `E(x + αd) ≤ E(x) + 10⁻⁴·α·∇Eᵀd`，α 從 1 開始每次減半，最多 20 次；仍不滿足時視為收斂並停止。目標函數回報不可行（8.6 移出網格）時立即中止最佳化。
-- 目前只實作 9b 的 `lbfgs` 與 9a 的 `fire`，尚未提供 `--dockMinMethod`、`--confMinMethod`。
+- 目前只實作 9b 的 `lbfgs` 與 9a 的 `fire`，尚未提供 `dock9b.minMethod`、`conf9a.minMethod`。
 
 ### 12.1 9b 的數值精度
 
@@ -1156,103 +1141,124 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ## 13. 記憶體管理
 
-- `--gpuMemLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
+- `gpu.memLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
 - L2 pool、topSampleSet 存在主機記憶體；L2 pool 不設容量上限。
-- 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `midTopSampleFactor` × `topSampleNum` 個（使用 `--midKeepSkipped` 時約 3 × `sampleBufferNum` 個）；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
+- 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `midTopSampleFactor` × `topSampleNum` 個（使用 `dock9c.midKeepSkipped` 時約 3 × `sampleBufferNum` 個）；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
 - csgm2、csgm3 的一批樣本即使 L2 pool 已達 `minL2confSampleNum`，仍處理完整批。
 
 ---
 
 ## 14. 參數總表
 
-| 參數 | 預設 | 節 |
-|---|---|---|
-| `--stamFile`、`--mobmFiles` | 必填 | 3.2 |
-| `--molConfig` | 無 | 5 |
-| `--ccd` | 無 | 3.1 |
-| `--boxCenter`、`--boxSize` | 必填 | 3.3 |
-| `--outPrefix` | 必填 | 10 |
-| `--outPdb` | true | 10 |
-| `--outCif` | false | 10 |
-| `--outSdf` | false | 10 |
-| `--outMol2` | false | 10 |
-| `--maxRound` | 10 | 10 |
-| `--resume <dir>` | 無 | 16 |
-| `--gpuMemLimit` | 可用量 90% | 13 |
-| `--omegaTolerance` | 30° | 4.3 |
-| `--stamFixedResMovable` | false | 4.7 |
-| `--maxBreakDist` | 0.5 Å | 4.8 |
-| `--closureG` | 200 | 4.5 |
-| `--reachPerRes` | `3.8,7.0`（蛋白質,核酸；Å） | 4.8 |
-| `--stamFlexMargin` | 4 Å | 4.4 |
-| `--acceptNonPlanarOmega` | 關閉 | 4.3 |
-| `--stamDockingConfSampleNum`、`--mobmDockingConfSampleNum` | 有可動兩面角時必填 | 7.2 |
-| `--stamMinL2confSampleNum`、`--mobmMinL2confSampleNum` | 2 × docking | 7.2 |
-| `--stamInitL1confSampleNum`、`--mobmInitL1confSampleNum` | minL2 | 7.2 |
-| `--stamEliteConfSampleNum`、`--mobmEliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
-| `--stamMaxL1TotalNum`、`--mobmMaxL1TotalNum` | 10⁹ | 7.4 |
-| `--stamMaxL1BatchNum`、`--mobmMaxL1BatchNum` | 65536（CPU 版；GPU 版由 `--gpuMemLimit` 推算） | 7.4 |
-| `--seed` | 隨機（寫入執行紀錄） | 7.9 |
-| `--stamCsgmGA`、`--mobmCsgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
-| `--stamCsgmBuild`、`--mobmCsgmBuild` | `whole` | 7.8 |
-| `--stamGrowMaxRetry`、`--mobmGrowMaxRetry` | 16 | 7.8 |
-| `--stamCsgm1AngleStep`、`--mobmCsgm1AngleStep` | 1° | 7.5 |
-| `--stamRamaFloor`、`--mobmRamaFloor` | 1×10⁻⁴ | 7.5 |
-| `--{stam,mobm}TournamentRate`、`--{stam,mobm}CrossoverRate`、`--{stam,mobm}MutationRate`、`--{stam,mobm}AbsMaxDang` | 60%、80%、2%、90° | 7.6 |
-| `--stamPeMaxOffset`、`--mobmPeMaxOffset` | 30° | 7.7 |
-| `--stamPeCoverAngle`、`--mobmPeCoverAngle` | 360° | 7.7 |
-| `--stamPeSampleNumPerLine`、`--mobmPeSampleNumPerLine` | 4 | 7.7 |
-| `--clashDistance` | 1.8 Å | 7.9 |
-| `--Emax` | 1000 kcal/mol | 7.9 |
-| `--EclashBase` | 10000 kcal/mol | 7.9 |
-| `--Kclash` | 1000 kcal/mol/Å² | 7.9 |
-| `--confMinMethod` | `fire` | 7.9 |
-| `--confMinMaxStep` | 100 | 7.9 |
-| `--confMinDeltaE` | 10 kcal/mol | 7.9 |
-| `--confMaxDihedralStep` | 10° | 7.9 |
-| `--gridMode` | 依主鏈可動與否 | 8.1 |
-| `--gridSpacing` | 0.375 Å | 8.1 |
-| `--deltaThreshold` | 1×10⁻⁴ kcal/mol | 8.1 |
-| `--posm` | 必填 | 8.4 |
-| `--posStep` | 1 Å | 8.4 |
-| `--rotStep` | 7.5° | 8.3 |
-| `--posm1SampleNum` | 1000 | 8.4.1 |
-| `--fftClamp` | 10 kcal/mol | 8.4.3 |
-| `--fftTopPerRot` | 1 | 8.4.3 |
-| `--sepaShellMin`、`--sepaShellMax` | 2.5 Å、6 Å | 8.4.4 |
-| `--sepaPotPercentile` | 5% | 8.4.4 |
-| `--sepaPotThreshold` | 無（指定時取代百分位） | 8.4.4 |
-| `--sepaChargeThreshold` | 0.3 e | 8.4.4 |
-| `--sepaDistTolerance` | 1.0 Å | 8.4.4 |
-| `--sepaPosRange` | 4 Å | 8.4.4 |
-| `--maxOverlapAtomNum` | 1 | 8.5 |
-| `--maxNearDistance` | 6 Å | 8.5 |
-| `--dockMinMethod` | `lbfgs` | 8.6 |
-| `--dockMinMaxStep` | 1000 | 8.6 |
-| `--dockMinConvSteps` | 10 | 8.6 |
-| `--dockMinDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
-| `--topSampleNum` | eliteStaM × eliteMobM | 9 |
-| `--diversityRmsd` | 2.0 Å | 9 |
-| `--sampleBufferNum` | 65536（至少 max(4, `midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
-| `--midTopSampleFactor` | 1（使用 `--midKeepSkipped` 時 2） | 9 |
-| `--midKeepSkipped` | 關閉 | 9 |
-| `--symMaxPerm` | 256 | 10 |
-| `--freeEnergy` | `od_0100` | 10.2 |
-| `--outMinPerRank` | 40 | 10.3 |
-| `--feParamFile` | 內建預設（未校準） | 10.2 |
-| `--feC0`、`--feTors`、`--feInter*`、`--feIntra*`、`--feEntropy*` | 覆寫參數檔（見 10.2） | 10.2 |
-| `--shakingRadius` | 1.4 Å（覆寫參數檔） | 10.2 |
-| `--shakingStep` | 0.2 Å（覆寫參數檔） | 10.2 |
-| `--temperature` | 298.15 K（覆寫參數檔） | 10.2 |
-| `--rrtScaling` | 4（暫定，覆寫參數檔） | 10.2 |
-| `--unboundCandidateNum` | 20（覆寫參數檔） | 10.2 |
-| `--lbfgsMemory` | 7 | 12 |
-| `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
-| `--maxTransStep` | 0.5 Å | 12 |
-| `--maxAngleStep` | 10° | 12 |
+### 14.1 參數檔與命令列
 
-樣本數參數（7.2）與 csgm 參數（7.0）：StaM 群用 `--stam*`，所有 MobM 共用 `--mobm*`，不提供個別 MobM 的覆寫。StaM 專用的參數也使用 `stam` 前綴（`--stamFlexMargin`、`--stamFixedResMovable`）。
+- 執行參數有三個來源，優先順序：內建預設 < 參數檔 `--paramFile=<file>` < 命令列。參數檔中未列出的鍵維持預設。
+- 參數檔與分子設定檔（`--molConfig`，第 5 節）分開，兩者都是 TOML 格式；各自只接受自己的鍵，傳錯檔案時以「unknown key」報錯。參數檔可在不同分子之間重複使用。
+- 參數檔的鍵為 `<表>.<名稱>`（最上層的鍵沒有表名）。對應的命令列選項把「.」換成「_」：`[stam] csgmBuild` → `--stam_csgmBuild`，`[od_0100.shaking] rrtScaling` → `--od_0100_shaking_rrtScaling`。比對時使用完整名稱，名稱中原有的底線（`od_0100`）不影響。
+- 命令列的寫法：
+  - 所有選項都只接受 `--<名稱>=<值>`；`--<名稱> <值>` 與不給值的寫法都報錯。例外：`--help`、`--version` 不帶值。
+  - 布林值：`true`/`false`、`1`/`0`、`yes`/`no`（參數檔中只能寫 TOML 的 `true`/`false`）。
+  - 陣列以逗號分隔：`--box_center=0,0,0`、`--ccd=a.cif,b.cif`、`--dock9d_freeEnergy=adgpu_16,od_0100`；空值為空陣列。
+  - 同一選項出現多次時，最後一個有效；`--paramFile` 在命令列中的位置不影響優先順序。
+- 只能在命令列的選項：`--paramFile`、`--stamFile`、`--mobmFiles`（可多次）、`--molConfig`、`--outPrefix`、`--resume`（未實作）、`--help`、`--version`。
+- 參數檔可有 `formatVersion = 1`（可省略；有寫時必須為 1）。`ccd` 等檔案路徑相對於執行時的目前目錄。
+- 檢查：
+  - 型別與數值格式：參數檔的問題（附行號）與命令列的問題（附原始引數）一起列出後結束，在讀取分子之前完成。
+  - 範圍與必填（例如 `box.center`、`dock9b.posm`）：在合併之後檢查，所以可在參數檔或命令列任一處指定；有依賴的預設值（`dock9c.topSampleNum`、`dock9c.midTopSampleFactor`、樣本數參數）也在合併後計算。
+- 合併後實際使用的值（包含實際使用的 `seed`）寫入 `<outPrefix>/params.used.toml`，每個鍵附說明與預設值；未設定的選擇性參數寫成註解。此檔可直接作為 `--paramFile` 重現結果，也可作為參數檔範本。隨機產生的 `seed` 限制在 63 位元內，以符合 TOML 整數範圍。
+
+### 14.2 參數
+
+「未實作」的參數是規格中預定的名稱，目前不接受。
+
+| 參數檔鍵 | 命令列選項 | 預設 | 節 |
+|---|---|---|---|
+| — | `--stamFile`、`--mobmFiles` | 必填 | 3.2 |
+| — | `--molConfig` | 無 | 5 |
+| — | `--outPrefix` | 必填 | 10 |
+| — | `--paramFile` | 無 | 14.1 |
+| — | `--resume`（未實作） | 無 | 16 |
+| `seed` | `--seed` | 隨機（寫入執行紀錄與 `params.used.toml`） | 7.9 |
+| `ccd` | `--ccd` | `[]` | 3.1 |
+| `box.center`、`box.size` | `--box_center`、`--box_size` | 必填 | 3.3 |
+| `grid.spacing` | `--grid_spacing` | 0.375 Å | 8.1 |
+| `grid.mode`（未實作） | `--grid_mode` | 依主鏈可動與否 | 8.1 |
+| `grid.deltaThreshold`（未實作） | `--grid_deltaThreshold` | 1×10⁻⁴ kcal/mol | 8.1 |
+| `gpu.memLimit`（未實作） | `--gpu_memLimit` | 可用量 90% | 13 |
+| `output.pdb` | `--output_pdb` | true | 10 |
+| `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
+| `output.minPerRank` | `--output_minPerRank` | 40 | 10.3 |
+| `topology.omegaTolerance` | `--topology_omegaTolerance` | 30° | 4.3 |
+| `topology.acceptNonPlanarOmega` | `--topology_acceptNonPlanarOmega` | false | 4.3 |
+| `topology.maxBreakDist` | `--topology_maxBreakDist` | 0.5 Å | 4.8 |
+| `topology.reachPerRes` | `--topology_reachPerRes` | `[3.8, 7.0]`（蛋白質, 核酸；Å） | 4.8 |
+| `energy.closureG` | `--energy_closureG` | 200 | 4.5 |
+| `energy.clashDistance` | `--energy_clashDistance` | 1.8 Å | 7.9 |
+| `energy.Emax` | `--energy_Emax` | 1000 kcal/mol | 7.9 |
+| `energy.EclashBase` | `--energy_EclashBase` | 10000 kcal/mol | 7.9 |
+| `energy.Kclash` | `--energy_Kclash` | 1000 kcal/mol/Å² | 7.9 |
+| `stam.flexMargin` | `--stam_flexMargin` | 4 Å | 4.4 |
+| `stam.fixedResMovable` | `--stam_fixedResMovable` | false | 4.7 |
+| `{stam,mobm}.dockingConfSampleNum` | `--{stam,mobm}_dockingConfSampleNum` | 有可動兩面角時必填 | 7.2 |
+| `{stam,mobm}.minL2confSampleNum` | `--{stam,mobm}_minL2confSampleNum` | 2 × docking | 7.2 |
+| `{stam,mobm}.initL1confSampleNum` | `--{stam,mobm}_initL1confSampleNum` | minL2 | 7.2 |
+| `{stam,mobm}.eliteConfSampleNum` | `--{stam,mobm}_eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
+| `{stam,mobm}.maxL1TotalNum` | `--{stam,mobm}_maxL1TotalNum` | 10⁹ | 7.4 |
+| `{stam,mobm}.maxL1BatchNum` | `--{stam,mobm}_maxL1BatchNum` | 65536（CPU 版；GPU 版由 `gpu.memLimit` 推算） | 7.4 |
+| `{stam,mobm}.csgmGA`（未實作） | `--{stam,mobm}_csgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
+| `{stam,mobm}.csgmBuild` | `--{stam,mobm}_csgmBuild` | `whole` | 7.8 |
+| `{stam,mobm}.growMaxRetry` | `--{stam,mobm}_growMaxRetry` | 16 | 7.8 |
+| `{stam,mobm}.csgm1AngleStep` | `--{stam,mobm}_csgm1AngleStep` | 1° | 7.5 |
+| `{stam,mobm}.ramaFloor` | `--{stam,mobm}_ramaFloor` | 1×10⁻⁴ | 7.5 |
+| `{stam,mobm}.tournamentRate`、`.crossoverRate`、`.mutationRate`、`.absMaxDang`（未實作） | `--{stam,mobm}_tournamentRate` 等 | 60%、80%、2%、90° | 7.6 |
+| `{stam,mobm}.peMaxOffset`（未實作） | `--{stam,mobm}_peMaxOffset` | 30° | 7.7 |
+| `{stam,mobm}.peCoverAngle`（未實作） | `--{stam,mobm}_peCoverAngle` | 360° | 7.7 |
+| `{stam,mobm}.peSampleNumPerLine`（未實作） | `--{stam,mobm}_peSampleNumPerLine` | 4 | 7.7 |
+| `conf9a.minMethod`（未實作） | `--conf9a_minMethod` | `fire` | 7.9 |
+| `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
+| `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
+| `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
+| `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4 |
+| `dock9b.posStep` | `--dock9b_posStep` | 1 Å | 8.4 |
+| `dock9b.posm1SampleNum` | `--dock9b_posm1SampleNum` | 1000 | 8.4.1 |
+| `dock9b.rotStep` | `--dock9b_rotStep` | 7.5° | 8.3 |
+| `dock9b.fftClamp`（未實作） | `--dock9b_fftClamp` | 10 kcal/mol | 8.4.3 |
+| `dock9b.fftTopPerRot`（未實作） | `--dock9b_fftTopPerRot` | 1 | 8.4.3 |
+| `dock9b.sepaShellMin`、`dock9b.sepaShellMax`（未實作） | `--dock9b_sepaShellMin` 等 | 2.5 Å、6 Å | 8.4.4 |
+| `dock9b.sepaPotPercentile`（未實作） | `--dock9b_sepaPotPercentile` | 5% | 8.4.4 |
+| `dock9b.sepaPotThreshold`（未實作） | `--dock9b_sepaPotThreshold` | 無（指定時取代百分位） | 8.4.4 |
+| `dock9b.sepaChargeThreshold`（未實作） | `--dock9b_sepaChargeThreshold` | 0.3 e | 8.4.4 |
+| `dock9b.sepaDistTolerance`（未實作） | `--dock9b_sepaDistTolerance` | 1.0 Å | 8.4.4 |
+| `dock9b.sepaPosRange`（未實作） | `--dock9b_sepaPosRange` | 4 Å | 8.4.4 |
+| `dock9b.maxOverlapAtomNum` | `--dock9b_maxOverlapAtomNum` | 1 | 8.5 |
+| `dock9b.maxNearDistance` | `--dock9b_maxNearDistance` | 6 Å | 8.5 |
+| `dock9b.minMethod`（未實作） | `--dock9b_minMethod` | `lbfgs` | 8.6 |
+| `dock9b.minMaxStep` | `--dock9b_minMaxStep` | 1000 | 8.6 |
+| `dock9b.minConvSteps` | `--dock9b_minConvSteps` | 10 | 8.6 |
+| `dock9b.minDeltaE` | `--dock9b_minDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
+| `dock9b.lbfgsMemory` | `--dock9b_lbfgsMemory` | 7 | 12 |
+| `dock9b.scaleTrans`、`dock9b.scaleRot`、`dock9b.scaleTors` | `--dock9b_scaleTrans` 等 | 1、1、1 | 12 |
+| `dock9b.maxTransStep` | `--dock9b_maxTransStep` | 0.5 Å | 12 |
+| `dock9b.maxAngleStep` | `--dock9b_maxAngleStep` | 10° | 12 |
+| `dock9c.maxRound` | `--dock9c_maxRound` | 10 | 10 |
+| `dock9c.topSampleNum` | `--dock9c_topSampleNum` | eliteStaM × eliteMobM | 9 |
+| `dock9c.diversityRmsd` | `--dock9c_diversityRmsd` | 2.0 Å | 9 |
+| `dock9c.sampleBufferNum` | `--dock9c_sampleBufferNum` | 65536（至少 max(4, `midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
+| `dock9c.midTopSampleFactor` | `--dock9c_midTopSampleFactor` | 1（`midKeepSkipped` 為 true 時 2） | 9 |
+| `dock9c.midKeepSkipped` | `--dock9c_midKeepSkipped` | false | 9 |
+| `dock9d.symMaxPerm` | `--dock9d_symMaxPerm` | 256 | 10 |
+| `dock9d.freeEnergy` | `--dock9d_freeEnergy` | `["od_0100"]` | 10.2 |
+| `od_0100.c0`、`od_0100.tors` | `--od_0100_c0`、`--od_0100_tors` | 0、0 | 10.2 |
+| `od_0100.inter.{vdw,hbond,elec,desolv}` | `--od_0100_inter_vdw` 等 | 0.7564 | 10.2 |
+| `od_0100.intra.{vdw,hbond,elec,desolv}` | `--od_0100_intra_vdw` 等 | 0.7564 | 10.2 |
+| `od_0100.entropy.{stam,mobm}` | `--od_0100_entropy_stam` 等 | 0.9 | 10.2 |
+| `od_0100.temperature` | `--od_0100_temperature` | 298.15 K | 10.2 |
+| `od_0100.unboundCandidateNum` | `--od_0100_unboundCandidateNum` | 20 | 10.2 |
+| `od_0100.shaking.radius`、`od_0100.shaking.step` | `--od_0100_shaking_radius`、`--od_0100_shaking_step` | 1.4 Å、0.2 Å | 10.2 |
+| `od_0100.shaking.rrtScaling` | `--od_0100_shaking_rrtScaling` | 4（暫定） | 10.2 |
+
+樣本數參數（7.2）與 csgm 參數（7.0）：StaM 群用 `[stam]`，所有 MobM 共用 `[mobm]`，不提供個別 MobM 的覆寫。StaM 專用的參數也放在 `[stam]`（`stam.flexMargin`、`stam.fixedResMovable`）。
 
 ---
 
@@ -1377,7 +1383,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 網格不存入檢查點（可由 StaM 構型重算）。
 
 ### 16.4 接續
-- `--resume <outPrefix>`：從最後一個完整的檢查點的下一輪開始。
+- `--resume=<outPrefix>`（只能在命令列）：從最後一個完整的檢查點的下一輪開始。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpuMemLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -1461,6 +1467,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 結合自由能 `adgpu_16`、`od_0100`，預設 `od_0100`；每種排序至少輸出 `outMinPerRank`（40）個（10.2、10.3） |
 | — | od_0100：球形搖動格點（半徑 1.4 Å、步長 0.2 Å，與網格間距無關）、Boltzmann 權重（捨棄 `wellDepth` 線性權重）、可佔據比例 f_i、−TS = −RT × Σ ln f_i；鍵結不列入；未結合狀態取 9a 構型樣本中的最低自由能（10.2） |
 | — | od_0100 係數拆分為 c0、c_tors、a_t（分子間 4 項）、b_t（分子內 4 項）、s_StaM、s_MobM，以 TOML 參數檔 `--feParamFile` 設定，取代 `--enthalpyScaling`、`--entropyScaling`；預設值未校準，CUDA 與 OpenCL 版完成後以標準資料最佳化；方法名稱維持 `od_0100`（10.2） |
+| — | 執行參數放入參數檔 `--paramFile`（TOML，與分子設定檔分開），命令列 `--<表>_<鍵>=<值>` 覆寫；舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；搖動權重 w_k = exp(−ΔE_k × `rrtScaling`)，預設暫定 4，不依 `temperature`；擬合時 `temperature` 固定 298.15 K（14.1、10.2） |
 
 ### 17.2 待確認
 - loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
@@ -1518,3 +1525,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.33 | 2026-10-16 | od_0100 係數拆分（c0、c_tors、分子間 4 項、分子內 4 項、StaM／MobM 熵項），以 TOML 參數檔 `--feParamFile` 設定（取代 `--enthalpyScaling`、`--entropyScaling`），寫出 `feparams.used.toml`；`summary.tsv` 輸出未乘係數的分項以供離線擬合（10.2、10.3、14） |
 | 1.34 | 2026-10-16 | 搖動權重改為 w_k = exp(−ΔE_k × `rrtScaling`)，新增 `--rrtScaling`（預設 1/RT），與熵項的 RT 分開（10.2、14） |
 | 1.35 | 2026-10-16 | od_0100 的所有參數（含 `temperature`、`unboundCandidateNum`、`shaking.radius`、`shaking.step`、`shaking.rrtScaling`）放入參數檔，命令列選項改為覆寫參數檔；新增 `--feC0`、`--feTors`、`--feInter*`、`--feIntra*`、`--feEntropy*`；`rrtScaling` 預設暫定 4，不再依 `temperature`（10.2、14） |
+| 1.36 | 2026-10-16 | 參數檔 `--paramFile`（TOML）涵蓋所有執行參數，命令列 `--<表>_<鍵>=<值>` 覆寫；取代 `--feParamFile` 與 `--fe*` 選項，舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；寫出 `params.used.toml`（取代 `feparams.used.toml`）；隨機 seed 限 63 位元（14.1、14.2，並更新各節的參數名稱） |

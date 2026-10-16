@@ -91,7 +91,7 @@ void checkOmegas(const od::Molecule& m, const od::MolSettings& s, const od::Opti
   }
   if (!opt.acceptNonPlanarOmega)
     od::fail("{}: {} fixed omega angle(s) differ from 0 and 180 degrees by more than {} degrees "
-             "(--acceptNonPlanarOmega continues):{}",
+             "(topology.acceptNonPlanarOmega = true continues):{}",
              m.id, bad.size(), opt.omegaTolerance, list);
   od::logWarn(std::format("{}: {} non-planar fixed omega angle(s):{}", m.id, bad.size(), list));
 }
@@ -356,12 +356,6 @@ std::string joinNames(const std::vector<std::string>& v) {
 }
 
 // 9d: recalculation by atom pairs, binding free energies, rankings and output (spec 10).
-std::string feSource(const od::Options& opt) {
-  std::string s = opt.feParamFile.empty() ? "built-in defaults" : opt.feParamFile;
-  if (!opt.feOverrides.empty()) s += std::format(" + {} command-line override(s)", opt.feOverrides.size());
-  return s;
-}
-
 // AD4 terms (vdw, hbond, elec, desolv) as an array, in the order of od::kFeTermNames.
 using Terms4 = std::array<double, od::FeParams::kTerms>;
 Terms4 terms4(const od::EnergyTerms& e) { return {e.vdw, e.hbond, e.elec, e.desolv}; }
@@ -428,15 +422,9 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
   };
   Unbound ubStam;
   if (opt.feOd0100) {
-    std::filesystem::create_directories(opt.outPrefix);
-    const std::string path = opt.outPrefix + "/feparams.used.toml";
-    std::ofstream f(path);
-    if (!f) od::fail("cannot write {}", path);
-    f << od::feParamsText(fp);
     const auto t0 = std::chrono::steady_clock::now();
     ubStam = unbound(stamSet, true);
-    od::logInfo(std::format("9d od_0100: coefficients {} (written to {}); G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)",
-                            feSource(opt), path, ubStam.g,
+    od::logInfo(std::format("9d od_0100: G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)", ubStam.g,
                             stamSet.lowestAngles(fp.unboundCandidateNum).size(),
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
   }
@@ -623,7 +611,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   {
     const int level = od::hopfLevelForStep(opt.rotStep);
     od::logInfo(std::format("9b grids: {} x {} x {} points, spacing {} Å; orientations: Hopf level {}, {} "
-                            "orientations, spacing {} deg (--rotStep {})",
+                            "orientations, spacing {} deg (dock9b.rotStep {})",
                             geom.n[0], geom.n[1], geom.n[2], geom.spacing, level, 72LL << (3 * level),
                             od::hopfSpacingDeg(level), opt.rotStep));
   }
@@ -783,7 +771,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                               s.leftGrid, sampleNum[i],
                               s.l2 > 0 ? static_cast<double>(s.steps) / static_cast<double>(s.l2) : 0.0));
       if (s.l1 > 0 && s.l1 == s.outsideBox)
-        od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger --boxSize",
+        od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger box.size",
                                 mobSets[i]->name()));
       std::unordered_map<int, float> stamLowest, mobLowest;
       for (int a : m.stamDcss)
@@ -897,8 +885,6 @@ int run(int argc, char** argv) {
     mobTopo.push_back(std::move(t));
   }
 
-  const od::FeParams fe = od::loadFeParams(opt.feParamFile, opt.feOverrides);  // spec 10.2
-
   // Molecule configuration (spec 5.1).
   std::vector<od::MolInput> inputs;
   for (std::size_t i = 0; i < sta.size(); ++i) inputs.push_back({&sta[i], &staTopo[i]});
@@ -947,8 +933,21 @@ int run(int argc, char** argv) {
   for (std::size_t i = 0; i < mobs.size(); ++i)
     printInputEnergy(mobs[i].id, {{&mobs[i], &cfg->molecules[sta.size() + i].tree}}, opt);
 
-  const std::uint64_t seed = opt.seed ? *opt.seed : (static_cast<std::uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}();
+  // Random seeds fit in a TOML integer (63 bits).
+  const std::uint64_t seed =
+      opt.seed ? *opt.seed
+               : ((static_cast<std::uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}()) >> 1;
   od::logInfo(std::format("seed {}", seed));
+  opt.seed = seed;
+  {
+    std::filesystem::create_directories(opt.outPrefix);
+    const std::string path = opt.outPrefix + "/params.used.toml";
+    std::ofstream f(path);
+    if (!f) od::fail("cannot write {}", path);
+    f << od::paramsText(opt);
+    od::logInfo(std::format("parameters used (defaults < {} < command line) written to {}",
+                            opt.paramFile.empty() ? "no --paramFile" : opt.paramFile, path));
+  }
   std::unique_ptr<ConfSet> stamSet;
   {
     std::vector<od::EnergyPart> parts;
@@ -970,7 +969,7 @@ int run(int argc, char** argv) {
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
   for (const auto& c : mobSets)
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
-  runRounds(*stamSet, mobSets, opt, fe, seed);
+  runRounds(*stamSet, mobSets, opt, opt.fe, seed);
   return 0;
 }
 

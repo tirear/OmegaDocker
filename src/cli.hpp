@@ -8,13 +8,14 @@
 #include <string>
 #include <vector>
 
+#include "feparams.hpp"
 #include "molecule.hpp"
 
 namespace od {
 
-// Command-line parameters (spec section 14). Options are added as the
-// corresponding stages are implemented.
-// Sample numbers of spec 7.2 as given on the command line.
+// Run parameters (spec section 14): built-in defaults, then --paramFile (TOML),
+// then the command line, where --<table>_<key>=<value> overrides <table>.<key>.
+// Sample numbers of spec 7.2 as given.
 struct ConfSampleOpts {
   std::optional<int> docking, minL2, initL1, elite;
 };
@@ -24,20 +25,23 @@ struct ConfSampleOpts {
 struct CsgmOpts {
   long long maxL1TotalNum = 1000000000;
   long long maxL1BatchNum = 65536;
-  bool grow = false;  // --<set>CsgmBuild grow
+  bool grow = false;  // <set>.csgmBuild = "grow"
   int growMaxRetry = 16;
   double csgm1AngleStep = 1.0;
   double ramaFloor = 1e-4;
 };
 
 struct Options {
+  // Command line only.
+  std::string paramFile;               // --paramFile
   std::string stamFile;                // --stamFile
   std::vector<std::string> mobmFiles;  // --mobmFiles
   std::string molConfig;
+  std::string outPrefix;
+  // --paramFile and command line.
   std::vector<std::string> ccd;
   std::optional<Vec3> boxCenter;
   std::optional<Vec3> boxSize;
-  std::string outPrefix;
   bool outPdb = true;
   bool outCif = false;
   bool outSdf = false;
@@ -48,14 +52,14 @@ struct Options {
   bool stamFixedResMovable = false;
   double maxBreakDist = 0.5;
   double closureG = 200.0;
-  double reachProtein = 3.8;  // --reachPerRes <protein>,<nucleic>
+  double reachProtein = 3.8;  // topology.reachPerRes = [protein, nucleic]
   double reachNucleic = 7.0;
   double clashDistance = 1.8;
   double Emax = 1000.0;
   double EclashBase = 10000.0;
   double Kclash = 1000.0;
-  ConfSampleOpts stam;  // --stam*ConfSampleNum: the StaM group
-  ConfSampleOpts mobm;  // --mobm*ConfSampleNum: shared by all MobM
+  ConfSampleOpts stam;  // stam.*ConfSampleNum: the StaM group
+  ConfSampleOpts mobm;  // mobm.*ConfSampleNum: shared by all MobM
   double gridSpacing = 0.375;
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
@@ -77,13 +81,12 @@ struct Options {
   std::optional<int> midTopSampleFactor;  // default: 2 with midKeepSkipped, otherwise 1 (spec 9)
   bool midKeepSkipped = false;
   int symMaxPerm = 256;  // raised to 4 x topSampleNum when smaller (spec 9)
-  bool feAdgpu16 = false;  // --freeEnergy (spec 10.2)
+  bool feAdgpu16 = false;  // dock9d.freeEnergy (spec 10.2)
   bool feOd0100 = true;
   int outMinPerRank = 40;
-  std::string feParamFile;  // od_0100 parameters; built-in defaults when empty
-  std::vector<std::pair<std::string, std::string>> feOverrides;  // (key, value) of --fe*, --shaking*, ... (od::FeOverrides)
-  CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
-  CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
+  FeParams fe;  // [od_0100]
+  CsgmOpts stamCsgm;  // stam.csgmBuild, stam.growMaxRetry, ...
+  CsgmOpts mobmCsgm;  // mobm.csgmBuild, mobm.growMaxRetry, ...
   int confMinMaxStep = 100;
   double confMinDeltaE = 10.0;
   double confMaxDihedralStep = 10.0;
@@ -93,8 +96,13 @@ struct Options {
   bool showVersion = false;
 };
 
-// Parses argv; throws od::Error on invalid input.
+// Parses argv and reads --paramFile; throws od::Error on invalid input (all
+// value problems of the file and the command line are listed together).
 Options parseCommandLine(int argc, const char* const* argv);
+
+// The parameter file with the values of o (spec 14); unset optional values
+// are written as comments.
+std::string paramsText(const Options& o);
 
 // Sample numbers of spec 7.2 with their defaults applied.
 struct ConfSampleNums {
@@ -110,7 +118,7 @@ void requireConfSampleNums(const Options& o, SampleSet set);
 // Checks required parameters and value ranges; throws od::Error.
 void validateOptions(const Options& o);
 
-// --midTopSampleFactor, or its default.
+// dock9c.midTopSampleFactor, or its default.
 inline int midTopSampleFactor(const Options& o) { return o.midTopSampleFactor.value_or(o.midKeepSkipped ? 2 : 1); }
 
 std::string usageText();

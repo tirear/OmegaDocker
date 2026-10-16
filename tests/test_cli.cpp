@@ -4,7 +4,12 @@
 
 #include <doctest.h>
 
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <vector>
+
+#include <unistd.h>
 
 #include "cli.hpp"
 #include "log.hpp"
@@ -19,9 +24,7 @@ od::Options parse(std::vector<const char*> args) {
 }  // namespace
 
 TEST_CASE("cli: required options and values") {
-  auto o = parse({"--stamFile", "r.cif", "--posm", "posm1", "--mobmFiles", "a.sdf", "--mobmFiles=b.mol2", "--boxCenter", "1,-2.5,3",
-                  "--boxSize", "20,20,30", "--outPrefix", "out", "--outCif", "true", "--outPdb=false",
-                  "--mobmDockingConfSampleNum", "8"});
+  auto o = parse({"--stamFile=r.cif", "--dock9b_posm=posm1", "--mobmFiles=a.sdf", "--mobmFiles=b.mol2", "--box_center=1,-2.5,3", "--box_size=20,20,30", "--outPrefix=out", "--output_cif=true", "--output_pdb=false", "--mobm_dockingConfSampleNum=8"});
   CHECK(o.stamFile == "r.cif");
   REQUIRE(o.mobmFiles.size() == 2);
   CHECK(o.mobmFiles[1] == "b.mol2");
@@ -50,28 +53,31 @@ TEST_CASE("cli: required options and values") {
   CHECK(o.symMaxPerm == 256);
   CHECK_NOTHROW(od::validateOptions(o));
 
-  auto t = parse({"--omegaTolerance", "20", "--acceptNonPlanarOmega", "--stamFlexMargin=6.5"});
+  auto t = parse({"--topology_omegaTolerance=20", "--topology_acceptNonPlanarOmega=true", "--stam_flexMargin=6.5"});
   CHECK(t.omegaTolerance == doctest::Approx(20));
   CHECK(t.acceptNonPlanarOmega);
   CHECK(t.stamFlexMargin == doctest::Approx(6.5));
 }
 
 TEST_CASE("cli: errors") {
-  CHECK_THROWS_AS(parse({"--stamFile", "a", "--stamFile", "b"}), od::Error);
+  CHECK_THROWS_AS(parse({"--stamFile=a", "--stamFile=b"}), od::Error);
   CHECK_THROWS_AS(parse({"--unknown"}), od::Error);
-  CHECK_THROWS_AS(parse({"--boxCenter", "1,2"}), od::Error);
-  CHECK_THROWS_AS(parse({"--boxCenter", "1,2,x"}), od::Error);
-  CHECK_THROWS_AS(parse({"--outPdb", "yes"}), od::Error);
+  CHECK_THROWS_AS(parse({"--box_center=1,2"}), od::Error);
+  CHECK_THROWS_AS(parse({"--box_center=1,2,x"}), od::Error);
+  CHECK_THROWS_AS(parse({"--output_pdb=maybe"}), od::Error);
+  CHECK_THROWS_AS(parse({"--dock9c_maxRound", "3"}), od::Error);  // only --x=value
+  CHECK_THROWS_AS(parse({"--dock9c_midKeepSkipped"}), od::Error);  // booleans need a value
+  CHECK_THROWS_AS(parse({"--stamFile", "a"}), od::Error);
+  CHECK_THROWS_AS(parse({"--stamCsgmBuild=grow"}), od::Error);  // old names are gone
+  CHECK_THROWS_AS(parse({"--feParamFile=x"}), od::Error);
   CHECK_THROWS_AS(parse({"--outPrefix"}), od::Error);
   CHECK_THROWS_AS(parse({"--help=1"}), od::Error);
-  CHECK_THROWS_AS(parse({"--posm", "posm9"}), od::Error);
-  CHECK_THROWS_AS(parse({"--posm", "posm2_fft"}), od::Error);
-  CHECK_THROWS_AS(od::validateOptions(parse({"--stamFile", "r.cif", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0",
-                                             "--boxSize", "10,10,10", "--outPrefix", "o"})),
+  CHECK_THROWS_AS(parse({"--dock9b_posm=posm9"}), od::Error);
+  CHECK_THROWS_AS(parse({"--dock9b_posm=posm2_fft"}), od::Error);
+  CHECK_THROWS_AS(od::validateOptions(parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10", "--outPrefix=o"})),
                   od::Error);  // --posm missing
 
-  auto o = parse({"--stamFile", "r.cif", "--posm", "posm1", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10",
-                  "--outPrefix", "o", "--outPdb", "false", "--mobmDockingConfSampleNum", "8"});
+  auto o = parse({"--stamFile=r.cif", "--dock9b_posm=posm1", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10", "--outPrefix=o", "--output_pdb=false", "--mobm_dockingConfSampleNum=8"});
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);  // all output formats disabled
   o.outMol2 = true;
   CHECK_NOTHROW(od::validateOptions(o));
@@ -84,7 +90,7 @@ TEST_CASE("cli: errors") {
   o.boxSize = od::Vec3{10, 0, 10};
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.boxSize = od::Vec3{10, 10, 10};
-  auto r = parse({"--maxRound", "3", "--topSampleNum", "20", "--diversityRmsd", "0"});
+  auto r = parse({"--dock9c_maxRound=3", "--dock9c_topSampleNum=20", "--dock9c_diversityRmsd=0"});
   CHECK(r.maxRound == 3);
   CHECK(r.topSampleNum == 20);
   CHECK(r.diversityRmsd == 0);
@@ -97,23 +103,23 @@ TEST_CASE("cli: errors") {
   o.diversityRmsd = -1;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.diversityRmsd = 2;
-  CHECK(parse({"--sampleBufferNum", "100"}).sampleBufferNum == 100);
-  CHECK(od::midTopSampleFactor(parse({"--midTopSampleFactor", "2"})) == 2);
-  CHECK(od::midTopSampleFactor(parse({"--midKeepSkipped"})) == 2);
-  CHECK(od::midTopSampleFactor(parse({"--midKeepSkipped", "--midTopSampleFactor", "1"})) == 1);
+  CHECK(parse({"--dock9c_sampleBufferNum=100"}).sampleBufferNum == 100);
+  CHECK(od::midTopSampleFactor(parse({"--dock9c_midTopSampleFactor=2"})) == 2);
+  CHECK(od::midTopSampleFactor(parse({"--dock9c_midKeepSkipped=true"})) == 2);
+  CHECK(od::midTopSampleFactor(parse({"--dock9c_midKeepSkipped=true", "--dock9c_midTopSampleFactor=1"})) == 1);
   o.midTopSampleFactor = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.midTopSampleFactor.reset();
   o.sampleBufferNum = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.sampleBufferNum = 100;
-  CHECK(parse({"--symMaxPerm", "0"}).symMaxPerm == 0);
+  CHECK(parse({"--dock9d_symMaxPerm=0"}).symMaxPerm == 0);
   o.symMaxPerm = -1;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 }
 
 TEST_CASE("cli: 9a sample numbers and minimization") {
-  auto o = parse({"--stamFile", "r.cif", "--posm", "posm1", "--mobmFiles", "a.sdf", "--boxCenter", "0,0,0", "--boxSize", "10,10,10", "--outPrefix", "o"});
+  auto o = parse({"--stamFile=r.cif", "--dock9b_posm=posm1", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10", "--outPrefix=o"});
   CHECK_NOTHROW(od::validateOptions(o));  // required only with rotatable torsions
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::StaM), od::Error);
   CHECK_THROWS_AS(od::requireConfSampleNums(o, od::SampleSet::MobM), od::Error);
@@ -150,9 +156,7 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   o.mobm.elite = 5;
   CHECK_NOTHROW(od::validateOptions(o));
 
-  auto s = parse({"--stamDockingConfSampleNum", "12", "--stamMinL2confSampleNum=30", "--stamInitL1confSampleNum", "40",
-                  "--stamEliteConfSampleNum", "4", "--mobmDockingConfSampleNum", "8", "--mobmMinL2confSampleNum", "16",
-                  "--mobmInitL1confSampleNum", "17", "--mobmEliteConfSampleNum", "2"});
+  auto s = parse({"--stam_dockingConfSampleNum=12", "--stam_minL2confSampleNum=30", "--stam_initL1confSampleNum=40", "--stam_eliteConfSampleNum=4", "--mobm_dockingConfSampleNum=8", "--mobm_minL2confSampleNum=16", "--mobm_initL1confSampleNum=17", "--mobm_eliteConfSampleNum=2"});
   CHECK(*s.stam.docking == 12);
   CHECK(*s.stam.minL2 == 30);
   CHECK(*s.stam.initL1 == 40);
@@ -171,8 +175,7 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   o.confMaxDihedralStep = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
 
-  auto t = parse({"--seed", "42", "--confMinMaxStep", "50", "--mobmMaxL1BatchNum=1000", "--mobmRamaFloor", "0",
-                  "--stamCsgmBuild", "grow", "--mobmCsgm1AngleStep=5", "--stamGrowMaxRetry", "3"});
+  auto t = parse({"--seed=42", "--conf9a_minMaxStep=50", "--mobm_maxL1BatchNum=1000", "--mobm_ramaFloor=0", "--stam_csgmBuild=grow", "--mobm_csgm1AngleStep=5", "--stam_growMaxRetry=3"});
   CHECK(*t.seed == 42);
   CHECK(t.confMinMaxStep == 50);
   CHECK(t.mobmCsgm.maxL1BatchNum == 1000);
@@ -187,7 +190,116 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(t.stamCsgm.growMaxRetry == 3);
   CHECK(t.mobmCsgm.growMaxRetry == 16);
   CHECK_THROWS_AS(parse({"--csgmBuild", "grow"}), od::Error);
-  CHECK_THROWS_AS(parse({"--mobmCsgmBuild", "partial"}), od::Error);
-  CHECK_THROWS_AS(parse({"--seed", "-1"}), od::Error);
-  CHECK_THROWS_AS(parse({"--confMinMaxStep", "1.5"}), od::Error);
+  CHECK_THROWS_AS(parse({"--mobm_csgmBuild=partial"}), od::Error);
+  CHECK_THROWS_AS(parse({"--seed=-1"}), od::Error);
+  CHECK_THROWS_AS(parse({"--conf9a_minMaxStep=1.5"}), od::Error);
+}
+
+TEST_CASE("cli: booleans, arrays and od_0100 parameters") {
+  for (const char* v : {"true", "1", "yes"}) CHECK(parse({std::format("--dock9c_midKeepSkipped={}", v).c_str()}).midKeepSkipped);
+  for (const char* v : {"false", "0", "no"}) CHECK_FALSE(parse({std::format("--output_pdb={}", v).c_str()}).outPdb);
+  CHECK_THROWS_AS(parse({"--output_pdb=True"}), od::Error);
+  auto a = parse({"--ccd=a.cif,b.cif", "--topology_reachPerRes=4,8", "--dock9d_freeEnergy=adgpu_16,od_0100"});
+  CHECK(a.ccd == std::vector<std::string>{"a.cif", "b.cif"});
+  CHECK(a.reachProtein == 4);
+  CHECK(a.reachNucleic == 8);
+  CHECK(a.feAdgpu16);
+  CHECK(a.feOd0100);
+  auto n = parse({"--dock9d_freeEnergy=none"});
+  CHECK_FALSE(n.feAdgpu16);
+  CHECK_FALSE(n.feOd0100);
+  CHECK_FALSE(parse({"--dock9d_freeEnergy="}).feOd0100);
+  CHECK_THROWS_AS(parse({"--topology_reachPerRes=4"}), od::Error);
+  CHECK_THROWS_AS(parse({"--dock9b_posStep=inf"}), od::Error);
+  const od::FeParams d;
+  CHECK(d.rrtScaling == 4.0);
+  CHECK(d.inter[0] == 0.7564);
+  auto f = parse({"--od_0100_c0=-1.5", "--od_0100_inter_elec=0.25", "--od_0100_shaking_rrtScaling=3",
+                  "--od_0100_shaking_rrtScaling=5", "--od_0100_unboundCandidateNum=7", "--od_0100_entropy_mobm=0.7"});
+  CHECK(f.fe.c0 == -1.5);
+  CHECK(f.fe.inter == std::array<double, 4>{0.7564, 0.7564, 0.25, 0.7564});
+  CHECK(f.fe.rrtScaling == 5);  // the last one wins
+  CHECK(f.fe.unboundCandidateNum == 7);
+  CHECK(f.fe.entropyMobm == 0.7);
+  auto o = parse({"--stamFile=r.cif", "--dock9b_posm=posm1", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10",
+                  "--outPrefix=o"});
+  CHECK_NOTHROW(od::validateOptions(o));
+  o.fe.rrtScaling = -1;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.fe.rrtScaling = 0;
+  o.fe.shakingStep = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+}
+
+TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
+  const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_param_{}.toml", ::getpid())).string();
+  auto write = [&](const std::string& s) { std::ofstream(path) << s; };
+  const std::string file = "--paramFile=" + path;
+  write("formatVersion = 1\nseed = 7\nccd = [\"x.cif\"]\n[box]\ncenter = [1, 2, 3.5]\nsize = [20, 20, 20]\n"
+        "[stam]\ncsgmBuild = \"grow\"\nfixedResMovable = true\n[dock9b]\nposm = \"posm2\"\nposStep = 2\n"
+        "[dock9c]\nmidKeepSkipped = true\n[od_0100.shaking]\nrrtScaling = 2\n[od_0100.inter]\nvdw = 0.5\n");
+  auto o = parse({file.c_str(), "--stamFile=r.cif", "--mobmFiles=a.sdf", "--outPrefix=o"});
+  CHECK(*o.seed == 7);
+  CHECK(o.ccd == std::vector<std::string>{"x.cif"});
+  CHECK((*o.boxCenter)[2] == 3.5);
+  CHECK(o.stamCsgm.grow);
+  CHECK(o.stamFixedResMovable);
+  CHECK(o.posm == "posm2");
+  CHECK(o.posStep == 2);
+  CHECK(o.midKeepSkipped);
+  CHECK(o.fe.rrtScaling == 2);
+  CHECK(o.fe.inter[0] == 0.5);
+  CHECK(o.fe.inter[1] == 0.7564);
+  CHECK_NOTHROW(od::validateOptions(o));
+  // The command line overrides the file, wherever --paramFile is given.
+  auto c = parse({"--dock9c_midKeepSkipped=false", "--dock9b_posStep=1.5", file.c_str(), "--od_0100_shaking_rrtScaling=6"});
+  CHECK_FALSE(c.midKeepSkipped);
+  CHECK(c.posStep == 1.5);
+  CHECK(c.fe.rrtScaling == 6);
+  CHECK(c.stamCsgm.grow);
+  // params.used.toml reads back to the same values.
+  o.fe.tors = 0.2983;
+  o.mobm.docking = 8;
+  o.feAdgpu16 = true;
+  const std::string used = od::paramsText(o);
+  CHECK(used.find("# topSampleNum =") != std::string::npos);  // unset optional values are comments
+  write(used);
+  auto r = parse({file.c_str()});
+  CHECK(*r.seed == 7);
+  CHECK(r.ccd == o.ccd);
+  CHECK(*r.boxCenter == *o.boxCenter);
+  CHECK(r.stamCsgm.grow);
+  CHECK(r.posStep == 2);
+  CHECK(r.fe.tors == 0.2983);
+  CHECK(r.fe.inter == o.fe.inter);
+  CHECK(*r.mobm.docking == 8);
+  CHECK(r.feAdgpu16);
+  CHECK(r.feOd0100);
+  CHECK_FALSE(r.topSampleNum);
+  CHECK(od::paramsText(r) == used);
+  // All problems of the file and the command line are listed together.
+  write("formatVersion = 2\n[dock9b]\nposStep = \"x\"\nfoo = 1\n[dock9c]\nmaxRound = 2.5\nmidKeepSkipped = \"yes\"\n"
+        "[box]\ncenter = [1, 2]\n[od_0100.entropy]\nstam = nan\n[other]\n");
+  try {
+    parse({file.c_str(), "--dock9b_rotStep=abc", "--output_pdb=maybe"});
+    FAIL("no error");
+  } catch (const od::Error& e) {
+    const std::string m = e.what();
+    CHECK(m.find("10 problem(s)") != std::string::npos);
+    CHECK(m.find("line 1: formatVersion: must be 1") != std::string::npos);
+    CHECK(m.find("line 3: dock9b.posStep: must be a number") != std::string::npos);
+    CHECK(m.find("line 4: dock9b.foo: unknown key") != std::string::npos);
+    CHECK(m.find("line 6: dock9c.maxRound: must be an integer") != std::string::npos);
+    CHECK(m.find("line 7: dock9c.midKeepSkipped: must be true or false") != std::string::npos);
+    CHECK(m.find("line 9: box.center: expected 3 numbers") != std::string::npos);
+    CHECK(m.find("line 11: od_0100.entropy.stam: 'nan' is not finite") != std::string::npos);
+    CHECK(m.find("other: unknown key") != std::string::npos);
+    CHECK(m.find("command line: --dock9b_rotStep=abc: 'abc' is not a number") != std::string::npos);
+    CHECK(m.find("command line: --output_pdb=maybe") != std::string::npos);
+  }
+  write("[dock9b\n");
+  CHECK_THROWS_AS(parse({file.c_str()}), od::Error);
+  std::filesystem::remove(path);
+  CHECK_THROWS_AS(parse({file.c_str()}), od::Error);
+  CHECK_THROWS_AS(parse({file.c_str(), file.c_str()}), od::Error);
 }
