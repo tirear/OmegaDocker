@@ -2248,6 +2248,16 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   REQUIRE(top.size() == 5);
   for (int k = 0; k < 5; ++k) CHECK(top[k].s.energy == e[k]);
   CHECK(od::topMaxEnergy(top) == e[4]);
+  {
+    // Ranking energy includes the StaM term (spec 9): StaM 1 shifted below StaM 0.
+    auto shifted = merged;
+    for (auto& m : shifted) m.stamRel = m.stam == 1 ? -1000.0f : 0.0f;
+    const auto t2 = od::selectTopSamples(shifted, heavy, static_cast<int>(shifted.size()), 0);
+    for (std::size_t k = 1; k < t2.size(); ++k) CHECK(t2[k - 1].rank() <= t2[k].rank());
+    CHECK(t2.front().stam == 1);
+    CHECK(t2.back().stam == 0);
+    CHECK(od::topMaxEnergy(t2) == t2.back().rank());
+  }
 
   // With the filter: sorted, and samples of the same StaM conformation at least diversityRmsd apart.
   // Threshold: median fixed RMSD between samples with the same StaM id.

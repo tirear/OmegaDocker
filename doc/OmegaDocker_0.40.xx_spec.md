@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.30 |
+| 文件版本 | 1.31 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -828,7 +828,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - StaM 構型在 9b 固定（本版不調整 StaM 兩面角）。
 - 能量：分子間（8.1）+ StaM–MobM 碰撞懲罰 + MobM 分子內（含 MobM 碰撞懲罰）+ 斷鍵約束；StaM 分子內能量在 9b 為常數，不計入。
   - StaM–MobM 碰撞懲罰：MobM 每個重原子以距離網格內插得 d，d < `clashDistance` 時加 `E_clashBase + K_clash·(clashDistance − d)²`（7.9 的形式，以原子計，不以原子對計）。
-  - 對接樣本的能量（9c 排序用）= 上述總和扣除斷鍵約束（4.5）。
+  - 對接樣本的能量（9b 能量）= 上述總和扣除斷鍵約束（4.5）。9c 的排序能量另加 StaM 項（第 9 節）。
 - 停止條件（任一成立）：
   1. 步數達 `dockMinMaxStep`（預設 1000）。
   2. 連續 `dockMinConvSteps`（預設 10）步 `|ΔE| < dockMinDeltaE`（預設 1×10⁻³ kcal/mol）。
@@ -847,7 +847,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 每個 MobM 獨立進行：
 
 1. **合併**：上一輪 topSampleSet ∪ 本輪所有對接樣本。合併順序：上一輪 topSampleSet（依其順序），再接本輪對接樣本（依 9b 的對接順序：StaM 構型樣本 ID、MobM dcss 順序、L1pos 序號）。
-2. **排序**：依 9b 能量（8.6 的排序能量，不含閉合約束）由低到高；能量相同時保持合併順序（穩定排序）。
+2. **排序**：依排序能量由低到高；能量相同時保持合併順序（穩定排序）。
+   - 排序能量 = 9b 能量（8.6，不含閉合約束）+ StaM 項。
+   - StaM 項 = 該樣本所用 StaM 構型樣本的 9a 能量（7.9 的篩選能量：分子內 AD4 能量 + 碰撞懲罰，不含閉合約束）− 目前所有 StaM 構型樣本（L2 pool 與已移入 dcss 者）9a 能量的最低值。StaM 不可動時為 0。
+   - 原因：同一 StaM 構型內 StaM 分子內能量是常數，9b 不計入；但不同 StaM 構型的樣本一起排序時，須計入其差異。
+   - 實作：每個樣本儲存相對於固定參考值（第 1 輪補滿 dcss 後的最低值）的 StaM 項；最低值之後下降時，所有樣本平移相同的量，排序、`E_top_max` 與 dcss 篩選（步驟 5）的比較都不受影響。執行紀錄顯示的值換算為相對於目前最低值。
+   - 步驟 5 的「本輪最低能量」也使用排序能量。
 3. **多樣性篩選**（貪婪法）：
    - 依序檢查每個樣本；若與已保留樣本「使用相同 StaM 構型」且 RMSD < `diversityRmsd`，則跳過。
    - RMSD：MobM 重原子（8.1 的探針原子中 H、HD、HS 以外者），不疊合（StaM 為固定座標框架）；座標與 9b 相同，以 float 由對接樣本的 pose 與兩面角計算。原子 i 與原子 i 配對，不做對稱修正（對稱修正在 9d 進行）。
@@ -949,7 +954,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 5. **篩選 dcss**：
    - `E_top_max` = topSampleSet 中的最高能量。
    - MobM dcss 與 StaM dcss 中，本輪最低能量 > `E_top_max` 的樣本移除。
-   - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低能量；不重做的配對（決定性 posm）使用先前記錄的值。
+   - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低排序能量；不重做的配對（決定性 posm）使用先前記錄的值。
    - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除），本輪最低能量記為 +∞，因此一律移除；topSampleSet 為空時，dcss 全部移除。
    - 無可動兩面角的分子（只有輸入結構）不篩選。
 6. 下一輪的 9a 補滿 dcss。
@@ -1334,6 +1339,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
 | — | 9c：穩定排序、原子固定配對 RMSD 加質心距離加速（1.26 起；1.23–1.25 為 AutoDock 式最近配對）；9d 以對稱修正 RMSD（C1 自同構／C2 Hungarian，`--symMaxPerm` 256）再篩選；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，只有 StaM 完全不可動時跨輪快取（6、9） |
 | — | 沒有對接樣本的 dcss 樣本，本輪最低能量記為 +∞（不用 `E_max − 1`）；9b／9c 以 `--sampleBufferNum` 分批，接受分批與一次做完結果不同（9） |
+| — | StaM 可動時，9c 排序能量加入「StaM 構型樣本的 9a 能量 − 所有 StaM 構型樣本的最低值」（9） |
 
 ### 17.2 待確認
 - loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
@@ -1386,3 +1392,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.28 | 2026-10-15 | 新增 `--midTopSampleFactor`（預設 2）：中間的 9c 保留 `midTopSampleFactor` × `topSampleNum` 個；`sampleBufferNum` 下限改為 (`midTopSampleFactor` + 2) × `topSampleNum`；說明分批差異的兩個來源，記錄分批實測表與使用建議（9、13、14） |
 | 1.29 | 2026-10-15 | `--midTopSampleFactor` 預設改為 1（大於 1 僅供實驗）；`sampleBufferNum` 下限改為 max(4, `midTopSampleFactor` + 2) × `topSampleNum`，預設維持 4 × `topSampleNum`（9、13） |
 | 1.30 | 2026-10-15 | 新增 `--midKeepSkipped`（保留池，上限 `sampleBufferNum`，超過時保留的樣本優先）；搭配時 `midTopSampleFactor` 預設 2；執行紀錄顯示保留池大小、E_drop 與是否保證與一次做完相同；記錄保留池與加大 `sampleBufferNum` 的實測及使用建議（9、13、14） |
+| 1.31 | 2026-10-16 | 9c 排序能量加入 StaM 項（StaM 構型樣本的 9a 能量 − 目前所有 StaM 構型樣本的最低值）；步驟 5 同樣使用排序能量（8.6、9） |

@@ -200,6 +200,13 @@ class ConfSet {
   const od::EnergySystem& sys() const { return sys_; }
   const std::vector<od::EnergyPart>& parts() const { return parts_; }
   const od::ConfSample& sample(int id) const { return samples_[id]; }
+  // Lowest 9a energy of the conformation samples made so far (L2 pool and dcss samples).
+  float minEnergy() const {
+    float e = std::numeric_limits<float>::infinity();
+    for (const auto& s : samples_) e = std::min(e, s.energy);
+    for (const auto& s : pool_) e = std::min(e, s.energy);
+    return e;
+  }
   int dockingNum() const { return movable() ? n_.docking : 1; }
   int eliteNum() const { return movable() ? n_.elite : 1; }
 
@@ -295,11 +302,12 @@ std::uint64_t pairKey(int stam, int mobm) {
   return static_cast<std::uint64_t>(stam) << 32 | static_cast<std::uint32_t>(mobm);
 }
 
-std::string energyList(const std::vector<od::RoundSample>& v, std::size_t n) {
+// shift: added to RoundSample::rank so that the StaM term is relative to the current lowest StaM energy.
+std::string energyList(const std::vector<od::RoundSample>& v, std::size_t n, float shift) {
   std::string s;
   for (std::size_t k = 0; k < v.size() && k < n; ++k)
-    s += std::format("  {:.3f} (inter {:.3f}, intra {:.3f}; StaM {}, MobM {})", v[k].s.energy,
-                     v[k].s.inter + v[k].s.interClash, v[k].s.intra, v[k].stam, v[k].mobm);
+    s += std::format("  {:.3f} (inter {:.3f}, intra {:.3f}, StaM {:.3f}; StaM {}, MobM {})", v[k].rank() + shift,
+                     v[k].s.inter + v[k].s.interClash, v[k].s.intra, v[k].stamRel + shift, v[k].stam, v[k].mobm);
   return s;
 }
 
@@ -344,6 +352,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             symSec));
   }
 
+  float stamRef = std::numeric_limits<float>::infinity();  // fixed reference of RoundSample::stamRel (spec 9)
   for (int round = 1; round <= opt.maxRound; ++round) {
     od::logInfo(std::format("Round {} of {}:", round, opt.maxRound));
     // 9a: refill the dcss (spec 7.3).
@@ -361,6 +370,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       fill(stamSet, ms[i].stamDcss);
       fill(*mobSets[i], ms[i].mobDcss);
     }
+    if (stamSet.movable() && !std::isfinite(stamRef)) stamRef = stamSet.minEnergy();
+    const float shift = stamSet.movable() ? stamRef - stamSet.minEnergy() : 0.0f;
 
     // 9b: one grid set per StaM conformation sample in a dcss, shared by all MobM.
     std::vector<int> stamIds;
@@ -433,13 +444,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           const auto& ma = mob.sample(mid).angles;
           const std::vector<double> mobAngles =
               mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles();
+          const float stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
           float lowest = std::numeric_limits<float>::infinity();
           st[i] += dk.dockPair(mobAngles, od::dockStream(round, i, sid, mid), ms[i].bufferNum,
                                [&](std::vector<od::DockSample>& chunk) {
                                  sampleNum[i] += static_cast<long long>(chunk.size());
                                  for (auto& s : chunk) {
-                                   lowest = std::min(lowest, s.energy);
-                                   buffer[i].push_back({sid, mid, std::move(s)});
+                                   od::RoundSample r{sid, mid, std::move(s), stamRel};
+                                   lowest = std::min(lowest, r.rank());
+                                   buffer[i].push_back(std::move(r));
                                  }
                                  if (buffer[i].size() >= ms[i].bufferNum) {
                                    select(i, false);
@@ -489,15 +502,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
       od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}  "
                               "9c runs {}  {:.2f} s",
-                              mobSets[i]->name(), m.top.size(), m.topNum, eTop, rmStam, rmMob, partial[i] + 1,
+                              mobSets[i]->name(), m.top.size(), m.topNum, eTop + shift, rmStam, rmMob, partial[i] + 1,
                               selectSec[i]));
       if (opt.midKeepSkipped) {
         const bool same = std::isinf(droppedMin[i]) ||
                           (m.top.size() == static_cast<std::size_t>(m.topNum) && eTop < droppedMin[i]);
         od::logInfo(std::format("    midKeepSkipped: largest pool {}  lowest removed energy {:.3f}  same as a single 9c: {}",
-                                poolMax[i], droppedMin[i], same ? "yes" : "not guaranteed"));
+                                poolMax[i], droppedMin[i] + shift, same ? "yes" : "not guaranteed"));
       }
-      if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5));
+      if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5, shift));
     }
     od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));
   }
@@ -510,14 +523,16 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             opt.diversityRmsd, before - ms[i].top.size(), before,
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count()));
   }
+  const float shift = stamSet.movable() && std::isfinite(stamRef) ? stamRef - stamSet.minEnergy() : 0.0f;
   od::logInfo("Final topSampleSet:");
   for (std::size_t i = 0; i < ms.size(); ++i) {
     od::logInfo(std::format("  {:<40} {} sample(s)", mobSets[i]->name(), ms[i].top.size()));
     for (std::size_t k = 0; k < ms[i].top.size(); ++k) {
       const auto& r = ms[i].top[k];
-      od::logInfo(std::format("    {:>4}  E {:>10.3f}  inter {:>10.3f}  intra {:>10.3f}  StaM {:>5}  MobM {:>5}  "
-                              "t ({:.3f}, {:.3f}, {:.3f})",
-                              k + 1, r.s.energy, r.s.inter + r.s.interClash, r.s.intra, r.stam, r.mobm, r.s.pose.t[0],
+      od::logInfo(std::format("    {:>4}  E {:>10.3f}  E_9b {:>10.3f}  inter {:>10.3f}  intra {:>10.3f}  StaM intra {:>10.3f}  "
+                              "StaM {:>5}  MobM {:>5}  t ({:.3f}, {:.3f}, {:.3f})",
+                              k + 1, r.rank() + shift, r.s.energy, r.s.inter + r.s.interClash, r.s.intra, r.stamRel + shift,
+                              r.stam, r.mobm, r.s.pose.t[0],
                               r.s.pose.t[1], r.s.pose.t[2]));
     }
   }

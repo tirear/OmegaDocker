@@ -81,7 +81,7 @@ std::vector<RoundSample> take(std::vector<RoundSample>& samples, const std::vect
 }
 
 void sortByEnergy(std::vector<RoundSample>& v) {
-  std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.s.energy < b.s.energy; });
+  std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.rank() < b.rank(); });
 }
 
 double fixedDist(std::span<const Vec3f> a, std::span<const Vec3f> b) { return fixedRmsd(a, b); }
@@ -137,9 +137,9 @@ PoolSelection selectPool(std::vector<RoundSample> merged, const MobmHeavyAtoms& 
     kept = greedyKept(merged, atoms, keepNum, diversityRmsd, fixedDist);
     if (kept.size() >= keepNum) end = kept.back() + 1;
   }
-  while (end > 0 && end < n && merged[end].s.energy == merged[end - 1].s.energy) ++end;
+  while (end > 0 && end < n && merged[end].rank() == merged[end - 1].rank()) ++end;
   PoolSelection r;
-  if (end < n) r.droppedMin = merged[end].s.energy;
+  if (end < n) r.droppedMin = merged[end].rank();
   if (end <= cap) {
     merged.resize(end);
     r.pool = std::move(merged);
@@ -157,7 +157,7 @@ PoolSelection selectPool(std::vector<RoundSample> merged, const MobmHeavyAtoms& 
       r.pool.push_back(std::move(merged[k]));
       --budget;
     } else {
-      r.droppedMin = std::min(r.droppedMin, merged[k].s.energy);
+      r.droppedMin = std::min(r.droppedMin, merged[k].rank());
     }
   }
   return r;
