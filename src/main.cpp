@@ -22,6 +22,7 @@
 
 #include "ccd.hpp"
 #include "checkpoint.hpp"
+#include "closure.hpp"
 #include "cli.hpp"
 #include "log.hpp"
 #include "read_input.hpp"
@@ -206,6 +207,20 @@ class ConfSet {
       od::logInfo(std::format("  {:<40} grow: {} segments, {} reach checks", name_, grow_->stepCount(),
                               grow_->reachCheckCount()));
     }
+    od::ClosureParams clp;
+    clp.method = csgm_.closure == "kic" ? od::ClosureMethod::Kic
+                 : csgm_.closure == "rcd" ? od::ClosureMethod::Rcd
+                                          : od::ClosureMethod::None;
+    clp.rcdTolerance = csgm_.rcdTolerance;
+    clp.rcdMaxIter = csgm_.rcdMaxIter;
+    clp.rcdMaxRestart = csgm_.rcdMaxRestart;
+    clp.kicMaxTrial = csgm_.kicMaxTrial;
+    clp.clashDistance = opt.clashDistance;
+    std::vector<bool> freeMask(cisTrans_.size());
+    for (std::size_t g = 0; g < freeMask.size(); ++g) freeMask[g] = !cisTrans_[g];
+    closer_.emplace(sys_, parts_, freeMask, sampler_.segments(), clp);
+    if (clp.method != od::ClosureMethod::None)
+      for (const auto& line : closer_->describe()) od::logInfo(std::format("  {:<40} closure: {}", name_, line));
   }
   ConfSet(const ConfSet&) = delete;
   ConfSet& operator=(const ConfSet&) = delete;
@@ -294,18 +309,23 @@ class ConfSet {
       ends.push_back(&samples_[id].angles);
     }
     const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { sampler_.sampleSegment(r, seg, a); };
+    const bool closing = closer_ && closer_->active();
     const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
+      bool grown = true;
       if (pe) {
         const int m = static_cast<int>(idx.local % pe_.perLine);
         od::csgm3Sample(od::Rng(p_.seed, p_.stream, idx.global - m), ends, idx.local / pe_.perLine, m, cisTrans_, pe_, a);
-        return !grow_ || grow_->build(r, a, {}).ok;
-      }
-      if (ga) {
+        grown = !grow_ || grow_->build(r, a, {}).ok;
+      } else if (ga) {
         od::csgm2Offspring(r, parents, cisTrans_, ga_, a);
-        return !grow_ || grow_->build(r, a, {}).ok;
+        grown = !grow_ || grow_->build(r, a, {}).ok;
+      } else {
+        sampler_.sample(r, a);
+        grown = !grow_ || grow_->build(r, a, resample).ok;
       }
-      sampler_.sample(r, a);
-      return !grow_ || grow_->build(r, a, resample).ok;
+      if (!grown) return od::GenResult::GrowFailed;
+      if (closing && !closer_->close(r, a, resample)) return od::GenResult::CloseFailed;
+      return od::GenResult::Built;
     };
     const long long l1 = first_ ? n_.initL1 : nextL1_;
     first_ = false;
@@ -314,10 +334,11 @@ class ConfSet {
     const auto st = od::fillL2Pool(sys_, gen, l1, p_, counter_, pool_);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     nextL1_ = st.nextL1;
-    const long long minimized = st.l1 - st.growFailed;
-    od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, E >= Emax {}, "
-                            "not closed {})  steps/sample {:.1f}  {:.2f} s",
-                            name_, pe ? "csgm3" : ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(), st.growFailed, st.overEmax, st.notClosed,
+    const long long minimized = st.l1 - st.growFailed - st.closeFailed;
+    od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, closure {}, "
+                            "E >= Emax {}, not closed {})  steps/sample {:.1f}  {:.2f} s",
+                            name_, pe ? "csgm3" : ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(),
+                            st.growFailed, st.closeFailed, st.overEmax, st.notClosed,
                             minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   }
 
@@ -332,6 +353,7 @@ class ConfSet {
   od::Csgm2Params ga_;
   od::Csgm3Params pe_;
   std::optional<od::GrowBuilder> grow_;
+  std::optional<od::LoopCloser> closer_;
   od::ConfSampleNums n_;
   od::Fill9aParams p_;
   std::uint64_t counter_ = 0;

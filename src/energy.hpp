@@ -76,8 +76,11 @@ class EnergySystem {
   EnergyTerms evaluate(std::span<const float> anglesDeg, std::vector<double>* gradient, std::vector<Vec3f>* coords,
                        const ExternalTermF* external) const;
 
-  // Coordinates only (atoms and virtual atoms of all parts), single precision.
+  // Coordinates only (atoms and virtual atoms of all parts).
   std::vector<Vec3f> coordinates(std::span<const float> anglesDeg) const;
+  std::vector<Vec3> coordinates(std::span<const double> anglesDeg) const;
+  // Index of the first tree torsion of a part in the concatenated angles.
+  int torsionOffset(int part) const { return torsionOffset_[part]; }
 
   struct Pair {
     int i, j;            // coordinate indices

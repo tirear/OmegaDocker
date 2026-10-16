@@ -231,6 +231,7 @@ TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::ve
   for (int bi : t.brokenBonds) {
     const Bond& b = m.bonds[bi];
     if (isMetalBond(m, b)) {
+      tree.links.push_back({b.a, b.b, -1, -1, -1, -1, static_cast<int>(tree.restraints.size())});
       tree.restraints.push_back({b.a, b.b, std::sqrt(dist2(m.atoms[b.a].xyz, m.atoms[b.b].xyz))});
       continue;
     }
@@ -246,9 +247,16 @@ TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::ve
         if (other >= 0 && other != A && heavy(m, other) && (Y < 0 || other < Y)) Y = other;
       }
     }
+    ClosureLink link{A, B, Y};
+    link.copyB = static_cast<int>(tree.virtuals.size());
     tree.virtuals.push_back({A, B, m.atoms[B].xyz});
-    if (Y >= 0) tree.virtuals.push_back({A, Y, m.atoms[Y].xyz});
+    if (Y >= 0) {
+      link.copyY = static_cast<int>(tree.virtuals.size());
+      tree.virtuals.push_back({A, Y, m.atoms[Y].xyz});
+    }
+    link.copyA = static_cast<int>(tree.virtuals.size());
     tree.virtuals.push_back({B, A, m.atoms[A].xyz});
+    tree.links.push_back(link);
   }
 
   // Moving sides.

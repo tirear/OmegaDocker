@@ -192,6 +192,7 @@ std::vector<Vec3T<T>> EnergySystem::coordinatesT(std::span<const T> anglesDeg) c
 }
 
 std::vector<Vec3f> EnergySystem::coordinates(std::span<const float> anglesDeg) const { return coordinatesT(anglesDeg); }
+std::vector<Vec3> EnergySystem::coordinates(std::span<const double> anglesDeg) const { return coordinatesT(anglesDeg); }
 
 template <class T>
 EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient,

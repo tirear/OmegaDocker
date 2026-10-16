@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.39 |
+| 文件版本 | 1.40 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -689,11 +689,39 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - StaM 的 L2 pool 只依分子內能量，與 MobM 無關，所有 MobM 共用。
 - StaM 的 dcss 每個 MobM 各一份（適應度依該 MobM 的對接結果）。
 
-### 7.11 loop 閉合演算法（待實作）
+### 7.11 loop 閉合演算法
 
-- 兩種都實作：CCD（cyclic coordinate descent，先做）與 KIC（kinematic closure）。
-- 位置：csgm 產生樣本之後、9a 最佳化之前；用於主鏈連接鍵的斷鍵（4.8）。
-- 細節見 17.2。
+- 方法：`{stam,mobm}.closure` = `"none"` | `"rcd"`（預設）| `"kic"`。
+  - RCD：random coordinate descent（Chys & Chacón 2013, *JCTC* 9:1821；RCD+：López-Blanco et al. 2016, *NAR* 44:W395）。
+  - KIC：kinematic closure（Coutsias et al. 2004, *J Comput Chem* 25:510；取樣流程參考 Mandell et al. 2009, *Nat Methods* 6:551）。
+  - 不使用 NGK（Stein & Kortemme 2013, *PLoS One* 8:e63090）的名稱：NGK 相對於 KIC 的改進（Taboo sampling、ω 取樣、鄰近殘基相關的 Ramachandran 分布 Rama2b、排斥項與 Ramachandran 項的 ramping）都屬於 Rosetta 的 Monte Carlo 流程或與本規格衝突（ω 為 `fixed`／`cisTrans`；樣本彼此獨立，Taboo 需要依序累積的歷史），本程式只實作 KIC 本體。
+  - 不採用 RCD+ 的鍵長鍵角隨機化（只動兩面角，18 F1）、ω 常態取樣、Ting 2010 的 Ramachandran 分布、ICOSA 評分與 Rosetta 精修；也不使用 RCD 的矩形 Ramachandran 篩選（會排除左手螺旋區，且與 ssType 衝突）。
+- 位置：csgm（含 `csgmBuild = grow` 長完之後）產生樣本之後、9a FIRE 最佳化之前；9a 最佳化仍含閉合約束，`maxBreakDist` 篩選不變（4.8、7.9）。
+- 對象：所有斷鍵（4.8：loop 斷鍵、交聯、使用者指定的斷鍵、金屬配位斷鍵）。依 `Topology::brokenBonds` 的順序逐一閉合（多分子的 StaM 群依分子順序）。
+- 可調整的兩面角：斷鍵兩端之間路徑上可自由轉動的兩面角（`cisTrans` 的 ω 不調整）。
+  - 路徑：分子鍵結圖去掉所有斷鍵後，由 A 到 B 的最短路徑；錨點原子（4.7）不會移動，視為彼此相連（路徑可經過固定區域）。
+  - 金屬配位斷鍵：移動 M、L 其中一個（不在軸上）而不移動另一個的兩面角。
+  - 已閉合的斷鍵用到的兩面角，後面的斷鍵不再調整；沒有可調整的兩面角時跳過，只靠閉合約束。
+- 盡力閉合（best effort）：金屬配位斷鍵（只約束距離，配位角度變化大，且多個配位鍵共用兩面角），以及可調整的兩面角少於 6 個的斷鍵（三對原子一般需要 6 個自由度）。只做一次 RCD（不重新開始、不做碰撞檢查），結果保留（偏差不會變大），由 9a 最佳化與 `maxBreakDist` 篩選決定去留；不會因閉合而捨棄樣本。
+- 其他斷鍵：選 `kic` 但不適用（沒有 Y′，或找不到 3 個樞紐）時改用 RCD；執行紀錄中每個斷鍵列出路徑原子數、可調整的兩面角數、KIC 樞紐數與實際使用的方法。
+- 已在 `rcdTolerance` 以內的斷鍵不調整。
+- RCD：
+  - 每次隨機選一個可調整的兩面角（與上一次不同），以解析式求最佳轉角：對每對原子（被該兩面角移動的一方 m、另一方 s，軸 k 通過 o，⊥ 為垂直於 k 的分量），δ = atan2(Σ k·(r⊥×s⊥), Σ r⊥·s⊥)，r = m − o、s = s − o；金屬配位斷鍵取使 |M − L| 最接近 r₀ 的 δ（兩解取 |δ| 較小者）。
+  - 扭轉樹中轉動永遠移動遠離錨點的一側，兩側的相對幾何與方向無關，因此不需要 RCD 的正向／反向閉合。
+  - 收斂：該斷鍵三對原子的 RMSD ≤ `rcdTolerance`（預設 0.25 Å，Chys & Chacón 2013 的值；須 ≤ `maxBreakDist`；金屬配位斷鍵為 ||M − L| − r₀|）。
+  - 每次最多 `rcdMaxIter`（預設 1000）次更新；未收斂或碰撞檢查失敗時重新開始，最多 `rcdMaxRestart`（預設 10）次。
+- KIC：
+  - 把斷鍵的 A、B 以複製原子的剛體關係（{A′, B, Y} → {A, B′, Y′}）接回，路徑成為一個環；在環上選 3 個樞紐原子（兩側的鍵都是可調整的兩面角，A、B 不可當樞紐），樞紐之間的部分為剛體（其他兩面角保留樣本的值），解 6 個樞紐兩面角使環閉合。
+  - 樞紐的選法：沿路徑由 A 到 B 排序，依序隨機選 i1 < i2 < i3，相鄰樞紐至少相隔 2 個鍵（每次都選得到後續樞紐）。
+  - 解法：三個樞紐間的距離固定，三角形只能繞 P1–P2 轉動（角 τ）；給定 τ，P2、P1 的鍵角條件各為 a cos σ + b sin σ = c 的形式（各 0–2 解），P3 的鍵角條件為 τ 的一維方程。以 720 點掃描 τ ∈ [0, 2π)，在每個分支找變號後二分求根。與 Coutsias 2004 的 16 次多項式為相同的方程組，最多 16 組解；極接近重根的解可能漏掉。
+  - 有多組解時以亂數均勻選一組（Mandell 2009）。
+  - 沒有實數解或碰撞檢查失敗時重選樞紐，最多 `kicMaxTrial`（預設 100）次；第一次使用樣本的兩面角，之後先依下述規則重新抽樣路徑上的兩面角（相當於 KIC／NGK 依 Ramachandran 機率取樣非樞紐兩面角）。
+- 重新抽樣（RCD 重新開始、KIC 重試）：先回到 csgm 產生的樣本，再以 csgm1 的規則（7.5，含 ssType）重新抽樣「全部由可調整兩面角組成」的 csgm1 片段（7.8）；不在這些片段中的可調整兩面角以均勻分布抽樣。csgm2／csgm3 的樣本也使用 csgm1 的規則。
+- 碰撞檢查（閉合之後）：路徑上會被移動的重原子與其他重原子（9a 能量計算的原子對）距離 < `energy.clashDistance` → 失敗。只檢查路徑原子：csgm 產生的側鏈常與其他原子碰撞，交給 9a 最佳化處理。
+- 失敗：重新開始／重試用完仍未閉合 → 捨棄該樣本，計入執行紀錄 9a 行的 `closure`（與 `grow`、`E >= Emax`、`not closed` 分開）；樣本的兩面角回到閉合前。
+- 亂數：使用該樣本的亂數串流（7.9），與執行緒數無關。
+- CPU 以 OpenMP 依樣本平行（與 9a 相同）。
+- 已驗證：2KJJ loop（A:8–15，16 個兩面角）40 個 csgm1a 樣本，不做碰撞檢查時 RCD、KIC 都 40/40 閉合，KIC 偏差 < 10⁻⁴ Å；做碰撞檢查時 15/40、27/40。1L2Y loop（A:6–11）9a：不閉合時 20000 個 L1 只有 18 個通過篩選，RCD 16400 個中 1269 個、KIC 496 個中 63 個通過。1D18 DNA loop（A:3–6，19 個兩面角）RCD、KIC 都可完成。
 
 ---
 
@@ -1234,6 +1262,11 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `{stam,mobm}.peMaxOffset` | `--{stam,mobm}_peMaxOffset` | 30° | 7.7 |
 | `{stam,mobm}.peCoverAngle` | `--{stam,mobm}_peCoverAngle` | 360° | 7.7 |
 | `{stam,mobm}.peSampleNumPerLine` | `--{stam,mobm}_peSampleNumPerLine` | 4 | 7.7 |
+| `{stam,mobm}.closure` | `--{stam,mobm}_closure` | `rcd` | 7.11（`none`、`rcd`、`kic`） |
+| `{stam,mobm}.rcdTolerance` | `--{stam,mobm}_rcdTolerance` | 0.25 Å | 7.11（≤ `topology.maxBreakDist`） |
+| `{stam,mobm}.rcdMaxIter` | `--{stam,mobm}_rcdMaxIter` | 1000 | 7.11 |
+| `{stam,mobm}.rcdMaxRestart` | `--{stam,mobm}_rcdMaxRestart` | 10 | 7.11 |
+| `{stam,mobm}.kicMaxTrial` | `--{stam,mobm}_kicMaxTrial` | 100 | 7.11 |
 | `conf9a.minMethod`（未實作） | `--conf9a_minMethod` | `fire` | 7.9 |
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
@@ -1494,7 +1527,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 9b 最佳化中任一 MobM 原子移出網格（含 line search 試探點）時，移除該 pos（8.6）；曾改為拒絕試探點（1.20），1.22 改回 |
 | — | 9b 以 float 計算，只有加總、L-BFGS、pose 更新用 double；對接樣本即最後被接受的點，不重算（8.6、12.1） |
 | — | `--gridSpacing` 預設維持 0.375 Å（8.1） |
-| — | loop 閉合演算法 CCD 與 KIC 都實作，先做 CCD（7.11） |
+| — | loop 閉合演算法：捨棄 CCD，實作 RCD（預設）與 KIC；NGK 的改進不適用，方法名稱維持 KIC；金屬配位與少於 6 個兩面角的斷鍵為盡力閉合；閉合失敗捨棄樣本；閉合後只檢查路徑原子的碰撞；不加 Ramachandran 篩選（7.11） |
 | — | 9c：穩定排序、原子固定配對 RMSD 加質心距離加速（1.26 起；1.23–1.25 為 AutoDock 式最近配對）；9d 以對稱修正 RMSD（C1 自同構／C2 Hungarian，`--symMaxPerm` 256）再篩選；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，只有 StaM 完全不可動時跨輪快取（6、9） |
 | — | 沒有對接樣本的 dcss 樣本，本輪最低能量記為 +∞（不用 `E_max − 1`）；9b／9c 以 `--sampleBufferNum` 分批，接受分批與一次做完結果不同（9） |
 | — | StaM 可動時，9c 排序能量加入「StaM 構型樣本的 9a 能量 − 所有 StaM 構型樣本的最低值」（9） |
@@ -1505,7 +1538,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 執行參數放入參數檔 `--paramFile`（TOML，與分子設定檔分開），命令列 `--<表>_<鍵>=<值>` 覆寫；舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；搖動權重 w_k = exp(−ΔE_k × `rrtScaling`)，預設暫定 4，不依 `temperature`；擬合時 `temperature` 固定 298.15 K（14.1、10.2） |
 
 ### 17.2 待確認
-- loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
+- （無）
 
 ---
 
@@ -1564,3 +1597,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.37 | 2026-10-16 | 實作 csgm2（7.6）：適應度為上一輪 9c 的本輪最低排序能量；AutoDock-GPU 1.6 的錦標賽、兩點／單點交配與突變只作用在兩面角；`cisTrans` 的 ω 突變為 0°／180° 切換；不做菁英保留；StaM 群以觸發補充的 MobM 的 dcss 為父代（7.3）；`grow` 搭配 csgm2 時失敗即捨棄（7.8）；新增 `csgmGA`、`tournamentRate`、`crossoverRate`、`mutationRate`、`absMaxDang`（14.2） |
 | 1.38 | 2026-10-16 | 實作 csgm3（7.7）：線的編號與亂數（每條線一個亂數狀態）、r 為常態分佈、D = 1 與端點相同時的處理、`cisTrans` 的 ω 取較近的 0°／180°；csgm3 每次的 L1 固定為 k(k−1)·n，不使用 7.4 的 nextL1（7.4）；`csgmGA` 接受 `csgm3`，新增 `peMaxOffset`、`peCoverAngle`、`peSampleNumPerLine`（14.2） |
 | 1.39 | 2026-10-16 | 實作檢查點與 `--resume`（16）：檔案內容與格式、亂數狀態只需保存 9a 計數器、寫入順序、以有 `manifest.toml` 的最大輪次為最新檢查點、接續時的參數比較（只忽略 `maxRound`，同值可重複指定）、可重新指定搬移後的輸入檔（SHA-256 須相同）、不可同時使用 `--paramFile`／`--outPrefix`；9d 輸出前刪除舊的輸出檔（10.3） |
+| 1.40 | 2026-10-16 | 實作 loop 閉合（7.11）：捨棄 CCD，改為 RCD 與 KIC；新增 `{stam,mobm}.closure`、`rcdTolerance`、`rcdMaxIter`、`rcdMaxRestart`、`kicMaxTrial`（14）；9a 執行紀錄新增閉合失敗數 |

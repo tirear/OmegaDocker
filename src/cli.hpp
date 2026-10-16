@@ -39,6 +39,12 @@ struct CsgmOpts {
   int peMaxOffset = 30;
   double peCoverAngle = 360.0;
   int peSampleNumPerLine = 4;
+  // Loop closure (spec 7.11).
+  std::string closure = "rcd";  // none | rcd | kic
+  double rcdTolerance = 0.25;
+  int rcdMaxIter = 1000;
+  int rcdMaxRestart = 10;
+  int kicMaxTrial = 100;
 };
 
 struct Options {

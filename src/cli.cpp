@@ -193,6 +193,22 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                    [csgm](auto& o) -> auto& { return csgm(o).peCoverAngle; }));
   t.push_back(integer(set + ".peSampleNumPerLine", "<n>", "4", who + "csgm3: samples per line",
                       [csgm](auto& o) -> auto& { return csgm(o).peSampleNumPerLine; }));
+  t.push_back({set + ".closure", Type::Str, "none|rcd|kic", "rcd",
+               who + "9a: loop closure of the broken bonds after csgm, before minimization",
+               [csgm](Options& o, const Tokens& v) {
+                 const std::string& s = one(v);
+                 if (s != "none" && s != "rcd" && s != "kic") fail("expected none, rcd or kic but got '{}'", s);
+                 csgm(o).closure = s;
+               },
+               [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).closure}; }});
+  t.push_back(real(set + ".rcdTolerance", "<Å>", "0.25", who + "RCD: converged when the RMSD of the closure atom pairs is at most this",
+                   [csgm](auto& o) -> auto& { return csgm(o).rcdTolerance; }));
+  t.push_back(integer(set + ".rcdMaxIter", "<n>", "1000", who + "RCD: torsion updates per attempt",
+                      [csgm](auto& o) -> auto& { return csgm(o).rcdMaxIter; }));
+  t.push_back(integer(set + ".rcdMaxRestart", "<n>", "10", who + "RCD: restarts from resampled torsions before discarding the sample",
+                      [csgm](auto& o) -> auto& { return csgm(o).rcdMaxRestart; }));
+  t.push_back(integer(set + ".kicMaxTrial", "<n>", "100", who + "KIC: pivot choices before discarding the sample",
+                      [csgm](auto& o) -> auto& { return csgm(o).kicMaxTrial; }));
   t.push_back(integer(set + ".growMaxRetry", "<n>", "16", who + "csgmBuild = grow, csgm1: resamplings of a failing segment before discarding",
                       [csgm](auto& o) -> auto& { return csgm(o).growMaxRetry; }));
   t.push_back(real(set + ".csgm1AngleStep", "<deg>", "1", who + "csgm1a / R: sampled angles are multiples of this step",
@@ -696,6 +712,11 @@ void validateOptions(const Options& o) {
     check(c->peMaxOffset >= 0 && c->peMaxOffset <= 180, set + ".peMaxOffset", "within [0, 180]");
     check(c->peCoverAngle > 0 && c->peCoverAngle <= 360, set + ".peCoverAngle", "within (0, 360]");
     check(c->peSampleNumPerLine >= 1, set + ".peSampleNumPerLine", ">= 1");
+    check(c->rcdTolerance > 0 && c->rcdTolerance <= o.maxBreakDist, set + ".rcdTolerance",
+          "within (0, topology.maxBreakDist]");
+    check(c->rcdMaxIter >= 1, set + ".rcdMaxIter", ">= 1");
+    check(c->rcdMaxRestart >= 0, set + ".rcdMaxRestart", ">= 0");
+    check(c->kicMaxTrial >= 1, set + ".kicMaxTrial", ">= 1");
   }
   check(o.confMinMaxStep >= 0, "conf9a.minMaxStep", ">= 0");
   check(o.confMinDeltaE >= 0, "conf9a.minDeltaE", ">= 0");

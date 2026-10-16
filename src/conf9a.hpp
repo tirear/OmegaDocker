@@ -28,9 +28,13 @@ struct GenIndex {
   long long local = 0;
 };
 
-// Writes one sample to anglesDeg; false: discarded before minimization (csgmBuild = grow).
+// Outcome of generating one sample; only Built samples are minimized.
+enum class GenResult : std::uint8_t { Built, GrowFailed, CloseFailed };
+
+// Writes one sample to anglesDeg; GrowFailed / CloseFailed: discarded before
+// minimization (csgmBuild = grow, loop closure of spec 7.11).
 // rng: Rng(seed, stream, index.global).
-using ConfGenerator = std::function<bool(Rng& rng, const GenIndex& index, std::span<double> anglesDeg)>;
+using ConfGenerator = std::function<GenResult(Rng& rng, const GenIndex& index, std::span<double> anglesDeg)>;
 
 struct Fill9aParams {
   int minL2 = 0;                       // minL2confSampleNum
@@ -50,6 +54,7 @@ struct Fill9aStats {
   long long overEmax = 0;   // rejected: filterEnergy >= Emax
   long long notClosed = 0;  // rejected: closure deviation > maxBreakDist (energy below Emax)
   long long growFailed = 0; // discarded by the generator (csgmBuild = grow)
+  long long closeFailed = 0; // discarded by the generator (loop closure, spec 7.11)
   int batches = 0;
   long long minSteps = 0;   // minimization steps over all samples
   long long nextL1 = 0;     // L1 count of a following refill (spec 7.4)

@@ -46,12 +46,21 @@ struct DistanceRestraint {
   double r0 = 0.0;
 };
 
+// One broken bond a-b (spec 4.8): indices into virtuals (-1 if none) of the
+// copies riding with a (B', Y') and with b (A'), or, for a metal bond, into restraints.
+struct ClosureLink {
+  int a = -1, b = -1, y = -1;  // y: the atom copied as Y'
+  int copyB = -1, copyY = -1, copyA = -1;
+  int restraint = -1;
+};
+
 struct TorsionTree {
   int atomCount = 0;
   std::vector<int> anchors;                // atoms that never move by torsions
   std::vector<TreeTorsion> torsions;       // rotatable torsions, parents before children
   std::vector<VirtualAtom> virtuals;       // coordinate index atomCount + i
   std::vector<DistanceRestraint> restraints;
+  std::vector<ClosureLink> links;          // order of Topology::brokenBonds
   std::vector<Loop> loops;
 };
 

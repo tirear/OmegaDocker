@@ -33,18 +33,22 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
       std::vector<double> angles(static_cast<std::size_t>(n) * d);
       std::vector<EnergyTerms> terms(n);
       std::vector<int> steps(n);
-      std::vector<char> built(n);
+      std::vector<GenResult> built(n);
 #pragma omp parallel for schedule(dynamic, 1)
       for (long long i = 0; i < n; ++i) {
         Rng rng(p.seed, p.stream, counter + done + i);
         std::span<double> a(angles.data() + i * d, d);
         built[i] = gen(rng, GenIndex{counter + done + i, done + i}, a);
-        if (built[i]) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
+        if (built[i] == GenResult::Built) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
       }
       for (long long i = 0; i < n; ++i) {
         const EnergyTerms& e = terms[i];
-        if (!built[i]) {
+        if (built[i] == GenResult::GrowFailed) {
           ++st.growFailed;
+          continue;
+        }
+        if (built[i] == GenResult::CloseFailed) {
+          ++st.closeFailed;
           continue;
         }
         st.minSteps += steps[i];
@@ -74,8 +78,9 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
     if (nowL2 >= p.minL2) break;
     if (st.l1 >= p.maxL1Total)
       fail("9a: {} samples generated (stam.maxL1TotalNum / mobm.maxL1TotalNum) but only {} of {} passed the filters "
-           "(discarded while growing: {}, energy >= energy.Emax: {}, closure deviation > topology.maxBreakDist: {})",
-           st.l1, nowL2, p.minL2, st.growFailed, st.overEmax, st.notClosed);
+           "(discarded while growing: {}, loop closure failed: {}, energy >= energy.Emax: {}, closure deviation > "
+           "topology.maxBreakDist: {})",
+           st.l1, nowL2, p.minL2, st.growFailed, st.closeFailed, st.overEmax, st.notClosed);
     l1 = std::min(p.fixedL1 > 0 ? p.fixedL1 : next, p.maxL1Total - st.l1);
   }
   return st;

@@ -42,6 +42,7 @@
 #include "energy.hpp"
 #include "grid.hpp"
 #include "grow.hpp"
+#include "closure.hpp"
 #include "orient.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
@@ -1696,7 +1697,7 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
   const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
   const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex&, std::span<double> a) {
     smp.sample(r, a);
-    return true;
+    return od::GenResult::Built;
   };
   od::Fill9aParams p;
   p.minL2 = 24;
@@ -1754,7 +1755,7 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
 #pragma omp critical
     seen.emplace_back(idx.global, idx.local);
     smp.sample(r, a);
-    return true;
+    return od::GenResult::Built;
   };
   counter = 5;
   CHECK_THROWS_AS(od::fillL2Pool(sys, rec, 100, p, counter, c), od::Error);
@@ -1922,6 +1923,163 @@ TEST_CASE("grow: reach toward a loop closure (2KJJ)") {
     CHECK_FALSE(res.ok);
     CHECK(res.reachFails == 1);
   }
+}
+
+namespace {
+
+double dist(const od::Vec3& a, const od::Vec3& b) {
+  return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+// Largest distance of the closure atom pairs of one link (single-part system).
+double linkDeviation(const od::TorsionTree& tree, const od::ClosureLink& l, const std::vector<od::Vec3>& x) {
+  if (l.restraint >= 0) {
+    const auto& r = tree.restraints[l.restraint];
+    return std::abs(dist(x[r.a], x[r.b]) - r.r0);
+  }
+  double d = 0;
+  for (int v : {l.copyB, l.copyY, l.copyA})
+    if (v >= 0) d = std::max(d, dist(x[tree.atomCount + v], x[tree.virtuals[v].copyOf]));
+  return d;
+}
+
+}  // namespace
+
+TEST_CASE("closure: RCD and KIC close a loop (2KJJ)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 8, 15));
+  const od::MolSettings& s = cfg.molecules[0];
+  const od::TorsionTree& tree = s.tree;
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  // Link 0: the loop break (16 torsions); then two disulfides with 4 torsions each (best effort).
+  REQUIRE(tree.links.size() == 3);
+  const auto& loop = tree.links[0];
+  CHECK(f.mols[0].atoms[loop.a].name == "C");
+  CHECK(f.mols[0].atoms[loop.b].name == "N");
+  // The random side chains of csgm1a often clash with the closed loop; without the clash check every sample closes.
+  for (const auto& [method, clash] : {std::pair{od::ClosureMethod::Rcd, 1.8}, std::pair{od::ClosureMethod::Kic, 1.8},
+                                      std::pair{od::ClosureMethod::Rcd, 0.0}, std::pair{od::ClosureMethod::Kic, 0.0}}) {
+    CAPTURE(static_cast<int>(method));
+    CAPTURE(clash);
+    od::ClosureParams cp;
+    cp.method = method;
+    cp.clashDistance = clash;
+    const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
+    REQUIRE(closer.active());
+    const auto lines = closer.describe();
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0].find(method == od::ClosureMethod::Kic ? "16 torsions, 8 KIC pivots, kic" : "16 torsions, 8 KIC pivots, rcd") !=
+          std::string::npos);
+    CHECK(lines[1].find("best effort") != std::string::npos);
+    CHECK(lines[2].find("best effort") != std::string::npos);
+    int closed = 0;
+    const int total = 40;
+    for (int k = 0; k < total; ++k) {
+      od::Rng r(7, 0, k);
+      std::vector<double> a = sys.inputAngles();
+      smp.sample(r, a);
+      const auto x0 = sys.coordinates(std::span<const double>(a));
+      CHECK(linkDeviation(tree, loop, x0) > 1.0);
+      const std::vector<double> before = a;
+      if (!closer.close(r, a, resample)) {
+        CHECK(a == before);
+        continue;
+      }
+      ++closed;
+      const auto x = sys.coordinates(std::span<const double>(a));
+      CHECK(linkDeviation(tree, loop, x) <= cp.rcdTolerance * std::sqrt(3.0) + 1e-9);
+      if (method == od::ClosureMethod::Kic) CHECK(linkDeviation(tree, loop, x) < 1e-4);
+      // Best effort does not increase the deviation of the disulfides.
+      for (int li : {1, 2}) CHECK(linkDeviation(tree, tree.links[li], x) <= linkDeviation(tree, tree.links[li], x0) + 1e-6);
+      // Torsions off the closure paths are unchanged; cisTrans omegas are never adjusted.
+      int changed = 0;
+      for (int g = 0; g < sys.torsionCount(); ++g)
+        if (a[g] != before[g]) {
+          ++changed;
+          CHECK_FALSE(smp.cisTrans(g));
+        }
+      CHECK(changed <= 24);
+    }
+    MESSAGE(std::format("closed {} of {}", closed, total));
+    CHECK(closed >= (clash > 0 ? total / 4 : total * 9 / 10));
+  }
+  // Same random stream: same result.
+  od::ClosureParams cp;
+  cp.method = od::ClosureMethod::Kic;
+  const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
+  std::vector<double> a1 = sys.inputAngles(), a2;
+  od::Rng r1(9, 0, 1);
+  smp.sample(r1, a1);
+  a2 = a1;
+  od::Rng r2 = r1;
+  CHECK(closer.close(r1, a1, resample) == closer.close(r2, a2, resample));
+  CHECK(a1 == a2);
+  // The input conformation is already closed: nothing changes.
+  std::vector<double> in = sys.inputAngles();
+  od::Rng r3(1, 0, 0);
+  CHECK(closer.close(r3, in, resample));
+  CHECK(in == sys.inputAngles());
+  // none: no closure.
+  cp.method = od::ClosureMethod::None;
+  CHECK_FALSE(od::LoopCloser(sys, parts, freeMask, smp.segments(), cp).active());
+}
+
+TEST_CASE("closure: metal distance restraints (1ZNF, metalBond = break)") {
+  ConfigFixture f;
+  f.mols.push_back(zincFinger());
+  f.topos.push_back(od::analyzeTopology(f.mols.back(), {}));
+  od::assignDssp({&f.mols.back()}, {&f.topos.back()});
+  f.inputs.clear();
+  for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
+  const std::string zn = "id           = \"mobm:1ZNF.cif:A\"";
+  std::string text = setQuoted(uncommentMetal(od::defaultMolConfigText(f.inputs)), zn, "metalBond    = ", "break");
+  // The torsions of the rings through Zn become rotatable after the break.
+  for (std::size_t p; (p = text.find("rotatable = false\n    category  = \"ring\"", text.find(zn))) != std::string::npos;)
+    text.replace(p, 17, "rotatable = true ");
+  text = phi10(text);
+  std::ofstream(f.path) << text;
+  std::vector<std::string> errors;
+  const auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  for (const auto& e : errors) MESSAGE(e);
+  REQUIRE(cfg);
+  const od::MolSettings& s = cfg->molecules[3];
+  const std::vector<od::EnergyPart> parts{{&f.mols[3], &s.tree}};
+  const od::EnergySystem sys(parts, {});
+  REQUIRE(s.tree.restraints.size() == 3);
+  const od::Csgm1Sampler smp(f.mols[3], s, *cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  od::ClosureParams cp;
+  cp.method = od::ClosureMethod::Kic;  // not applicable to distance restraints: RCD
+  cp.clashDistance = 0;
+  const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
+  const auto lines = closer.describe();
+  REQUIRE(lines.size() == 3);
+  for (const auto& l : lines) {
+    MESSAGE(l);
+    CHECK(l.find("torsions, rcd, best effort (metal distance)") != std::string::npos);
+  }
+  // Best effort: closure never fails; the deviation does not grow and often reaches the tolerance.
+  int reached = 0;
+  for (int k = 0; k < 20; ++k) {
+    od::Rng r(5, 0, k);
+    std::vector<double> a = sys.inputAngles();
+    smp.sample(r, a);
+    const auto x0 = sys.coordinates(std::span<const double>(a));
+    CHECK(closer.close(r, a, resample));
+    const auto x = sys.coordinates(std::span<const double>(a));
+    for (const auto& l : s.tree.links) {
+      CHECK(linkDeviation(s.tree, l, x) <= linkDeviation(s.tree, l, x0) + 1e-9);
+      reached += linkDeviation(s.tree, l, x) <= cp.rcdTolerance + 1e-9;
+    }
+  }
+  CHECK(reached >= 20);
 }
 
 namespace {
