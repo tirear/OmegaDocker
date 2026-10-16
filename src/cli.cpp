@@ -214,6 +214,37 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string&) { o.midKeepSkipped = true; }},
       {"symMaxPerm", Kind::Value, "<n>", "256", "9d: symmetry-corrected RMSD over the graph automorphisms when there are at most this many; otherwise one-to-one pairing within each AD4 type",
        [](Options& o, const std::string& v) { o.symMaxPerm = parseInt32("symMaxPerm", v); }},
+      {"freeEnergy", Kind::Value, "<list>", "od_0100",
+       "9d: binding free energies to compute and rank by, comma separated: adgpu_16, od_0100, or none",
+       [](Options& o, const std::string& v) {
+         o.feAdgpu16 = o.feOd0100 = false;
+         if (v == "none") return;
+         std::size_t start = 0;
+         while (true) {
+           const std::size_t comma = v.find(',', start);
+           const std::string m = v.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+           if (m == "adgpu_16") o.feAdgpu16 = true;
+           else if (m == "od_0100") o.feOd0100 = true;
+           else fail("--freeEnergy: unknown method '{}' (adgpu_16, od_0100, none)", m);
+           if (comma == std::string::npos) break;
+           start = comma + 1;
+         }
+       }},
+      {"outMinPerRank", Kind::Value, "<n>", "40", "9d: output at least the first n samples of every ranking",
+       [](Options& o, const std::string& v) { o.outMinPerRank = parseInt32("outMinPerRank", v); }},
+      {"enthalpyScaling", Kind::Value, "<c>", "0.7564", "od_0100: factor of the AD4 energies (not calibrated yet)",
+       [](Options& o, const std::string& v) { o.enthalpyScaling = parseDouble("enthalpyScaling", v); }},
+      {"entropyScaling", Kind::Value, "<c>", "0.9", "od_0100: factor of -TS (not calibrated yet)",
+       [](Options& o, const std::string& v) { o.entropyScaling = parseDouble("entropyScaling", v); }},
+      {"shakingRadius", Kind::Value, "<dist>", "1.4", "od_0100: radius of the sphere each heavy atom is moved over (Å)",
+       [](Options& o, const std::string& v) { o.shakingRadius = parseDouble("shakingRadius", v); }},
+      {"shakingStep", Kind::Value, "<dist>", "0.2", "od_0100: lattice spacing of the points in the sphere (Å)",
+       [](Options& o, const std::string& v) { o.shakingStep = parseDouble("shakingStep", v); }},
+      {"temperature", Kind::Value, "<K>", "298.15", "od_0100: temperature of the Boltzmann weights and -TS (K)",
+       [](Options& o, const std::string& v) { o.temperature = parseDouble("temperature", v); }},
+      {"unboundCandidateNum", Kind::Value, "<n>", "20",
+       "od_0100: conformation samples with the lowest 9a energy evaluated for the unbound free energy",
+       [](Options& o, const std::string& v) { o.unboundCandidateNum = parseInt32("unboundCandidateNum", v); }},
       {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
        [](Options& o, const std::string& v) { o.rotStep = parseDouble("rotStep", v); }},
       {"maxNearDistance", Kind::Value, "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -356,6 +387,13 @@ void validateOptions(const Options& o) {
   if (o.sampleBufferNum < 1) fail("--sampleBufferNum must be >= 1");
   if (o.midTopSampleFactor && *o.midTopSampleFactor < 1) fail("--midTopSampleFactor must be >= 1");
   if (o.symMaxPerm < 0) fail("--symMaxPerm must be >= 0");
+  if (o.outMinPerRank < 1) fail("--outMinPerRank must be >= 1");
+  if (!(o.enthalpyScaling >= 0)) fail("--enthalpyScaling must be >= 0");
+  if (!(o.entropyScaling >= 0)) fail("--entropyScaling must be >= 0");
+  if (!(o.shakingRadius > 0)) fail("--shakingRadius must be > 0");
+  if (!(o.shakingStep > 0)) fail("--shakingStep must be > 0");
+  if (!(o.temperature > 0)) fail("--temperature must be > 0");
+  if (o.unboundCandidateNum < 1) fail("--unboundCandidateNum must be >= 1");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {

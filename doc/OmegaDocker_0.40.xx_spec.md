@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.31 |
+| 文件版本 | 1.32 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -434,7 +434,7 @@ flowchart TD
   A --> B["9b 對接樣本生成<br/>取樣 pos → 篩選 → 最佳化"]
   B --> C["9c 排序、多樣性篩選<br/>更新 topSampleSet、篩選 dcss"]
   C --> CP["寫出檢查點（第 16 節）"] --> R
-  R -- 否 --> D["9d 精確重算能量、對稱修正篩選、輸出"]
+  R -- 否 --> D["9d 對稱修正篩選、逐對重算、結合自由能、輸出"]
 ```
 
 - 每個 MobM 各自擁有：MobM 的 dcss / L2 pool、**StaM 的 dcss**、topSampleSet。
@@ -969,17 +969,74 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ## 10. 9d：停止與輸出
 
 - 停止條件：輪數達 `maxRound`。
-- 目前只實作到 9c：所有輪次結束後，在執行紀錄列出每個 MobM 的 topSampleSet（能量、StaM／MobM 構型樣本 ID、位置）；精確重算與檔案輸出尚未實作。
-- 精確重算：沿用目前 OmegaDocker 的 CPU 重算流程（`make_resfiles` 中的 `calc_interE_f`、`calc_intraE_f`），本版不改能量函式。
+- 9d 的順序：對稱修正篩選 → 重算與結合自由能（10.1、10.2）→ 排序與選出輸出樣本 → 寫出檔案（10.3）。執行紀錄另列出最終 topSampleSet（9b 網格能量）。
 - 對稱修正篩選（目前已實作，在所有輪次結束後執行）：依最終 topSampleSet 的順序（能量由低到高），與已保留樣本「使用相同 StaM 構型」且對稱修正 RMSD < `diversityRmsd` 的樣本移除；執行紀錄顯示移除數。質心距離加速同 9c（兩種對稱修正都是一對一配對）。
   - 對稱修正 RMSD：MobM 重原子圖（標記為 AD4 類型，不分鍵級，不含金屬配位鍵）的自同構數 ≤ `symMaxPerm` 時，取所有自同構中最小的 RMSD（C1）；超過時，在每個 AD4 類型內以 Hungarian 法求最佳一對一配對（C2，不考慮鍵結）。
   - 自同構於啟動時列舉一次（色彩細化後回溯），列舉到 `symMaxPerm` + 1 個即停止。
   - `symMaxPerm` 預設 256。實測（CPU 單執行緒）：C1 每個自同構約 0.15 µs（154 個重原子）至 0.37 µs（405 個重原子），與自同構數成正比；C2 約 26 µs（154 個重原子）、235 µs（405 個重原子）。兩者相等的自同構數約 170–650。
 - 不分群：9c 與 9d 篩選後，以相同門檻分群只會得到單一成員的群，因此不做分群（1.27）。
-- 輸出（每個 MobM 一個目錄 `<outPrefix>/<MobM id>/`）：
-  - 每個 top 樣本：MobM 座標，依下表啟用的格式各輸出一份。
-  - 每個被使用到的 StaM 構型：依下表啟用的格式各輸出一份。
-  - `summary.tsv`：排名、能量各項、使用的 StaM 構型編號（一律輸出）。
+
+### 10.1 重算
+
+- 對象：對稱修正篩選後的最終 topSampleSet 全部樣本。
+- 座標：與 9b 相同的單精度 pose 與兩面角（R(float q)(y − float center) + float t），不再最佳化。
+- StaM–MobM 分子間能量改用逐原子對計算（單精度逐對項，雙精度加總；截斷距離與函式同 8.1），取代網格內插。
+  - 實測（2KJJ 對 BTN，約 1,850 個樣本）：預設網格間距 0.375 Å 時，網格值與逐對雙精度值的最大差 0.55 kcal/mol、平均 0.17；網格值一律偏高（最佳化後的 pose 位於能量井底，三線性內插墊高井底）；網格用 float 或 double 結果相同；逐對 float 與 double 最大差 0.0006（1L2Y：0.0055）。前 200 名中 11 個與逐對計算的排序不同。
+- 碰撞懲罰：每個 MobM 重原子與最近的 StaM 重原子距離 < `clashDistance` 時計入（同 9b 距離網格的定義）。
+- MobM 分子內能量與碰撞懲罰：以單精度重算（同 9b）。
+- StaM 分子內能量與碰撞懲罰：該 StaM 構型樣本單獨以單精度計算。
+- 9b 排序能量（重算）E_9b = 分子間 + 分子間碰撞懲罰 + MobM 分子內 + MobM 碰撞懲罰 + StaM 項（第 9 節，相對於所有 StaM 構型樣本 9a 能量的最低值）。
+
+### 10.2 結合自由能
+
+- `--freeEnergy <list>`：`adgpu_16`、`od_0100`，以逗號分隔；`none` 表示不計算。預設 `od_0100`。
+- 兩種方法都不計入碰撞懲罰與閉合約束；含碰撞懲罰的樣本在輸出表中標記（`clash = yes`）。
+- 其他評分函數留待後續版本（18 節 F2）。
+
+#### adgpu_16（AutoDock-GPU 1.6）
+
+- ΔG = 分子間能量（10.1，AD4 各項）+ 0.2983 × N_tors。
+- N_tors：MobM 扭轉樹中可轉動的兩面角數（對應 AutoDock-GPU 的 TORSDOF）。
+- 與 AutoDock-GPU 1.6 相同，假設未結合構型與結合構型相同，分子內能量互相抵消。
+
+#### od_0100（OmegaDocker v0.33.0 方法的修正版）
+
+- 概念：由原子周圍可被佔據的空間估計亂度（的上限）。周圍空間越大，原子越可能自由。
+- 原子搖動（每個重原子；氫原子不搖動）：
+  - 格點：以原子位置為中心、間距 `--shakingStep` 的立方晶格中，距離 ≤ `--shakingRadius` 的點（中心點包含在內）。
+  - 每點能量：只移動該原子，其他原子不動；逐原子對（單精度）計算 AD4 各項。原子對為三鍵以內（1-2、1-3、1-4）以外的所有原子對，包含 9a 中距離不變而不計的原子對；不計鍵結項、碰撞懲罰與閉合約束。複合物另含 StaM–MobM 分子間原子對。
+  - 機率權重（配分函數）：w_k = exp(−(E_k − E_min) / RT)，R = 1.987204259 × 10⁻³ kcal/(mol·K)，T = `--temperature`。
+  - 可佔據比例：f_i = Σ_k w_k / 點數，介於 (0, 1]；步長變小時收斂，不受 `--gridSpacing` 影響。
+- 熵項：−TS = −`entropyScaling` × RT × Σ_i ln f_i（≥ 0）。v0.33.0 的 nts 少了負號，且 `molRandomness` 在每個原子重設，只計入最後一個原子；兩者在此修正。
+- G_complex = `enthalpyScaling` × (分子間 + MobM 分子內 + StaM 分子內) + (−TS)_complex。
+  - (−TS)_complex 涵蓋 StaM 與 MobM 的重原子。距離所有 MobM 原子 ≥ 20.48 Å + `shakingRadius` 的 StaM 原子不受 MobM 影響，直接使用該 StaM 構型單獨時的值（結果相同）。
+- G_unbound(X) = min over 候選構型 [`enthalpyScaling` × X 分子內能量 + (−TS)_X 單獨]，X 為 StaM 群或 MobM。
+  - 候選構型：X 所有 9a 構型樣本（L2 pool 與 dcss）中 9a 能量最低的 `--unboundCandidateNum` 個；不可動時為輸入構型。
+  - 9a 構型樣本是單獨存在、各自最小化的構型，比對接後的構型更符合未結合狀態；所得最低值為真正最低值的上限。
+  - 同一 MobM 的所有樣本使用相同的 G_unbound，因此排序不受影響，只影響絕對值。
+- ΔG = G_complex − G_unbound(StaM) − G_unbound(MobM)。分子內能量相減後成為形變能；參考體積在相減後消去。
+- `enthalpyScaling`（0.7564，來源待查）與 `entropyScaling`（0.9）**尚未校準**；CUDA 版與 OpenCL 版完成後，以標準資料最佳化。
+- 半徑與步長實測（前 40 名，r = 1.4 Å／步長 0.2 為參考）：
+  - 半徑固定時，步長 0.2–0.4 的 Δ(−TS) 平均值差 0.1–0.3 kcal/mol；步長 0.25 的最大差 0.16（BTN）、0.60（1L2Y），時間約一半。
+  - 半徑改變 Δ(−TS) 的大小（r 0.8 約為 r 1.4 的一半），半徑越小排序與參考差越多（Spearman：r 1.2 為 0.92–0.99，r 0.8 為 0.86–0.95）。f_i 是佔球的比例，半徑為模型參數。
+  - 2KJJ 對 BTN：Δ(−TS) 約 +5 至 +11 kcal/mol；2KJJ 對 1L2Y：−0.3 至 +11（少數為負，表示結合後部分原子的可佔據空間變大）。
+  - 時間（16 執行緒，CPU）：r 1.4／步長 0.2 時，2KJJ（786 個原子）的複合物每個樣本約 0.15–0.2 s。
+
+### 10.3 排序與輸出
+
+- 排序：9b（E_9b）與 `--freeEnergy` 啟用的每種方法，各自對整個 topSampleSet 由低到高排序（穩定排序，相同值依 9b 順序）。
+- 輸出樣本：每種排序的前 `--outMinPerRank` 個（預設 40）的聯集；topSampleSet 不足時依實際數量。
+- 輸出目錄：每個 MobM 一個 `<outPrefix>/<MobM id>/`；MobM id 中英數字與 `._+-` 以外的字元改為 `_`（例：`mobm_BTN_ideal.sdf_1`）。
+- 結構檔：
+  - 每個輸出樣本：MobM 座標（含所有氫原子），檔名 `pose_NNNN`，編號依 9b 排序在輸出樣本中的名次（從 1 起）。
+  - 每個被輸出樣本使用的 StaM 構型：`stam_<StaM 構型樣本 ID>`。
+  - 依下表啟用的格式各輸出一份。
+- `summary.tsv`：每個輸出樣本一列，依 pose 編號排序。欄位：
+  - `pose`、`mobm_files`、`stam_files`（以逗號分隔的檔名）、`stam_sample`、`mobm_sample`。
+  - `rank_<方法>`：在整個 topSampleSet 中的名次（`rank_9b`、`rank_adgpu_16`、`rank_od_0100`）。
+  - `E_9b`（重算）、`E_9b_grid`（9c 排序能量，網格）、`inter`、`inter_clash`、`mobm_intra`、`mobm_clash`、`stam_term`、`stam_intra`、`stam_clash`、`clash`（任一碰撞懲罰 > 0 時為 `yes`）。
+  - `dG_adgpu_16`；`dG_od_0100`、`G_complex`、`mTS_complex`、`G_unbound_stam`、`G_unbound_mobm`（啟用時）。
+- `rank_<方法>.tsv`：該方法的排序，欄位 `rank`、`pose`、`mobm_files`、`stam_files`、`energy`、`clash`；只列輸出樣本，依名次排序。
 
 | 格式 | 參數 | 預設 | 副檔名 |
 |---|---|---|---|
@@ -990,8 +1047,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - 四個參數各自獨立，值為 `true` / `false`。
 - 四個皆為 `false` → 報錯並結束。
-- 部分電荷：mol2 寫入計算使用的電荷；SDF 以原子屬性寫入；PDB、mmCIF 不寫電荷。
-- PDB 已啟用但原子數或鏈數超過 PDB 格式上限時，該檔改輸出 mmCIF（即使 `--outCif = false`），並在執行紀錄中警告；若 `--outCif = true`，則該檔只輸出 mmCIF 一份。
+- 部分電荷：每個原子的部分電荷（Gasteiger 或輸入檔的電荷；計算時非極性氫的電荷併入重原子）。mol2 寫入原子欄位；SDF 以 `atom.dprop.PartialCharge` 資料欄位寫入；PDB、mmCIF 不寫部分電荷，寫入形式電荷。
+- PDB 已啟用但超過 PDB 格式上限（原子數 > 99999、鏈 ID 超過 1 個字元、殘基名稱超過 3 個字元、殘基編號超出 −999–9999）時，該檔改輸出 mmCIF（即使 `--outCif = false`），並在執行紀錄中警告；若 `--outCif = true`，則該檔只輸出 mmCIF 一份。
+- 各格式的寫法：
+  - 沒有殘基資訊的分子（SDF、mol2 輸入）：殘基 `UNL`，鏈 `L`（MobM）或 `S`（StaM），編號 1；沒有原子名稱時以元素符號加流水號命名（`C1`、`C2`、…）。
+  - PDB：標準胺基酸與核苷酸為 `ATOM`，其他為 `HETATM`；每條鏈後加 `TER`；`HETATM` 的鍵與殘基間主鏈以外的鍵（雙硫鍵、交聯、金屬配位）寫成 `CONECT`。
+  - mmCIF：`_atom_site`；殘基間主鏈以外的鍵寫成 `_struct_conn`（`disulf`、`metalc`、`covale`）；非標準殘基內的鍵寫成 `_chem_comp_bond`（本程式讀取 mmCIF 時仍以 CCD 為準，`UNL` 需另以 `--ccd` 提供）。
+  - SDF：原子數與鍵數 ≤ 999 時 V2000，否則 V3000；鍵級為 Kekulé 形式，金屬配位鍵寫成單鍵；形式電荷寫入 `M  CHG`；多個分子（StaM 群）各一筆紀錄。
+  - mol2：SYBYL 原子類型由元素、鍵級與芳香性判定；鍵類型 `1`／`2`／`3`／`ar`／`am`（金屬配位鍵為 `1`）；附 `@<TRIPOS>SUBSTRUCTURE`；多個分子各一個 `@<TRIPOS>MOLECULE`。mol2 沒有形式電荷欄位，讀取時形式電荷可能落在等價的共振原子上。
 
 ---
 
@@ -1130,6 +1193,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--midTopSampleFactor` | 1（使用 `--midKeepSkipped` 時 2） | 9 |
 | `--midKeepSkipped` | 關閉 | 9 |
 | `--symMaxPerm` | 256 | 10 |
+| `--freeEnergy` | `od_0100` | 10.2 |
+| `--outMinPerRank` | 40 | 10.3 |
+| `--enthalpyScaling` | 0.7564（未校準） | 10.2 |
+| `--entropyScaling` | 0.9（未校準） | 10.2 |
+| `--shakingRadius` | 1.4 Å | 10.2 |
+| `--shakingStep` | 0.2 Å | 10.2 |
+| `--temperature` | 298.15 K | 10.2 |
+| `--unboundCandidateNum` | 20 | 10.2 |
 | `--lbfgsMemory` | 7 | 12 |
 | `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
 | `--maxTransStep` | 0.5 Å | 12 |
@@ -1340,6 +1411,10 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | 9c：穩定排序、原子固定配對 RMSD 加質心距離加速（1.26 起；1.23–1.25 為 AutoDock 式最近配對）；9d 以對稱修正 RMSD（C1 自同構／C2 Hungarian，`--symMaxPerm` 256）再篩選；沒有對接樣本的 dcss 樣本移除；每輪每個 StaM 構型建一次網格，只有 StaM 完全不可動時跨輪快取（6、9） |
 | — | 沒有對接樣本的 dcss 樣本，本輪最低能量記為 +∞（不用 `E_max − 1`）；9b／9c 以 `--sampleBufferNum` 分批，接受分批與一次做完結果不同（9） |
 | — | StaM 可動時，9c 排序能量加入「StaM 構型樣本的 9a 能量 − 所有 StaM 構型樣本的最低值」（9） |
+| — | 9d 以逐原子對單精度重算分子間能量，不另做精確能量的再最佳化（10.1） |
+| — | 結合自由能 `adgpu_16`、`od_0100`，預設 `od_0100`；每種排序至少輸出 `outMinPerRank`（40）個（10.2、10.3） |
+| — | od_0100：球形搖動格點（半徑 1.4 Å、步長 0.2 Å，與網格間距無關）、Boltzmann 權重（捨棄 `wellDepth` 線性權重）、可佔據比例 f_i、−TS = −`entropyScaling` × RT × Σ ln f_i；鍵結不列入；未結合狀態取 9a 構型樣本中的最低自由能（10.2） |
+| — | `enthalpyScaling`、`entropyScaling` 維持預設，標註未校準；CUDA 與 OpenCL 版完成後以標準資料最佳化（10.2） |
 
 ### 17.2 待確認
 - loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
@@ -1393,3 +1468,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.29 | 2026-10-15 | `--midTopSampleFactor` 預設改為 1（大於 1 僅供實驗）；`sampleBufferNum` 下限改為 max(4, `midTopSampleFactor` + 2) × `topSampleNum`，預設維持 4 × `topSampleNum`（9、13） |
 | 1.30 | 2026-10-15 | 新增 `--midKeepSkipped`（保留池，上限 `sampleBufferNum`，超過時保留的樣本優先）；搭配時 `midTopSampleFactor` 預設 2；執行紀錄顯示保留池大小、E_drop 與是否保證與一次做完相同；記錄保留池與加大 `sampleBufferNum` 的實測及使用建議（9、13、14） |
 | 1.31 | 2026-10-16 | 9c 排序能量加入 StaM 項（StaM 構型樣本的 9a 能量 − 目前所有 StaM 構型樣本的最低值）；步驟 5 同樣使用排序能量（8.6、9） |
+| 1.32 | 2026-10-16 | 實作 9d：逐原子對重算與網格誤差實測、結合自由能 `adgpu_16` 與 `od_0100`（原子搖動熵）、各排序與輸出樣本選取、結構檔（PDB、mmCIF、SDF、mol2）、`summary.tsv` 與 `rank_<方法>.tsv`；新增 `--freeEnergy`、`--outMinPerRank`、`--enthalpyScaling`、`--entropyScaling`、`--shakingRadius`、`--shakingStep`、`--temperature`、`--unboundCandidateNum`（10、14） |

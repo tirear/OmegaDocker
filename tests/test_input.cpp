@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <format>
 #include <limits>
+#include <map>
+#include <numeric>
 #include <fstream>
 #include <numbers>
 #include <optional>
@@ -37,6 +39,9 @@
 #include "grid.hpp"
 #include "grow.hpp"
 #include "orient.hpp"
+#include "score9d.hpp"
+#include "shaking.hpp"
+#include "write_struct.hpp"
 #include "molconfig.hpp"
 #include "rama.hpp"
 #include "read_input.hpp"
@@ -2479,4 +2484,171 @@ TEST_CASE("symrmsd: automorphisms, Hungarian pairing, symmetry-corrected RMSD") 
   for (auto& p : moved) p[0] += 2.5f;
   CHECK(c1.rmsd(x, moved) >= 2.5 - 1e-4);
   CHECK(c2.rmsd(x, moved) >= 2.5 - 1e-4);
+}
+
+TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
+  GridFixture x;
+  const od::EnergyParams ep;
+  std::vector<od::Vec3f> sx, mx;
+  {
+    std::vector<od::Vec3> d;
+    x.staSys->evaluate(x.staSys->inputAngles(), nullptr, &d);
+    for (const auto& v : d) sx.push_back({float(v[0]), float(v[1]), float(v[2])});
+    x.mobSys->evaluate(x.mobSys->inputAngles(), nullptr, &d);
+    for (const auto& v : d) mx.push_back({float(v[0]), float(v[1]), float(v[2])});
+  }
+  const od::ShakeAtoms stam = od::shakeAtoms(*x.staSys, x.staParts, sx);
+  REQUIRE(stam.size() == x.stam.size());
+
+  // dockWorld: identity rotation and t = centre keeps the coordinates.
+  od::DockSample s0;
+  s0.center = {1.5, -2, 3};
+  s0.pose.t = s0.center;
+  const auto w0 = od::dockWorld(mx, s0);
+  for (std::size_t k = 0; k < mx.size(); ++k)
+    for (int d = 0; d < 3; ++d) CHECK(w0[k][d] == doctest::Approx(mx[k][d]).epsilon(1e-5));
+
+  for (float shift : {12.0f, 25.0f}) {
+    std::vector<od::Vec3f> moved = mx;
+    for (auto& v : moved) v[0] += shift;
+    const od::ShakeAtoms mob = od::shakeAtoms(*x.mobSys, x.mobParts, moved);
+    od::GridAtoms md = x.mobm;
+    for (auto& v : md.xyz) v[0] += shift;
+    const od::InterTerms it = od::exactInter(stam, mob, ep);
+    const double ref = od::pairInterEnergy(x.stam, md, ep);
+    CHECK(it.inter == doctest::Approx(ref).epsilon(1e-4).scale(1.0));
+    // Clash: nearest StaM heavy atom of every MobM heavy atom.
+    double clash = 0;
+    for (std::size_t i = 0; i < md.size(); ++i) {
+      if (!md.heavy[i]) continue;
+      double nearest = 1e30;
+      for (std::size_t j = 0; j < x.stam.size(); ++j)
+        if (x.stam.heavy[j]) nearest = std::min(nearest, std::hypot(md.xyz[i][0] - x.stam.xyz[j][0], md.xyz[i][1] - x.stam.xyz[j][1], md.xyz[i][2] - x.stam.xyz[j][2]));
+      if (nearest < ep.clashDistance) clash += ep.clashBase + ep.clashK * (ep.clashDistance - nearest) * (ep.clashDistance - nearest);
+    }
+    CHECK(it.clash == doctest::Approx(clash).epsilon(1e-3));
+  }
+
+  // Sphere points.
+  const auto pts = od::shakePoints(1.4, 0.2);
+  CHECK(pts.size() == 1419);
+  CHECK(pts[0] == od::Vec3f{0, 0, 0});
+  for (const auto& p : pts) CHECK(std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) <= 1.4 + 1e-5);
+  CHECK(od::shakePoints(1.0, 0.4).size() == 81);
+
+  od::ShakeParams sp;
+  sp.step = 0.4;
+  // A single atom, or two atoms within three bonds, move freely: ln f = 0.
+  {
+    od::ShakeAtoms one;
+    one.xyz = {{0, 0, 0}, {1.5f, 0, 0}};
+    one.type = {od::Ad4Type::C, od::Ad4Type::C};
+    one.charge = {0.1f, -0.1f};
+    one.heavy = {1, 1};
+    one.near = {{0, 1}, {0, 1}};
+    for (double v : od::shakeLnF(one, ep, sp)) CHECK(v == doctest::Approx(0).epsilon(1e-12));
+    one.near = {{0}, {1}};
+    const auto l = od::shakeLnF(one, ep, sp);
+    for (double v : l) {
+      CHECK(v < 0);
+      CHECK(v >= std::log(1.0 / 179) - 1e-9);
+    }
+  }
+  // Complex: StaM atoms out of reach of the MobM keep their values alone.
+  std::vector<od::Vec3f> far = mx;
+  for (auto& v : far) v[0] += 30;
+  const od::ShakeAtoms mob = od::shakeAtoms(*x.mobSys, x.mobParts, far);
+  const auto alone = od::shakeLnF(stam, ep, sp);
+  for (std::size_t a = 0; a < stam.size(); ++a) {
+    if (stam.heavy[a]) CHECK(alone[a] <= 1e-12);
+    else CHECK(alone[a] == 0);
+  }
+  const auto full = od::shakeLnF(od::joinShakeAtoms(stam, mob), ep, sp);
+  const double sumFull = std::accumulate(full.begin(), full.end(), 0.0);
+  CHECK(od::complexSumLnF(stam, alone, mob, ep, sp) == doctest::Approx(sumFull).epsilon(1e-9));
+  CHECK(od::minusTS(sumFull, sp) > 0);
+  CHECK(od::minusTS(-1.0, sp) == doctest::Approx(0.9 * od::kGasConstant * 298.15));
+}
+
+TEST_CASE("write_struct: PDB, mmCIF, SDF and mol2") {
+  const auto dir = std::filesystem::temp_directory_path() / std::format("od_test_out_{}", ::getpid());
+  std::filesystem::create_directories(dir);
+  for (const std::string& file : {std::string("1L2Y.cif"), std::string("2KJJ.cif"), std::string("BTN_ideal.sdf")}) {
+    const auto mols = od::loadMolecules(kData + "/" + file, od::Role::MobM, ccd());
+    REQUIRE(mols.size() == 1);
+    const od::Molecule& m = mols[0];
+    od::StructPart part{&m, {}};
+    for (const auto& a : m.atoms) part.xyz.push_back({float(a.xyz[0] + 1), float(a.xyz[1]), float(a.xyz[2])});
+    const std::vector<od::StructPart> parts{part};
+    CHECK(od::fitsPdb(parts));
+    bool fb = true;
+    const auto files = od::writeStructure((dir / "x").string(), parts, {true, true, true, true}, "test", fb);
+    CHECK_FALSE(fb);
+    CHECK(files == std::vector<std::string>{"x.pdb", "x.cif", "x.sdf", "x.mol2"});
+    for (const char* ext : {".cif", ".sdf", ".mol2"}) {
+      if (std::string(ext) == ".cif" && !m.hasResidueInfo) {
+        // Without residue information (UNL, no CCD entry): bonds are given in _chem_comp_bond.
+        std::ifstream c(dir / "x.cif");
+        const std::string text((std::istreambuf_iterator<char>(c)), std::istreambuf_iterator<char>());
+        CHECK(text.find("_chem_comp_bond.comp_id") != std::string::npos);
+        continue;
+      }
+      const auto back = od::loadMolecules((dir / (std::string("x") + ext)).string(), od::Role::MobM, ccd());
+      REQUIRE(back.size() == 1);
+      REQUIRE(back[0].atoms.size() == m.atoms.size());
+      CHECK(back[0].bonds.size() == m.bonds.size());
+      for (std::size_t a = 0; a < m.atoms.size(); ++a) {
+        CHECK(back[0].atoms[a].atomicNum == m.atoms[a].atomicNum);
+        if (std::string(ext) != ".mol2") CHECK(back[0].atoms[a].formalCharge == m.atoms[a].formalCharge);
+        for (int d = 0; d < 3; ++d) CHECK(back[0].atoms[a].xyz[d] == doctest::Approx(part.xyz[a][d]).epsilon(1e-3).scale(1.0));
+      }
+      if (std::string(ext) == ".mol2") {
+        // mol2 has no formal charges: the reader places them on an equivalent resonance atom.
+        int q0 = 0, q1 = 0;
+        for (std::size_t a = 0; a < m.atoms.size(); ++a) {
+          q0 += m.atoms[a].formalCharge;
+          q1 += back[0].atoms[a].formalCharge;
+        }
+        CHECK(q0 == q1);
+      }
+      if (std::string(ext) == ".mol2")
+        for (std::size_t a = 0; a < m.atoms.size(); ++a)
+          CHECK(back[0].atoms[a].partialCharge == doctest::Approx(m.atoms[a].partialCharge).epsilon(1e-3).scale(1.0));
+    }
+    // PDB: fixed columns.
+    std::ifstream in(dir / "x.pdb");
+    std::string line;
+    std::size_t n = 0;
+    while (std::getline(in, line)) {
+      if (line.rfind("ATOM", 0) != 0 && line.rfind("HETATM", 0) != 0) continue;
+      REQUIRE(line.size() == 80);
+      CHECK(std::stod(line.substr(30, 8)) == doctest::Approx(part.xyz[n][0]).epsilon(1e-3).scale(1.0));
+      CHECK(std::stod(line.substr(46, 8)) == doctest::Approx(part.xyz[n][2]).epsilon(1e-3).scale(1.0));
+      ++n;
+    }
+    CHECK(n == m.atoms.size());
+    if (file == "BTN_ideal.sdf") {
+      std::map<std::string, int> types;
+      for (std::size_t a = 0; a < m.atoms.size(); ++a) ++types[od::sybylType(m, static_cast<int>(a))];
+      CHECK(types["N.am"] == 2);
+      CHECK(types["S.3"] == 1);
+      CHECK(types["O.2"] == 2);
+      CHECK(types["O.3"] == 1);
+    }
+    // Over the PDB limits (two-character chain): mmCIF instead.
+    od::Molecule big = m;
+    big.hasResidueInfo = true;
+    if (big.residues.empty()) {
+      big.residues.push_back({{"AB", 1, "", "LIG"}, {}});
+      for (auto& a : big.atoms) a.residue = 0;
+    } else {
+      big.residues[0].info.chain = "AB";
+    }
+    const std::vector<od::StructPart> bp{{&big, part.xyz}};
+    CHECK_FALSE(od::fitsPdb(bp));
+    const auto f2 = od::writeStructure((dir / "y").string(), bp, {true, false, false, false}, "test", fb);
+    CHECK(fb);
+    CHECK(f2 == std::vector<std::string>{"y.cif"});
+  }
+  std::filesystem::remove_all(dir);
 }

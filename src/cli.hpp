@@ -77,6 +77,15 @@ struct Options {
   std::optional<int> midTopSampleFactor;  // default: 2 with midKeepSkipped, otherwise 1 (spec 9)
   bool midKeepSkipped = false;
   int symMaxPerm = 256;  // raised to 4 x topSampleNum when smaller (spec 9)
+  bool feAdgpu16 = false;  // --freeEnergy (spec 10.2)
+  bool feOd0100 = true;
+  int outMinPerRank = 40;
+  double enthalpyScaling = 0.7564;
+  double entropyScaling = 0.9;
+  double shakingRadius = 1.4;
+  double shakingStep = 0.2;
+  double temperature = 298.15;
+  int unboundCandidateNum = 20;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;

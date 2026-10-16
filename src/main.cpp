@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <map>
 #include <format>
 #include <limits>
 #include <memory>
@@ -28,6 +31,9 @@
 #include "grid.hpp"
 #include "grow.hpp"
 #include "orient.hpp"
+#include "score9d.hpp"
+#include "shaking.hpp"
+#include "write_struct.hpp"
 #include "molconfig.hpp"
 #include "topology.hpp"
 #include "version.hpp"
@@ -207,6 +213,17 @@ class ConfSet {
     for (const auto& s : pool_) e = std::min(e, s.energy);
     return e;
   }
+  // Angles of the n samples with the lowest 9a energy (L2 pool and dcss samples); the input conformation when not movable.
+  std::vector<std::vector<float>> lowestAngles(int n) const {
+    if (!movable()) return {{}};
+    std::vector<const od::ConfSample*> v;
+    for (const auto& s : samples_) v.push_back(&s);
+    for (const auto& s : pool_) v.push_back(&s);
+    std::stable_sort(v.begin(), v.end(), [](auto a, auto b) { return a->energy < b->energy; });
+    std::vector<std::vector<float>> out;
+    for (std::size_t k = 0; k < v.size() && k < static_cast<std::size_t>(n); ++k) out.push_back(v[k]->angles);
+    return out;
+  }
   int dockingNum() const { return movable() ? n_.docking : 1; }
   int eliteNum() const { return movable() ? n_.elite : 1; }
 
@@ -309,6 +326,237 @@ std::string energyList(const std::vector<od::RoundSample>& v, std::size_t n, flo
     s += std::format("  {:.3f} (inter {:.3f}, intra {:.3f}, StaM {:.3f}; StaM {}, MobM {})", v[k].rank() + shift,
                      v[k].s.inter + v[k].s.interClash, v[k].s.intra, v[k].stamRel + shift, v[k].stam, v[k].mobm);
   return s;
+}
+
+// Output structure of the parts of sys at coordinates x (one entry per coordinate of sys).
+std::vector<od::StructPart> structParts(const od::EnergySystem& sys, const std::vector<od::EnergyPart>& parts,
+                                        const std::vector<od::Vec3f>& x) {
+  std::vector<od::StructPart> out;
+  for (std::size_t k = 0; k < parts.size(); ++k) {
+    const int off = sys.coordOffset(static_cast<int>(k));
+    const std::size_t n = parts[k].mol->atoms.size();
+    out.push_back({parts[k].mol, std::vector<od::Vec3f>(x.begin() + off, x.begin() + off + static_cast<long>(n))});
+  }
+  return out;
+}
+
+// Directory name of a MobM: characters other than letters, digits and ._+- become _.
+std::string safeName(std::string s) {
+  for (char& c : s)
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '+' || c == '-')) c = '_';
+  return s;
+}
+
+std::string joinNames(const std::vector<std::string>& v) {
+  std::string s;
+  for (const auto& x : v) s += (s.empty() ? "" : ",") + x;
+  return s;
+}
+
+// 9d: recalculation by atom pairs, binding free energies, rankings and output (spec 10).
+void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const std::vector<MobState>& ms,
+           const od::Options& opt, float shift) {
+  const od::EnergyParams ep = energyParams(opt);
+  od::ShakeParams sp;
+  sp.radius = opt.shakingRadius;
+  sp.step = opt.shakingStep;
+  sp.temperature = opt.temperature;
+  sp.scaling = opt.entropyScaling;
+  const double cH = opt.enthalpyScaling;
+  const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
+
+  // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.
+  struct Alone {
+    std::vector<od::Vec3f> x;
+    od::ShakeAtoms atoms;
+    od::EnergyTerms terms;
+    std::vector<double> lnF;
+    double sumLnF = 0;
+  };
+  auto evalAlone = [&](const ConfSet& set, const std::vector<float>& angles, bool shake) {
+    Alone a;
+    a.x = set.sys().coordinates(angles);
+    a.atoms = od::shakeAtoms(set.sys(), set.parts(), a.x);
+    a.terms = set.sys().evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr);
+    if (shake) {
+      a.lnF = od::shakeLnF(a.atoms, ep, sp);
+      a.sumLnF = std::accumulate(a.lnF.begin(), a.lnF.end(), 0.0);
+    }
+    return a;
+  };
+  std::map<std::vector<float>, Alone> stamAlone;  // by angles
+  auto stamOf = [&](const std::vector<float>& angles) -> const Alone& {
+    auto it = stamAlone.find(angles);
+    if (it == stamAlone.end()) it = stamAlone.emplace(angles, evalAlone(stamSet, angles, opt.feOd0100)).first;
+    return it->second;
+  };
+  auto unbound = [&](const ConfSet& set, bool stam) {
+    double g = std::numeric_limits<double>::infinity();
+    for (const auto& ang : set.lowestAngles(opt.unboundCandidateNum)) {
+      const Alone tmp = stam ? Alone{} : evalAlone(set, ang, true);
+      const Alone& a = stam ? stamOf(ang) : tmp;
+      g = std::min(g, cH * a.terms.intra() + od::minusTS(a.sumLnF, sp));
+    }
+    return g;
+  };
+  double gUnboundStam = 0;
+  if (opt.feOd0100) {
+    const auto t0 = std::chrono::steady_clock::now();
+    gUnboundStam = unbound(stamSet, true);
+    od::logInfo(std::format("9d od_0100: G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)", gUnboundStam,
+                            stamSet.lowestAngles(opt.unboundCandidateNum).size(),
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+  }
+
+  for (std::size_t i = 0; i < ms.size(); ++i) {
+    const ConfSet& mob = *mobSets[i];
+    const auto& top = ms[i].top;
+    const auto t0 = std::chrono::steady_clock::now();
+    double gUnboundMob = 0;
+    if (opt.feOd0100) gUnboundMob = unbound(mob, false);
+    const double unboundSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    struct Row {
+      double e9b = 0, e9bGrid = 0, inter = 0, interClash = 0, mobIntra = 0, mobClash = 0, stamTerm = 0, stamIntra = 0,
+             stamClash = 0;
+      double dgAd = 0, dgOd = 0, gComplex = 0, mtsComplex = 0;
+      std::vector<od::Vec3f> world;
+    };
+    std::vector<Row> rows(top.size());
+    for (std::size_t k = 0; k < top.size(); ++k) {
+      const auto& r = top[k];
+      const Alone& st = stamOf(stamSet.sample(r.stam).angles);
+      Row& w = rows[k];
+      const auto y = mob.sys().coordinates(std::span<const float>(r.s.angles));
+      w.world = od::dockWorld(y, r.s);
+      const od::ShakeAtoms mobAtoms = od::shakeAtoms(mob.sys(), mob.parts(), w.world);
+      const od::EnergyTerms mt = mob.sys().evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
+      const od::InterTerms it = od::exactInter(st.atoms, mobAtoms, ep);
+      w.inter = it.inter;
+      w.interClash = it.clash;
+      w.mobIntra = mt.intra();
+      w.mobClash = mt.clash;
+      w.stamTerm = r.stamRel + shift;
+      w.stamIntra = st.terms.intra();
+      w.stamClash = st.terms.clash;
+      w.e9b = w.inter + w.interClash + w.mobIntra + w.mobClash + w.stamTerm;
+      w.e9bGrid = r.rank() + shift;
+      w.dgAd = w.inter + od::kAdgpuTorsionCoeff * mob.sys().torsionCount();
+      if (opt.feOd0100) {
+        w.mtsComplex = od::minusTS(od::complexSumLnF(st.atoms, st.lnF, mobAtoms, ep, sp), sp);
+        w.gComplex = cH * (w.inter + w.mobIntra + w.stamIntra) + w.mtsComplex;
+        w.dgOd = w.gComplex - gUnboundStam - gUnboundMob;
+      }
+    }
+    const double evalSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() - unboundSec;
+
+    // Rankings over the whole topSampleSet; output: union of the first outMinPerRank of each.
+    struct Method {
+      std::string name;
+      double Row::*energy;
+    };
+    std::vector<Method> methods{{"9b", &Row::e9b}};
+    if (opt.feAdgpu16) methods.push_back({"adgpu_16", &Row::dgAd});
+    if (opt.feOd0100) methods.push_back({"od_0100", &Row::dgOd});
+    std::vector<std::vector<std::size_t>> order(methods.size());
+    std::vector<std::vector<int>> rankOf(methods.size(), std::vector<int>(top.size()));
+    std::vector<char> out(top.size(), 0);
+    for (std::size_t m = 0; m < methods.size(); ++m) {
+      auto& o = order[m];
+      o.resize(top.size());
+      std::iota(o.begin(), o.end(), 0);
+      std::stable_sort(o.begin(), o.end(), [&](auto a, auto b) { return rows[a].*methods[m].energy < rows[b].*methods[m].energy; });
+      for (std::size_t z = 0; z < o.size(); ++z) {
+        rankOf[m][o[z]] = static_cast<int>(z) + 1;
+        if (z < static_cast<std::size_t>(opt.outMinPerRank)) out[o[z]] = 1;
+      }
+    }
+    std::vector<int> pose(top.size(), 0);  // pose number, by the 9b ranking
+    int poseNum = 0;
+    for (std::size_t k : order[0])
+      if (out[k]) pose[k] = ++poseNum;
+
+    const std::string dir = opt.outPrefix + "/" + safeName(mob.name());
+    std::filesystem::create_directories(dir);
+    int fallback = 0;
+    std::map<int, std::vector<std::string>> stamFiles;
+    std::vector<std::vector<std::string>> poseFiles(top.size());
+    for (std::size_t k : order[0]) {
+      if (!out[k]) continue;
+      const auto& r = top[k];
+      if (!stamFiles.count(r.stam)) {
+        const Alone& st = stamOf(stamSet.sample(r.stam).angles);
+        bool fb = false;
+        stamFiles[r.stam] = od::writeStructure(dir + std::format("/stam_{}", r.stam),
+                                               structParts(stamSet.sys(), stamSet.parts(), st.x), fmt,
+                                               std::format("StaM conformation sample {}", r.stam), fb);
+        fallback += fb;
+      }
+      bool fb = false;
+      poseFiles[k] = od::writeStructure(dir + std::format("/pose_{:04}", pose[k]),
+                                        structParts(mob.sys(), mob.parts(), rows[k].world), fmt,
+                                        std::format("{} pose {} (StaM sample {}, MobM sample {}) E_9b {:.3f}", mob.name(),
+                                                    pose[k], r.stam, r.mobm, rows[k].e9b),
+                                        fb);
+      fallback += fb;
+    }
+    if (fallback > 0)
+      od::logWarn(std::format("  {}: {} structure(s) exceed the PDB format limits and were written as mmCIF", mob.name(), fallback));
+
+    auto openTsv = [&](const std::string& name) {
+      std::ofstream f(dir + "/" + name);
+      if (!f) od::fail("cannot write {}/{}", dir, name);
+      return f;
+    };
+    {
+      std::ofstream f = openTsv("summary.tsv");
+      f << "pose\tmobm_files\tstam_files\tstam_sample\tmobm_sample";
+      for (const auto& m : methods) f << "\trank_" << m.name;
+      f << "\tE_9b\tE_9b_grid\tinter\tinter_clash\tmobm_intra\tmobm_clash\tstam_term\tstam_intra\tstam_clash\tclash";
+      if (opt.feAdgpu16) f << "\tdG_adgpu_16";
+      if (opt.feOd0100) f << "\tdG_od_0100\tG_complex\tmTS_complex\tG_unbound_stam\tG_unbound_mobm";
+      f << "\n";
+      for (std::size_t k : order[0]) {
+        if (!out[k]) continue;
+        const Row& w = rows[k];
+        f << std::format("{}\t{}\t{}\t{}\t{}", pose[k], joinNames(poseFiles[k]), joinNames(stamFiles[top[k].stam]),
+                         top[k].stam, top[k].mobm);
+        for (std::size_t m = 0; m < methods.size(); ++m) f << '\t' << rankOf[m][k];
+        f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{}", w.e9b, w.e9bGrid,
+                         w.inter, w.interClash, w.mobIntra, w.mobClash, w.stamTerm, w.stamIntra, w.stamClash,
+                         w.interClash + w.mobClash + w.stamClash > 0 ? "yes" : "no");
+        if (opt.feAdgpu16) f << std::format("\t{:.4f}", w.dgAd);
+        if (opt.feOd0100)
+          f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}", w.dgOd, w.gComplex, w.mtsComplex, gUnboundStam,
+                           gUnboundMob);
+        f << "\n";
+      }
+    }
+    for (std::size_t m = 0; m < methods.size(); ++m) {
+      std::ofstream f = openTsv("rank_" + methods[m].name + ".tsv");
+      f << "rank\tpose\tmobm_files\tstam_files\tenergy\tclash\n";
+      for (std::size_t k : order[m]) {
+        if (!out[k]) continue;
+        const Row& w = rows[k];
+        f << std::format("{}\t{}\t{}\t{}\t{:.4f}\t{}\n", rankOf[m][k], pose[k], joinNames(poseFiles[k]),
+                         joinNames(stamFiles[top[k].stam]), w.*methods[m].energy,
+                         w.interClash + w.mobClash + w.stamClash > 0 ? "yes" : "no");
+      }
+    }
+
+    od::logInfo(std::format("9d {:<38} recalculated {} sample(s) ({:.2f} s){}; output {} pose(s), {} StaM conformation(s) to {}",
+                            mob.name(), top.size(), evalSec,
+                            opt.feOd0100 ? std::format(", G_unbound MobM {:.3f} ({:.2f} s)", gUnboundMob, unboundSec) : "",
+                            poseNum, stamFiles.size(), dir));
+    for (std::size_t m = 0; m < methods.size(); ++m) {
+      std::string s;
+      for (std::size_t z = 0; z < order[m].size() && z < 5; ++z) {
+        const std::size_t k = order[m][z];
+        s += std::format("  pose {} {:.3f}", pose[k], rows[k].*methods[m].energy);
+      }
+      od::logInfo(std::format("    lowest {:<9}{}", methods[m].name + ":", s));
+    }
+  }
 }
 
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
@@ -524,6 +772,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count()));
   }
   const float shift = stamSet.movable() && std::isfinite(stamRef) ? stamRef - stamSet.minEnergy() : 0.0f;
+  run9d(stamSet, mobSets, ms, opt, shift);
   od::logInfo("Final topSampleSet:");
   for (std::size_t i = 0; i < ms.size(); ++i) {
     od::logInfo(std::format("  {:<40} {} sample(s)", mobSets[i]->name(), ms[i].top.size()));
