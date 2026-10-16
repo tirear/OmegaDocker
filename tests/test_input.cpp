@@ -2561,6 +2561,18 @@ TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
       CHECK(v < 0);
       CHECK(v >= std::log(1.0 / 179) - 1e-9);
     }
+    // Boltzmann weights: rrtScaling replaces 1 / RT; 0 makes every point equal (ln f = 0).
+    CHECK(sp.rrt() == doctest::Approx(1.687806585302075).epsilon(1e-12));
+    od::ShakeParams s2 = sp;
+    s2.rrtScaling = sp.rrt();
+    s2.temperature = 500;
+    const auto l2 = od::shakeLnF(one, ep, s2);
+    for (std::size_t i = 0; i < l.size(); ++i) CHECK(l2[i] == l[i]);
+    s2.rrtScaling = 0.0;
+    for (double v : od::shakeLnF(one, ep, s2)) CHECK(v == doctest::Approx(0).epsilon(1e-12));
+    s2.rrtScaling = 2 * sp.rrt();
+    const auto l3 = od::shakeLnF(one, ep, s2);
+    for (std::size_t i = 0; i < l.size(); ++i) CHECK(l3[i] < l[i]);
   }
   // Complex: StaM atoms out of reach of the MobM keep their values alone.
   std::vector<od::Vec3f> far = mx;

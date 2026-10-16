@@ -95,7 +95,7 @@ std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, co
   const Ad4Coeffs& c = ep.coeffs;
   const float half = static_cast<float>(0.5 * ep.smooth);
   const float rMin = static_cast<float>(ep.elecMinDistance);
-  const double rt = kGasConstant * p.temperature;
+  const double rrt = p.rrt();
   const double reach = kElecCutoff + p.radius;
   std::vector<float> S(na), V(na);
   for (std::size_t a = 0; a < na; ++a) {
@@ -145,7 +145,7 @@ std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, co
     }
     const double emin = *std::min_element(e.begin(), e.end());
     double w = 0;
-    for (double v : e) w += std::exp(-(v - emin) / rt);
+    for (double v : e) w += std::exp(-(v - emin) * rrt);
     lnF[i] = std::log(w / static_cast<double>(pts.size()));
   }
   return lnF;

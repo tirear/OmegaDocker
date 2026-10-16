@@ -373,6 +373,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
   sp.radius = opt.shakingRadius;
   sp.step = opt.shakingStep;
   sp.temperature = opt.temperature;
+  sp.rrtScaling = opt.rrtScaling;
   const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
 
   // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.33 |
+| 文件版本 | 1.34 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1005,7 +1005,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 原子搖動（每個重原子；氫原子不搖動）：
   - 格點：以原子位置為中心、間距 `--shakingStep` 的立方晶格中，距離 ≤ `--shakingRadius` 的點（中心點包含在內）。
   - 每點能量：只移動該原子，其他原子不動；逐原子對（單精度）計算 AD4 各項。原子對為三鍵以內（1-2、1-3、1-4）以外的所有原子對，包含 9a 中距離不變而不計的原子對；不計鍵結項、碰撞懲罰與閉合約束。複合物另含 StaM–MobM 分子間原子對。
-  - 機率權重（配分函數）：w_k = exp(−(E_k − E_min) / RT)，R = 1.987204259 × 10⁻³ kcal/(mol·K)，T = `--temperature`。
+  - 機率權重（配分函數）：w_k = exp(−(E_k − E_min) × `rrtScaling`)，`--rrtScaling`（reverse RT scaling，mol/kcal）預設為 1/RT，R = 1.987204259 × 10⁻³ kcal/(mol·K)，T = `--temperature`（298.15 K 時為 1.6878）。
+    - `rrtScaling` 與熵項的 RT 分開設定：`--temperature` 只決定 −TS 的 RT，以及未指定 `--rrtScaling` 時的預設值。
+    - `rrtScaling` ≥ 0；0 時所有格點權重相同，f_i = 1。
   - 可佔據比例：f_i = Σ_k w_k / 點數，介於 (0, 1]；步長變小時收斂，不受 `--gridSpacing` 影響。
 - 熵項（未乘係數）：(−TS)_X = −RT × Σ_{i∈X} ln f_i（≥ 0），X 為 StaM 群或 MobM 的重原子。v0.33.0 的 nts 少了負號，且 `molRandomness` 在每個原子重設，只計入最後一個原子；兩者在此修正。
   - 複合物中的 (−TS)_X 依原子所屬分子分為 StaM 與 MobM 兩部分，搖動時兩者都受對方影響。距離所有 MobM 原子 ≥ 20.48 Å + `shakingRadius` 的 StaM 原子不受 MobM 影響，直接使用該 StaM 構型單獨時的值（結果相同）。
@@ -1035,7 +1037,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 只能有 `[od_0100]`、`[od_0100.inter]`、`[od_0100.intra]`、`[od_0100.entropy]` 與上表的鍵；未列出的鍵維持預設；值為有限的數（整數亦可），不限正負（擬合可能得到負值）。
   - 未知的鍵、型別錯誤、非有限值：列出所有問題（附行號）後結束。參數檔在讀取分子後、建立分子設定檔前讀取，錯誤不會等到 9d 才出現。
   - 啟用 od_0100 時，實際使用的係數寫入 `<outPrefix>/feparams.used.toml`（含公式說明），可作為參數檔的範本。
-- 係數都是線性的：`summary.tsv` 輸出未乘係數的各分項（10.3），一次對接的結果即可離線以最小平方法擬合，不需重新執行。`shakingRadius`、`shakingStep`、`temperature` 為非線性參數，改變時需重新計算。
+- 係數都是線性的：`summary.tsv` 輸出未乘係數的各分項（10.3），一次對接的結果即可離線以最小平方法擬合，不需重新執行。`shakingRadius`、`shakingStep`、`rrtScaling` 為非線性參數（`temperature` 只經由 RT 線性影響熵項），改變時需重新計算。
 - 方法名稱維持 `od_0100`（代表預計在 OmegaDocker v1.0.0 正式支援的版本）；係數改變不改名稱，以參數檔區分。
 - 半徑與步長實測（前 40 名，r = 1.4 Å／步長 0.2 為參考）：
   - 半徑固定時，步長 0.2–0.4 的 Δ(−TS) 平均值差 0.1–0.3 kcal/mol；步長 0.25 的最大差 0.16（BTN）、0.60（1L2Y），時間約一半。
@@ -1221,6 +1223,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--shakingRadius` | 1.4 Å | 10.2 |
 | `--shakingStep` | 0.2 Å | 10.2 |
 | `--temperature` | 298.15 K | 10.2 |
+| `--rrtScaling` | 1/(R × `temperature`)（1.6878 mol/kcal） | 10.2 |
 | `--unboundCandidateNum` | 20 | 10.2 |
 | `--lbfgsMemory` | 7 | 12 |
 | `--scaleTrans`、`--scaleRot`、`--scaleTors` | 1、1、1 | 12 |
@@ -1491,3 +1494,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.31 | 2026-10-16 | 9c 排序能量加入 StaM 項（StaM 構型樣本的 9a 能量 − 目前所有 StaM 構型樣本的最低值）；步驟 5 同樣使用排序能量（8.6、9） |
 | 1.32 | 2026-10-16 | 實作 9d：逐原子對重算與網格誤差實測、結合自由能 `adgpu_16` 與 `od_0100`（原子搖動熵）、各排序與輸出樣本選取、結構檔（PDB、mmCIF、SDF、mol2）、`summary.tsv` 與 `rank_<方法>.tsv`；新增 `--freeEnergy`、`--outMinPerRank`、`--enthalpyScaling`、`--entropyScaling`、`--shakingRadius`、`--shakingStep`、`--temperature`、`--unboundCandidateNum`（10、14） |
 | 1.33 | 2026-10-16 | od_0100 係數拆分（c0、c_tors、分子間 4 項、分子內 4 項、StaM／MobM 熵項），以 TOML 參數檔 `--feParamFile` 設定（取代 `--enthalpyScaling`、`--entropyScaling`），寫出 `feparams.used.toml`；`summary.tsv` 輸出未乘係數的分項以供離線擬合（10.2、10.3、14） |
+| 1.34 | 2026-10-16 | 搖動權重改為 w_k = exp(−ΔE_k × `rrtScaling`)，新增 `--rrtScaling`（預設 1/RT），與熵項的 RT 分開（10.2、14） |

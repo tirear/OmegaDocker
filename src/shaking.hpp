@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -13,7 +14,7 @@ namespace od {
 // Atom shaking entropy of od_0100 (spec 10.2): each heavy atom is moved over
 // the points of a sphere around its position while all other atoms stay; the
 // pair energies at the points give its accessible fraction
-//   f_i = sum_k exp(-(E_k - E_min) / RT) / (number of points),
+//   f_i = sum_k exp(-(E_k - E_min) * rrtScaling) / (number of points),
 // and -TS = -RT * sum_i ln f_i (>= 0; the coefficient is applied in 9d).
 
 // Non-merged atoms of one or more molecules. Pairs of atoms of the same
@@ -34,7 +35,9 @@ ShakeAtoms joinShakeAtoms(const ShakeAtoms& a, const ShakeAtoms& b);
 struct ShakeParams {
   double radius = 1.4;         // Å, --shakingRadius
   double step = 0.2;           // Å, --shakingStep
-  double temperature = 298.15;  // K, --temperature
+  double temperature = 298.15;  // K, --temperature (RT of -TS)
+  std::optional<double> rrtScaling;  // mol/kcal, --rrtScaling; 1 / RT when not set
+  double rrt() const;
 };
 
 // Points (offsets) of the sphere: a cubic lattice with spacing step centred on
@@ -47,6 +50,7 @@ std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, co
                              std::span<const char> shake = {});
 
 constexpr double kGasConstant = 1.987204259e-3;  // kcal/(mol K)
+inline double ShakeParams::rrt() const { return rrtScaling ? *rrtScaling : 1.0 / (kGasConstant * temperature); }
 inline double minusTS(double sumLnF, const ShakeParams& p) { return -kGasConstant * p.temperature * sumLnF; }
 
 }  // namespace od

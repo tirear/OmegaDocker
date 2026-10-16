@@ -4,6 +4,7 @@
 
 #include "cli.hpp"
 
+#include <cmath>
 #include <algorithm>
 #include <charconv>
 #include <format>
@@ -239,8 +240,11 @@ const std::vector<OptionDef>& optionTable() {
        [](Options& o, const std::string& v) { o.shakingRadius = parseDouble("shakingRadius", v); }},
       {"shakingStep", Kind::Value, "<dist>", "0.2", "od_0100: lattice spacing of the points in the sphere (Å)",
        [](Options& o, const std::string& v) { o.shakingStep = parseDouble("shakingStep", v); }},
-      {"temperature", Kind::Value, "<K>", "298.15", "od_0100: temperature of the Boltzmann weights and -TS (K)",
+      {"temperature", Kind::Value, "<K>", "298.15", "od_0100: temperature T of -TS = -RT sum ln f_i (K)",
        [](Options& o, const std::string& v) { o.temperature = parseDouble("temperature", v); }},
+      {"rrtScaling", Kind::Value, "<c>", "1/(R x temperature) = 1.6878 at 298.15 K",
+       "od_0100: reverse RT scaling of the shaking weights w_k = exp(-(E_k - E_min) x rrtScaling) (mol/kcal)",
+       [](Options& o, const std::string& v) { o.rrtScaling = parseDouble("rrtScaling", v); }},
       {"unboundCandidateNum", Kind::Value, "<n>", "20",
        "od_0100: conformation samples with the lowest 9a energy evaluated for the unbound free energy",
        [](Options& o, const std::string& v) { o.unboundCandidateNum = parseInt32("unboundCandidateNum", v); }},
@@ -390,6 +394,7 @@ void validateOptions(const Options& o) {
   if (!(o.shakingRadius > 0)) fail("--shakingRadius must be > 0");
   if (!(o.shakingStep > 0)) fail("--shakingStep must be > 0");
   if (!(o.temperature > 0)) fail("--temperature must be > 0");
+  if (o.rrtScaling && !(*o.rrtScaling >= 0 && std::isfinite(*o.rrtScaling))) fail("--rrtScaling must be a finite number >= 0");
   if (o.unboundCandidateNum < 1) fail("--unboundCandidateNum must be >= 1");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");

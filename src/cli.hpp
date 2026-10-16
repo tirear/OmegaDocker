@@ -84,6 +84,7 @@ struct Options {
   double shakingRadius = 1.4;
   double shakingStep = 0.2;
   double temperature = 298.15;
+  std::optional<double> rrtScaling;  // default 1 / (R temperature)
   int unboundCandidateNum = 20;
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
