@@ -5,6 +5,7 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <format>
@@ -39,6 +40,7 @@
 #include "grid.hpp"
 #include "grow.hpp"
 #include "orient.hpp"
+#include "feparams.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
 #include "write_struct.hpp"
@@ -2516,7 +2518,13 @@ TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
     for (auto& v : md.xyz) v[0] += shift;
     const od::InterTerms it = od::exactInter(stam, mob, ep);
     const double ref = od::pairInterEnergy(x.stam, md, ep);
-    CHECK(it.inter == doctest::Approx(ref).epsilon(1e-4).scale(1.0));
+    CHECK(it.inter() == doctest::Approx(ref).epsilon(1e-4).scale(1.0));
+    CHECK(it.inter() == it.vdw + it.hbond + it.elec + it.desolv);
+    if (shift == 12.0f) {
+      CHECK(it.vdw != 0);
+      CHECK(it.elec != 0);
+      CHECK(it.desolv != 0);
+    }
     // Clash: nearest StaM heavy atom of every MobM heavy atom.
     double clash = 0;
     for (std::size_t i = 0; i < md.size(); ++i) {
@@ -2565,9 +2573,12 @@ TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
   }
   const auto full = od::shakeLnF(od::joinShakeAtoms(stam, mob), ep, sp);
   const double sumFull = std::accumulate(full.begin(), full.end(), 0.0);
-  CHECK(od::complexSumLnF(stam, alone, mob, ep, sp) == doctest::Approx(sumFull).epsilon(1e-9));
+  const od::ComplexLnF cl = od::complexSumLnF(stam, alone, mob, ep, sp);
+  CHECK(cl.stam + cl.mobm == doctest::Approx(sumFull).epsilon(1e-9));
+  CHECK(cl.stam == doctest::Approx(std::accumulate(full.begin(), full.begin() + static_cast<long>(stam.size()), 0.0)).epsilon(1e-9));
+  CHECK(cl.mobm == doctest::Approx(std::accumulate(full.begin() + static_cast<long>(stam.size()), full.end(), 0.0)).epsilon(1e-9));
   CHECK(od::minusTS(sumFull, sp) > 0);
-  CHECK(od::minusTS(-1.0, sp) == doctest::Approx(0.9 * od::kGasConstant * 298.15));
+  CHECK(od::minusTS(-1.0, sp) == doctest::Approx(od::kGasConstant * 298.15));
 }
 
 TEST_CASE("write_struct: PDB, mmCIF, SDF and mol2") {
@@ -2651,4 +2662,61 @@ TEST_CASE("write_struct: PDB, mmCIF, SDF and mol2") {
     CHECK(f2 == std::vector<std::string>{"y.cif"});
   }
   std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("feparams: defaults, file and errors") {
+  const od::FeParams d;
+  CHECK(d.c0 == 0);
+  CHECK(d.tors == 0);
+  for (int k = 0; k < od::FeParams::kTerms; ++k) {
+    CHECK(d.inter[k] == 0.7564);
+    CHECK(d.intra[k] == 0.7564);
+  }
+  CHECK(d.entropyStam == 0.9);
+  CHECK(d.entropyMobm == 0.9);
+  const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_fe_{}.toml", ::getpid())).string();
+  auto write = [&](const std::string& s) { std::ofstream(path) << s; };
+  // The written file reads back to the same values.
+  od::FeParams x;
+  x.c0 = -1.25;
+  x.tors = 0.2983;
+  x.inter = {0.1, 0.2, 0.3, 0.4};
+  x.intra = {0.5, 0.6, 0.7, 0.8};
+  x.entropyStam = 1.1;
+  x.entropyMobm = 0.7;
+  write(od::feParamsText(x));
+  const od::FeParams y = od::readFeParams(path);
+  CHECK(y.c0 == x.c0);
+  CHECK(y.tors == x.tors);
+  CHECK(y.inter == x.inter);
+  CHECK(y.intra == x.intra);
+  CHECK(y.entropyStam == x.entropyStam);
+  CHECK(y.entropyMobm == x.entropyMobm);
+  write(od::feParamsText(d));
+  CHECK(od::readFeParams(path).inter == d.inter);
+  // Partial file: other keys keep the defaults; integers are accepted.
+  write("[od_0100]\ntors = 1\n[od_0100.inter]\nelec = 0.5\n");
+  const od::FeParams z = od::readFeParams(path);
+  CHECK(z.tors == 1);
+  CHECK(z.inter == std::array<double, 4>{0.7564, 0.7564, 0.5, 0.7564});
+  CHECK(z.intra == d.intra);
+  CHECK(z.entropyMobm == 0.9);
+  // Errors: all listed with lines.
+  write("[od_0100]\nc0 = \"x\"\nfoo = 1\n[od_0100.inter]\nvdW = 1\n[od_0100.entropy]\nstam = nan\n[other]\n");
+  try {
+    od::readFeParams(path);
+    FAIL("no error");
+  } catch (const od::Error& e) {
+    const std::string m = e.what();
+    CHECK(m.find("5 problem(s)") != std::string::npos);
+    CHECK(m.find("line 2: od_0100.c0: must be a number") != std::string::npos);
+    CHECK(m.find("line 3: od_0100.foo: unknown key") != std::string::npos);
+    CHECK(m.find("line 5: od_0100.inter.vdW: unknown key") != std::string::npos);
+    CHECK(m.find("line 7: od_0100.entropy.stam: must be finite") != std::string::npos);
+    CHECK(m.find("other: unknown key") != std::string::npos);
+  }
+  write("[od_0100\n");
+  CHECK_THROWS_AS(od::readFeParams(path), od::Error);
+  std::filesystem::remove(path);
+  CHECK_THROWS_AS(od::readFeParams(path), od::Error);
 }

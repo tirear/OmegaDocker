@@ -31,13 +31,13 @@ InterTerms exactInter(const ShakeAtoms& stam, const ShakeAtoms& mob, const Energ
   const float rMin = static_cast<float>(ep.elecMinDistance);
   const float cd = static_cast<float>(ep.clashDistance);
   InterTerms out;
-  double inter = 0, clash = 0;
-#pragma omp parallel for schedule(dynamic, 1) reduction(+ : inter, clash)
+  double vdw = 0, hbond = 0, elec = 0, desolv = 0, clash = 0;
+#pragma omp parallel for schedule(dynamic, 1) reduction(+ : vdw, hbond, elec, desolv, clash)
   for (std::size_t i = 0; i < mob.size(); ++i) {
     const Ad4TypeParams& pi = ad4Params(mob.type[i]);
     const float Si = static_cast<float>(pi.solpar + c.qasp * std::abs(mob.charge[i]));
     float nearest = std::numeric_limits<float>::infinity();
-    double sum = 0;
+    double sv = 0, sh = 0, se = 0, sd = 0;
     for (std::size_t j = 0; j < stam.size(); ++j) {
       const float dx = mob.xyz[i][0] - stam.xyz[j][0], dy = mob.xyz[i][1] - stam.xyz[j][1],
                   dz = mob.xyz[i][2] - stam.xyz[j][2];
@@ -47,33 +47,39 @@ InterTerms exactInter(const ShakeAtoms& stam, const ShakeAtoms& mob, const Energ
       if (stam.heavy[j]) nearest = std::min(nearest, r);
       const Ad4TypeParams& pj = ad4Params(stam.type[j]);
       const float Sj = static_cast<float>(pj.solpar + c.qasp * std::abs(stam.charge[j]));
-      float e = 0, ee, de;
+      float ee, de;
       if (r < static_cast<float>(kVdwCutoff)) {
         const Ad4PairParams q = ad4PairParams(mob.type[i], stam.type[j], c);
         ad4VdwHb<float>(r, static_cast<float>(q.AC), static_cast<float>(q.BD), q.m, q.n, static_cast<float>(q.reqm),
                         half, ee, de);
-        e += ee;
+        (q.n == 10 ? sh : sv) += ee;
       }
       ad4Elec<float>(r, static_cast<float>(c.elec) * mob.charge[i] * stam.charge[j], rMin, ee, de);
-      e += ee;
+      se += ee;
       ad4Desolv<float>(r, static_cast<float>(c.desolv) * (Si * static_cast<float>(pj.volume) + Sj * static_cast<float>(pi.volume)),
                        rMin, ee, de);
-      sum += e + ee;
+      sd += ee;
     }
-    inter += sum;
+    vdw += sv;
+    hbond += sh;
+    elec += se;
+    desolv += sd;
     if (mob.heavy[i] && nearest < cd) clash += ep.clashBase + ep.clashK * (cd - nearest) * (cd - nearest);
   }
-  out.inter = inter;
+  out.vdw = vdw;
+  out.hbond = hbond;
+  out.elec = elec;
+  out.desolv = desolv;
   out.clash = clash;
   return out;
 }
 
-double complexSumLnF(const ShakeAtoms& stam, std::span<const double> stamAlone, const ShakeAtoms& mob,
-                     const EnergyParams& ep, const ShakeParams& p) {
+ComplexLnF complexSumLnF(const ShakeAtoms& stam, std::span<const double> stamAlone, const ShakeAtoms& mob,
+                         const EnergyParams& ep, const ShakeParams& p) {
   const ShakeAtoms all = joinShakeAtoms(stam, mob);
   const double reach = kElecCutoff + p.radius;
   std::vector<char> shake(all.size(), 1);
-  double sum = 0;
+  ComplexLnF out;
   for (std::size_t j = 0; j < stam.size(); ++j) {
     if (!stam.heavy[j]) continue;
     bool nearMob = false;
@@ -84,11 +90,13 @@ double complexSumLnF(const ShakeAtoms& stam, std::span<const double> stamAlone, 
     }
     if (!nearMob) {
       shake[j] = 0;
-      sum += stamAlone[j];
+      out.stam += stamAlone[j];
     }
   }
   const auto l = shakeLnF(all, ep, p, shake);
-  return sum + std::accumulate(l.begin(), l.end(), 0.0);
+  out.stam += std::accumulate(l.begin(), l.begin() + static_cast<long>(stam.size()), 0.0);
+  out.mobm += std::accumulate(l.begin() + static_cast<long>(stam.size()), l.end(), 0.0);
+  return out;
 }
 
 }  // namespace od

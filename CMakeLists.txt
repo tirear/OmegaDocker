@@ -92,6 +92,7 @@ add_library(od_core STATIC
   src/grid.cpp
   src/shaking.cpp
   src/score9d.cpp
+  src/feparams.cpp
   src/write_struct.cpp
   src/orient.cpp
   src/dock9b.cpp

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.32 |
+| 文件版本 | 1.33 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1007,15 +1007,36 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 每點能量：只移動該原子，其他原子不動；逐原子對（單精度）計算 AD4 各項。原子對為三鍵以內（1-2、1-3、1-4）以外的所有原子對，包含 9a 中距離不變而不計的原子對；不計鍵結項、碰撞懲罰與閉合約束。複合物另含 StaM–MobM 分子間原子對。
   - 機率權重（配分函數）：w_k = exp(−(E_k − E_min) / RT)，R = 1.987204259 × 10⁻³ kcal/(mol·K)，T = `--temperature`。
   - 可佔據比例：f_i = Σ_k w_k / 點數，介於 (0, 1]；步長變小時收斂，不受 `--gridSpacing` 影響。
-- 熵項：−TS = −`entropyScaling` × RT × Σ_i ln f_i（≥ 0）。v0.33.0 的 nts 少了負號，且 `molRandomness` 在每個原子重設，只計入最後一個原子；兩者在此修正。
-- G_complex = `enthalpyScaling` × (分子間 + MobM 分子內 + StaM 分子內) + (−TS)_complex。
-  - (−TS)_complex 涵蓋 StaM 與 MobM 的重原子。距離所有 MobM 原子 ≥ 20.48 Å + `shakingRadius` 的 StaM 原子不受 MobM 影響，直接使用該 StaM 構型單獨時的值（結果相同）。
-- G_unbound(X) = min over 候選構型 [`enthalpyScaling` × X 分子內能量 + (−TS)_X 單獨]，X 為 StaM 群或 MobM。
-  - 候選構型：X 所有 9a 構型樣本（L2 pool 與 dcss）中 9a 能量最低的 `--unboundCandidateNum` 個；不可動時為輸入構型。
-  - 9a 構型樣本是單獨存在、各自最小化的構型，比對接後的構型更符合未結合狀態；所得最低值為真正最低值的上限。
-  - 同一 MobM 的所有樣本使用相同的 G_unbound，因此排序不受影響，只影響絕對值。
-- ΔG = G_complex − G_unbound(StaM) − G_unbound(MobM)。分子內能量相減後成為形變能；參考體積在相減後消去。
-- `enthalpyScaling`（0.7564，來源待查）與 `entropyScaling`（0.9）**尚未校準**；CUDA 版與 OpenCL 版完成後，以標準資料最佳化。
+- 熵項（未乘係數）：(−TS)_X = −RT × Σ_{i∈X} ln f_i（≥ 0），X 為 StaM 群或 MobM 的重原子。v0.33.0 的 nts 少了負號，且 `molRandomness` 在每個原子重設，只計入最後一個原子；兩者在此修正。
+  - 複合物中的 (−TS)_X 依原子所屬分子分為 StaM 與 MobM 兩部分，搖動時兩者都受對方影響。距離所有 MobM 原子 ≥ 20.48 Å + `shakingRadius` 的 StaM 原子不受 MobM 影響，直接使用該 StaM 構型單獨時的值（結果相同）。
+- 能量項 t = vdW、hbond、elec、desolv（AD4 各項，已含 AD4 權重；hbond 為 12-10 原子對）。
+- 自由能（係數見下表）：
+  - G_complex = Σ_t a_t E_inter,t + Σ_t b_t (E_intra,t(StaM) + E_intra,t(MobM)) + s_StaM (−TS)_StaM,complex + s_MobM (−TS)_MobM,complex。
+  - G_unbound(X) = min over 候選構型 [Σ_t b_t E_intra,t(X) + s_X (−TS)_X,單獨]。
+    - 候選構型：X 所有 9a 構型樣本（L2 pool 與 dcss）中 9a 能量最低的 `--unboundCandidateNum` 個；不可動時為輸入構型。
+    - 9a 構型樣本是單獨存在、各自最小化的構型，比對接後的構型更符合未結合狀態；所得最低值為真正最低值的上限。
+    - 選取哪個候選構型取決於 b_t 與 s_X；離線擬合時視為固定（以執行時的係數選取）。
+    - 同一 MobM 的所有樣本使用相同的 G_unbound，因此排序不受影響，只影響絕對值。
+  - ΔG = c0 + c_tors × N_tors + G_complex − G_unbound(StaM) − G_unbound(MobM)，等同
+    ΔG = c0 + Σ_t a_t E_inter,t + Σ_t b_t ΔE_intra,t + s_StaM Δ(−TS)_StaM + s_MobM Δ(−TS)_MobM + c_tors N_tors。
+  - ΔE_intra,t = 複合物中 StaM 與 MobM 的 E_intra,t − 兩者未結合構型的 E_intra,t（形變能）；Δ(−TS)_X = 複合物 − 未結合。參考體積在相減後消去。
+  - N_tors：MobM 扭轉樹中可轉動的兩面角數（同 adgpu_16）。
+
+| 係數 | 參數檔鍵 | 預設 | 說明 |
+|---|---|---|---|
+| c0 | `od_0100.c0` | 0 | 常數項（平移／轉動熵的損失等） |
+| c_tors | `od_0100.tors` | 0 | 每個可轉動兩面角（AD4 為 0.2983） |
+| a_t | `od_0100.inter.{vdw,hbond,elec,desolv}` | 0.7564 | 分子間各項 |
+| b_t | `od_0100.intra.{vdw,hbond,elec,desolv}` | 0.7564 | 分子內形變能各項（StaM 與 MobM 共用） |
+| s_StaM、s_MobM | `od_0100.entropy.{stam,mobm}` | 0.9 | 熵項；預期相同，分開以便驗證 |
+
+- 預設值與 1.32 的 `enthalpyScaling` 0.7564（來源待查）、`entropyScaling` 0.9 結果相同，**尚未校準**；CUDA 版與 OpenCL 版完成後，以標準資料最佳化。
+- 參數檔 `--feParamFile <file>`（TOML）：
+  - 只能有 `[od_0100]`、`[od_0100.inter]`、`[od_0100.intra]`、`[od_0100.entropy]` 與上表的鍵；未列出的鍵維持預設；值為有限的數（整數亦可），不限正負（擬合可能得到負值）。
+  - 未知的鍵、型別錯誤、非有限值：列出所有問題（附行號）後結束。參數檔在讀取分子後、建立分子設定檔前讀取，錯誤不會等到 9d 才出現。
+  - 啟用 od_0100 時，實際使用的係數寫入 `<outPrefix>/feparams.used.toml`（含公式說明），可作為參數檔的範本。
+- 係數都是線性的：`summary.tsv` 輸出未乘係數的各分項（10.3），一次對接的結果即可離線以最小平方法擬合，不需重新執行。`shakingRadius`、`shakingStep`、`temperature` 為非線性參數，改變時需重新計算。
+- 方法名稱維持 `od_0100`（代表預計在 OmegaDocker v1.0.0 正式支援的版本）；係數改變不改名稱，以參數檔區分。
 - 半徑與步長實測（前 40 名，r = 1.4 Å／步長 0.2 為參考）：
   - 半徑固定時，步長 0.2–0.4 的 Δ(−TS) 平均值差 0.1–0.3 kcal/mol；步長 0.25 的最大差 0.16（BTN）、0.60（1L2Y），時間約一半。
   - 半徑改變 Δ(−TS) 的大小（r 0.8 約為 r 1.4 的一半），半徑越小排序與參考差越多（Spearman：r 1.2 為 0.92–0.99，r 0.8 為 0.86–0.95）。f_i 是佔球的比例，半徑為模型參數。
@@ -1035,7 +1056,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `pose`、`mobm_files`、`stam_files`（以逗號分隔的檔名）、`stam_sample`、`mobm_sample`。
   - `rank_<方法>`：在整個 topSampleSet 中的名次（`rank_9b`、`rank_adgpu_16`、`rank_od_0100`）。
   - `E_9b`（重算）、`E_9b_grid`（9c 排序能量，網格）、`inter`、`inter_clash`、`mobm_intra`、`mobm_clash`、`stam_term`、`stam_intra`、`stam_clash`、`clash`（任一碰撞懲罰 > 0 時為 `yes`）。
-  - `dG_adgpu_16`；`dG_od_0100`、`G_complex`、`mTS_complex`、`G_unbound_stam`、`G_unbound_mobm`（啟用時）。
+  - `dG_adgpu_16`（啟用時）。
+  - od_0100 啟用時：`dG_od_0100`、`G_complex`、`G_unbound_stam`、`G_unbound_mobm`；未乘係數的分項 `inter_{vdw,hbond,elec,desolv}`（E_inter,t）、`dintra_{vdw,hbond,elec,desolv}`（ΔE_intra,t）、`mTS_complex_stam`、`mTS_complex_mobm`、`mTS_unbound_stam`、`mTS_unbound_mobm`、`n_tors`。由這些欄位與係數可重算 `dG_od_0100`（差異只來自小數 4 位的捨入）。
 - `rank_<方法>.tsv`：該方法的排序，欄位 `rank`、`pose`、`mobm_files`、`stam_files`、`energy`、`clash`；只列輸出樣本，依名次排序。
 
 | 格式 | 參數 | 預設 | 副檔名 |
@@ -1195,8 +1217,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `--symMaxPerm` | 256 | 10 |
 | `--freeEnergy` | `od_0100` | 10.2 |
 | `--outMinPerRank` | 40 | 10.3 |
-| `--enthalpyScaling` | 0.7564（未校準） | 10.2 |
-| `--entropyScaling` | 0.9（未校準） | 10.2 |
+| `--feParamFile` | 內建預設（未校準） | 10.2 |
 | `--shakingRadius` | 1.4 Å | 10.2 |
 | `--shakingStep` | 0.2 Å | 10.2 |
 | `--temperature` | 298.15 K | 10.2 |
@@ -1413,8 +1434,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | StaM 可動時，9c 排序能量加入「StaM 構型樣本的 9a 能量 − 所有 StaM 構型樣本的最低值」（9） |
 | — | 9d 以逐原子對單精度重算分子間能量，不另做精確能量的再最佳化（10.1） |
 | — | 結合自由能 `adgpu_16`、`od_0100`，預設 `od_0100`；每種排序至少輸出 `outMinPerRank`（40）個（10.2、10.3） |
-| — | od_0100：球形搖動格點（半徑 1.4 Å、步長 0.2 Å，與網格間距無關）、Boltzmann 權重（捨棄 `wellDepth` 線性權重）、可佔據比例 f_i、−TS = −`entropyScaling` × RT × Σ ln f_i；鍵結不列入；未結合狀態取 9a 構型樣本中的最低自由能（10.2） |
-| — | `enthalpyScaling`、`entropyScaling` 維持預設，標註未校準；CUDA 與 OpenCL 版完成後以標準資料最佳化（10.2） |
+| — | od_0100：球形搖動格點（半徑 1.4 Å、步長 0.2 Å，與網格間距無關）、Boltzmann 權重（捨棄 `wellDepth` 線性權重）、可佔據比例 f_i、−TS = −RT × Σ ln f_i；鍵結不列入；未結合狀態取 9a 構型樣本中的最低自由能（10.2） |
+| — | od_0100 係數拆分為 c0、c_tors、a_t（分子間 4 項）、b_t（分子內 4 項）、s_StaM、s_MobM，以 TOML 參數檔 `--feParamFile` 設定，取代 `--enthalpyScaling`、`--entropyScaling`；預設值未校準，CUDA 與 OpenCL 版完成後以標準資料最佳化；方法名稱維持 `od_0100`（10.2） |
 
 ### 17.2 待確認
 - loop 閉合（7.11）：CCD 的細節（迭代上限、收斂門檻、作用的兩面角範圍）與參數名稱；KIC 的取樣方式。
@@ -1469,3 +1490,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.30 | 2026-10-15 | 新增 `--midKeepSkipped`（保留池，上限 `sampleBufferNum`，超過時保留的樣本優先）；搭配時 `midTopSampleFactor` 預設 2；執行紀錄顯示保留池大小、E_drop 與是否保證與一次做完相同；記錄保留池與加大 `sampleBufferNum` 的實測及使用建議（9、13、14） |
 | 1.31 | 2026-10-16 | 9c 排序能量加入 StaM 項（StaM 構型樣本的 9a 能量 − 目前所有 StaM 構型樣本的最低值）；步驟 5 同樣使用排序能量（8.6、9） |
 | 1.32 | 2026-10-16 | 實作 9d：逐原子對重算與網格誤差實測、結合自由能 `adgpu_16` 與 `od_0100`（原子搖動熵）、各排序與輸出樣本選取、結構檔（PDB、mmCIF、SDF、mol2）、`summary.tsv` 與 `rank_<方法>.tsv`；新增 `--freeEnergy`、`--outMinPerRank`、`--enthalpyScaling`、`--entropyScaling`、`--shakingRadius`、`--shakingStep`、`--temperature`、`--unboundCandidateNum`（10、14） |
+| 1.33 | 2026-10-16 | od_0100 係數拆分（c0、c_tors、分子間 4 項、分子內 4 項、StaM／MobM 熵項），以 TOML 參數檔 `--feParamFile` 設定（取代 `--enthalpyScaling`、`--entropyScaling`），寫出 `feparams.used.toml`；`summary.tsv` 輸出未乘係數的分項以供離線擬合（10.2、10.3、14） |

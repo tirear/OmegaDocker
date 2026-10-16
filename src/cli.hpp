@@ -80,8 +80,7 @@ struct Options {
   bool feAdgpu16 = false;  // --freeEnergy (spec 10.2)
   bool feOd0100 = true;
   int outMinPerRank = 40;
-  double enthalpyScaling = 0.7564;
-  double entropyScaling = 0.9;
+  std::string feParamFile;  // od_0100 coefficients; built-in defaults when empty
   double shakingRadius = 1.4;
   double shakingStep = 0.2;
   double temperature = 298.15;

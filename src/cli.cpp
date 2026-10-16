@@ -232,10 +232,9 @@ const std::vector<OptionDef>& optionTable() {
        }},
       {"outMinPerRank", Kind::Value, "<n>", "40", "9d: output at least the first n samples of every ranking",
        [](Options& o, const std::string& v) { o.outMinPerRank = parseInt32("outMinPerRank", v); }},
-      {"enthalpyScaling", Kind::Value, "<c>", "0.7564", "od_0100: factor of the AD4 energies (not calibrated yet)",
-       [](Options& o, const std::string& v) { o.enthalpyScaling = parseDouble("enthalpyScaling", v); }},
-      {"entropyScaling", Kind::Value, "<c>", "0.9", "od_0100: factor of -TS (not calibrated yet)",
-       [](Options& o, const std::string& v) { o.entropyScaling = parseDouble("entropyScaling", v); }},
+      {"feParamFile", Kind::Value, "<file>", "built-in",
+       "od_0100: coefficients of the free energy terms (TOML; not calibrated yet); the values used are written to <outPrefix>/feparams.used.toml",
+       [](Options& o, const std::string& v) { o.feParamFile = v; }},
       {"shakingRadius", Kind::Value, "<dist>", "1.4", "od_0100: radius of the sphere each heavy atom is moved over (Å)",
        [](Options& o, const std::string& v) { o.shakingRadius = parseDouble("shakingRadius", v); }},
       {"shakingStep", Kind::Value, "<dist>", "0.2", "od_0100: lattice spacing of the points in the sphere (Å)",
@@ -388,8 +387,6 @@ void validateOptions(const Options& o) {
   if (o.midTopSampleFactor && *o.midTopSampleFactor < 1) fail("--midTopSampleFactor must be >= 1");
   if (o.symMaxPerm < 0) fail("--symMaxPerm must be >= 0");
   if (o.outMinPerRank < 1) fail("--outMinPerRank must be >= 1");
-  if (!(o.enthalpyScaling >= 0)) fail("--enthalpyScaling must be >= 0");
-  if (!(o.entropyScaling >= 0)) fail("--entropyScaling must be >= 0");
   if (!(o.shakingRadius > 0)) fail("--shakingRadius must be > 0");
   if (!(o.shakingStep > 0)) fail("--shakingStep must be > 0");
   if (!(o.temperature > 0)) fail("--temperature must be > 0");

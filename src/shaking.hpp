@@ -14,7 +14,7 @@ namespace od {
 // the points of a sphere around its position while all other atoms stay; the
 // pair energies at the points give its accessible fraction
 //   f_i = sum_k exp(-(E_k - E_min) / RT) / (number of points),
-// and -TS = -entropyScaling * RT * sum_i ln f_i (>= 0).
+// and -TS = -RT * sum_i ln f_i (>= 0; the coefficient is applied in 9d).
 
 // Non-merged atoms of one or more molecules. Pairs of atoms of the same
 // molecule within three bonds are excluded; all other pairs interact.
@@ -35,7 +35,6 @@ struct ShakeParams {
   double radius = 1.4;         // Å, --shakingRadius
   double step = 0.2;           // Å, --shakingStep
   double temperature = 298.15;  // K, --temperature
-  double scaling = 0.9;        // --entropyScaling
 };
 
 // Points (offsets) of the sphere: a cubic lattice with spacing step centred on
@@ -48,6 +47,6 @@ std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, co
                              std::span<const char> shake = {});
 
 constexpr double kGasConstant = 1.987204259e-3;  // kcal/(mol K)
-inline double minusTS(double sumLnF, const ShakeParams& p) { return -p.scaling * kGasConstant * p.temperature * sumLnF; }
+inline double minusTS(double sumLnF, const ShakeParams& p) { return -kGasConstant * p.temperature * sumLnF; }
 
 }  // namespace od

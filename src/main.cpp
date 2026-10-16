@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +32,7 @@
 #include "grid.hpp"
 #include "grow.hpp"
 #include "orient.hpp"
+#include "feparams.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
 #include "write_struct.hpp"
@@ -354,15 +356,23 @@ std::string joinNames(const std::vector<std::string>& v) {
 }
 
 // 9d: recalculation by atom pairs, binding free energies, rankings and output (spec 10).
+// AD4 terms (vdw, hbond, elec, desolv) as an array, in the order of od::kFeTermNames.
+using Terms4 = std::array<double, od::FeParams::kTerms>;
+Terms4 terms4(const od::EnergyTerms& e) { return {e.vdw, e.hbond, e.elec, e.desolv}; }
+Terms4 terms4(const od::InterTerms& e) { return {e.vdw, e.hbond, e.elec, e.desolv}; }
+double dot4(const Terms4& c, const Terms4& e) {
+  double s = 0;
+  for (int k = 0; k < od::FeParams::kTerms; ++k) s += c[k] * e[k];
+  return s;
+}
+
 void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const std::vector<MobState>& ms,
-           const od::Options& opt, float shift) {
+           const od::Options& opt, const od::FeParams& fp, float shift) {
   const od::EnergyParams ep = energyParams(opt);
   od::ShakeParams sp;
   sp.radius = opt.shakingRadius;
   sp.step = opt.shakingStep;
   sp.temperature = opt.temperature;
-  sp.scaling = opt.entropyScaling;
-  const double cH = opt.enthalpyScaling;
   const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
 
   // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.
@@ -390,20 +400,36 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     if (it == stamAlone.end()) it = stamAlone.emplace(angles, evalAlone(stamSet, angles, opt.feOd0100)).first;
     return it->second;
   };
+  // Unbound state: the candidate with the lowest G = sum_t intra[t] E_intra,t + entropy (-TS).
+  struct Unbound {
+    double g = 0, mts = 0;
+    Terms4 intra{};
+  };
   auto unbound = [&](const ConfSet& set, bool stam) {
-    double g = std::numeric_limits<double>::infinity();
+    Unbound u;
+    u.g = std::numeric_limits<double>::infinity();
+    const double cS = stam ? fp.entropyStam : fp.entropyMobm;
     for (const auto& ang : set.lowestAngles(opt.unboundCandidateNum)) {
       const Alone tmp = stam ? Alone{} : evalAlone(set, ang, true);
       const Alone& a = stam ? stamOf(ang) : tmp;
-      g = std::min(g, cH * a.terms.intra() + od::minusTS(a.sumLnF, sp));
+      const Terms4 e = terms4(a.terms);
+      const double mts = od::minusTS(a.sumLnF, sp);
+      const double g = dot4(fp.intra, e) + cS * mts;
+      if (g < u.g) u = {g, mts, e};
     }
-    return g;
+    return u;
   };
-  double gUnboundStam = 0;
+  Unbound ubStam;
   if (opt.feOd0100) {
+    std::filesystem::create_directories(opt.outPrefix);
+    const std::string path = opt.outPrefix + "/feparams.used.toml";
+    std::ofstream f(path);
+    if (!f) od::fail("cannot write {}", path);
+    f << od::feParamsText(fp);
     const auto t0 = std::chrono::steady_clock::now();
-    gUnboundStam = unbound(stamSet, true);
-    od::logInfo(std::format("9d od_0100: G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)", gUnboundStam,
+    ubStam = unbound(stamSet, true);
+    od::logInfo(std::format("9d od_0100: coefficients {} (written to {}); G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)",
+                            opt.feParamFile.empty() ? "built-in defaults" : opt.feParamFile, path, ubStam.g,
                             stamSet.lowestAngles(opt.unboundCandidateNum).size(),
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
   }
@@ -412,14 +438,16 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     const ConfSet& mob = *mobSets[i];
     const auto& top = ms[i].top;
     const auto t0 = std::chrono::steady_clock::now();
-    double gUnboundMob = 0;
-    if (opt.feOd0100) gUnboundMob = unbound(mob, false);
+    Unbound ubMob;
+    if (opt.feOd0100) ubMob = unbound(mob, false);
+    const int nTors = mob.sys().torsionCount();
     const double unboundSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
     struct Row {
       double e9b = 0, e9bGrid = 0, inter = 0, interClash = 0, mobIntra = 0, mobClash = 0, stamTerm = 0, stamIntra = 0,
              stamClash = 0;
-      double dgAd = 0, dgOd = 0, gComplex = 0, mtsComplex = 0;
+      double dgAd = 0, dgOd = 0, gComplex = 0, mtsStam = 0, mtsMobm = 0;
+      Terms4 inter4{}, dIntra4{};
       std::vector<od::Vec3f> world;
     };
     std::vector<Row> rows(top.size());
@@ -432,7 +460,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       const od::ShakeAtoms mobAtoms = od::shakeAtoms(mob.sys(), mob.parts(), w.world);
       const od::EnergyTerms mt = mob.sys().evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
       const od::InterTerms it = od::exactInter(st.atoms, mobAtoms, ep);
-      w.inter = it.inter;
+      w.inter = it.inter();
       w.interClash = it.clash;
       w.mobIntra = mt.intra();
       w.mobClash = mt.clash;
@@ -441,11 +469,21 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       w.stamClash = st.terms.clash;
       w.e9b = w.inter + w.interClash + w.mobIntra + w.mobClash + w.stamTerm;
       w.e9bGrid = r.rank() + shift;
-      w.dgAd = w.inter + od::kAdgpuTorsionCoeff * mob.sys().torsionCount();
+      w.dgAd = w.inter + od::kAdgpuTorsionCoeff * nTors;
       if (opt.feOd0100) {
-        w.mtsComplex = od::minusTS(od::complexSumLnF(st.atoms, st.lnF, mobAtoms, ep, sp), sp);
-        w.gComplex = cH * (w.inter + w.mobIntra + w.stamIntra) + w.mtsComplex;
-        w.dgOd = w.gComplex - gUnboundStam - gUnboundMob;
+        const od::ComplexLnF l = od::complexSumLnF(st.atoms, st.lnF, mobAtoms, ep, sp);
+        w.mtsStam = od::minusTS(l.stam, sp);
+        w.mtsMobm = od::minusTS(l.mobm, sp);
+        w.inter4 = terms4(it);
+        const Terms4 si = terms4(st.terms), mi = terms4(mt);
+        Terms4 intra4{};
+        for (int t = 0; t < od::FeParams::kTerms; ++t) {
+          intra4[t] = si[t] + mi[t];
+          w.dIntra4[t] = intra4[t] - ubStam.intra[t] - ubMob.intra[t];
+        }
+        w.gComplex = dot4(fp.inter, w.inter4) + dot4(fp.intra, intra4) + fp.entropyStam * w.mtsStam +
+                     fp.entropyMobm * w.mtsMobm;
+        w.dgOd = fp.c0 + fp.tors * nTors + w.gComplex - ubStam.g - ubMob.g;
       }
     }
     const double evalSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() - unboundSec;
@@ -514,7 +552,12 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       for (const auto& m : methods) f << "\trank_" << m.name;
       f << "\tE_9b\tE_9b_grid\tinter\tinter_clash\tmobm_intra\tmobm_clash\tstam_term\tstam_intra\tstam_clash\tclash";
       if (opt.feAdgpu16) f << "\tdG_adgpu_16";
-      if (opt.feOd0100) f << "\tdG_od_0100\tG_complex\tmTS_complex\tG_unbound_stam\tG_unbound_mobm";
+      if (opt.feOd0100) {
+        f << "\tdG_od_0100\tG_complex\tG_unbound_stam\tG_unbound_mobm";
+        for (const char* t : od::kFeTermNames) f << "\tinter_" << t;
+        for (const char* t : od::kFeTermNames) f << "\tdintra_" << t;
+        f << "\tmTS_complex_stam\tmTS_complex_mobm\tmTS_unbound_stam\tmTS_unbound_mobm\tn_tors";
+      }
       f << "\n";
       for (std::size_t k : order[0]) {
         if (!out[k]) continue;
@@ -526,9 +569,12 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
                          w.inter, w.interClash, w.mobIntra, w.mobClash, w.stamTerm, w.stamIntra, w.stamClash,
                          w.interClash + w.mobClash + w.stamClash > 0 ? "yes" : "no");
         if (opt.feAdgpu16) f << std::format("\t{:.4f}", w.dgAd);
-        if (opt.feOd0100)
-          f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}", w.dgOd, w.gComplex, w.mtsComplex, gUnboundStam,
-                           gUnboundMob);
+        if (opt.feOd0100) {
+          f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}", w.dgOd, w.gComplex, ubStam.g, ubMob.g);
+          for (double v : w.inter4) f << std::format("\t{:.4f}", v);
+          for (double v : w.dIntra4) f << std::format("\t{:.4f}", v);
+          f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{}", w.mtsStam, w.mtsMobm, ubStam.mts, ubMob.mts, nTors);
+        }
         f << "\n";
       }
     }
@@ -546,7 +592,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
 
     od::logInfo(std::format("9d {:<38} recalculated {} sample(s) ({:.2f} s){}; output {} pose(s), {} StaM conformation(s) to {}",
                             mob.name(), top.size(), evalSec,
-                            opt.feOd0100 ? std::format(", G_unbound MobM {:.3f} ({:.2f} s)", gUnboundMob, unboundSec) : "",
+                            opt.feOd0100 ? std::format(", G_unbound MobM {:.3f} ({:.2f} s)", ubMob.g, unboundSec) : "",
                             poseNum, stamFiles.size(), dir));
     for (std::size_t m = 0; m < methods.size(); ++m) {
       std::string s;
@@ -561,7 +607,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
 
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
 void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const od::Options& opt,
-               std::uint64_t seed) {
+               const od::FeParams& fp, std::uint64_t seed) {
   std::vector<od::Ad4Type> probe;
   for (const auto& m : mobSets)
     for (od::Ad4Type t : m->sys().typing(0).type)
@@ -772,7 +818,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count()));
   }
   const float shift = stamSet.movable() && std::isfinite(stamRef) ? stamRef - stamSet.minEnergy() : 0.0f;
-  run9d(stamSet, mobSets, ms, opt, shift);
+  run9d(stamSet, mobSets, ms, opt, fp, shift);
   od::logInfo("Final topSampleSet:");
   for (std::size_t i = 0; i < ms.size(); ++i) {
     od::logInfo(std::format("  {:<40} {} sample(s)", mobSets[i]->name(), ms[i].top.size()));
@@ -843,6 +889,8 @@ int run(int argc, char** argv) {
     mobs.push_back(std::move(mob.front()));
     mobTopo.push_back(std::move(t));
   }
+
+  const od::FeParams fe = opt.feParamFile.empty() ? od::FeParams{} : od::readFeParams(opt.feParamFile);  // spec 10.2
 
   // Molecule configuration (spec 5.1).
   std::vector<od::MolInput> inputs;
@@ -915,7 +963,7 @@ int run(int argc, char** argv) {
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
   for (const auto& c : mobSets)
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
-  runRounds(*stamSet, mobSets, opt, seed);
+  runRounds(*stamSet, mobSets, opt, fe, seed);
   return 0;
 }
 
