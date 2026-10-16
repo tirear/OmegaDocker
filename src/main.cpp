@@ -356,6 +356,12 @@ std::string joinNames(const std::vector<std::string>& v) {
 }
 
 // 9d: recalculation by atom pairs, binding free energies, rankings and output (spec 10).
+std::string feSource(const od::Options& opt) {
+  std::string s = opt.feParamFile.empty() ? "built-in defaults" : opt.feParamFile;
+  if (!opt.feOverrides.empty()) s += std::format(" + {} command-line override(s)", opt.feOverrides.size());
+  return s;
+}
+
 // AD4 terms (vdw, hbond, elec, desolv) as an array, in the order of od::kFeTermNames.
 using Terms4 = std::array<double, od::FeParams::kTerms>;
 Terms4 terms4(const od::EnergyTerms& e) { return {e.vdw, e.hbond, e.elec, e.desolv}; }
@@ -370,10 +376,10 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
            const od::Options& opt, const od::FeParams& fp, float shift) {
   const od::EnergyParams ep = energyParams(opt);
   od::ShakeParams sp;
-  sp.radius = opt.shakingRadius;
-  sp.step = opt.shakingStep;
-  sp.temperature = opt.temperature;
-  sp.rrtScaling = opt.rrtScaling;
+  sp.radius = fp.shakingRadius;
+  sp.step = fp.shakingStep;
+  sp.temperature = fp.temperature;
+  sp.rrtScaling = fp.rrtScaling;
   const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
 
   // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.
@@ -410,7 +416,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     Unbound u;
     u.g = std::numeric_limits<double>::infinity();
     const double cS = stam ? fp.entropyStam : fp.entropyMobm;
-    for (const auto& ang : set.lowestAngles(opt.unboundCandidateNum)) {
+    for (const auto& ang : set.lowestAngles(fp.unboundCandidateNum)) {
       const Alone tmp = stam ? Alone{} : evalAlone(set, ang, true);
       const Alone& a = stam ? stamOf(ang) : tmp;
       const Terms4 e = terms4(a.terms);
@@ -430,8 +436,8 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     const auto t0 = std::chrono::steady_clock::now();
     ubStam = unbound(stamSet, true);
     od::logInfo(std::format("9d od_0100: coefficients {} (written to {}); G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)",
-                            opt.feParamFile.empty() ? "built-in defaults" : opt.feParamFile, path, ubStam.g,
-                            stamSet.lowestAngles(opt.unboundCandidateNum).size(),
+                            feSource(opt), path, ubStam.g,
+                            stamSet.lowestAngles(fp.unboundCandidateNum).size(),
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
   }
 
@@ -891,7 +897,7 @@ int run(int argc, char** argv) {
     mobTopo.push_back(std::move(t));
   }
 
-  const od::FeParams fe = opt.feParamFile.empty() ? od::FeParams{} : od::readFeParams(opt.feParamFile);  // spec 10.2
+  const od::FeParams fe = od::loadFeParams(opt.feParamFile, opt.feOverrides);  // spec 10.2
 
   // Molecule configuration (spec 5.1).
   std::vector<od::MolInput> inputs;

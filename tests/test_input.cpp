@@ -2561,16 +2561,15 @@ TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
       CHECK(v < 0);
       CHECK(v >= std::log(1.0 / 179) - 1e-9);
     }
-    // Boltzmann weights: rrtScaling replaces 1 / RT; 0 makes every point equal (ln f = 0).
-    CHECK(sp.rrt() == doctest::Approx(1.687806585302075).epsilon(1e-12));
+    // Boltzmann weights exp(-dE * rrtScaling): independent of temperature; 0 makes every point equal (ln f = 0).
+    CHECK(sp.rrtScaling == 4.0);
     od::ShakeParams s2 = sp;
-    s2.rrtScaling = sp.rrt();
     s2.temperature = 500;
     const auto l2 = od::shakeLnF(one, ep, s2);
     for (std::size_t i = 0; i < l.size(); ++i) CHECK(l2[i] == l[i]);
     s2.rrtScaling = 0.0;
     for (double v : od::shakeLnF(one, ep, s2)) CHECK(v == doctest::Approx(0).epsilon(1e-12));
-    s2.rrtScaling = 2 * sp.rrt();
+    s2.rrtScaling = 2 * sp.rrtScaling;
     const auto l3 = od::shakeLnF(one, ep, s2);
     for (std::size_t i = 0; i < l.size(); ++i) CHECK(l3[i] < l[i]);
   }
@@ -2676,7 +2675,7 @@ TEST_CASE("write_struct: PDB, mmCIF, SDF and mol2") {
   std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("feparams: defaults, file and errors") {
+TEST_CASE("feparams: defaults, file, command-line overrides and errors") {
   const od::FeParams d;
   CHECK(d.c0 == 0);
   CHECK(d.tors == 0);
@@ -2686,6 +2685,12 @@ TEST_CASE("feparams: defaults, file and errors") {
   }
   CHECK(d.entropyStam == 0.9);
   CHECK(d.entropyMobm == 0.9);
+  CHECK(d.temperature == 298.15);
+  CHECK(d.unboundCandidateNum == 20);
+  CHECK(d.shakingRadius == 1.4);
+  CHECK(d.shakingStep == 0.2);
+  CHECK(d.rrtScaling == 4.0);
+  CHECK(od::loadFeParams("", {}).inter == d.inter);
   const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_fe_{}.toml", ::getpid())).string();
   auto write = [&](const std::string& s) { std::ofstream(path) << s; };
   // The written file reads back to the same values.
@@ -2696,39 +2701,63 @@ TEST_CASE("feparams: defaults, file and errors") {
   x.intra = {0.5, 0.6, 0.7, 0.8};
   x.entropyStam = 1.1;
   x.entropyMobm = 0.7;
+  x.temperature = 310;
+  x.unboundCandidateNum = 5;
+  x.shakingRadius = 1.2;
+  x.shakingStep = 0.25;
+  x.rrtScaling = 1.6878;
   write(od::feParamsText(x));
-  const od::FeParams y = od::readFeParams(path);
+  const od::FeParams y = od::loadFeParams(path, {});
   CHECK(y.c0 == x.c0);
   CHECK(y.tors == x.tors);
   CHECK(y.inter == x.inter);
   CHECK(y.intra == x.intra);
   CHECK(y.entropyStam == x.entropyStam);
   CHECK(y.entropyMobm == x.entropyMobm);
+  CHECK(y.temperature == x.temperature);
+  CHECK(y.unboundCandidateNum == x.unboundCandidateNum);
+  CHECK(y.shakingRadius == x.shakingRadius);
+  CHECK(y.shakingStep == x.shakingStep);
+  CHECK(y.rrtScaling == x.rrtScaling);
   write(od::feParamsText(d));
-  CHECK(od::readFeParams(path).inter == d.inter);
-  // Partial file: other keys keep the defaults; integers are accepted.
-  write("[od_0100]\ntors = 1\n[od_0100.inter]\nelec = 0.5\n");
-  const od::FeParams z = od::readFeParams(path);
+  CHECK(od::loadFeParams(path, {}).rrtScaling == 4.0);
+  // Partial file: other keys keep the defaults; integers are accepted for numbers.
+  write("[od_0100]\ntors = 1\n[od_0100.inter]\nelec = 0.5\n[od_0100.shaking]\nrrtScaling = 2\n");
+  const od::FeParams z = od::loadFeParams(path, {});
   CHECK(z.tors == 1);
   CHECK(z.inter == std::array<double, 4>{0.7564, 0.7564, 0.5, 0.7564});
   CHECK(z.intra == d.intra);
-  CHECK(z.entropyMobm == 0.9);
-  // Errors: all listed with lines.
-  write("[od_0100]\nc0 = \"x\"\nfoo = 1\n[od_0100.inter]\nvdW = 1\n[od_0100.entropy]\nstam = nan\n[other]\n");
+  CHECK(z.rrtScaling == 2);
+  CHECK(z.shakingRadius == 1.4);
+  // Command line overrides the file, in order; the last one wins.
+  const od::FeParams o = od::loadFeParams(path, {{"od_0100.inter.elec", "0.25"}, {"od_0100.shaking.rrtScaling", "3"},
+                                                 {"od_0100.shaking.rrtScaling", "5"}, {"od_0100.unboundCandidateNum", "7"}});
+  CHECK(o.inter[2] == 0.25);
+  CHECK(o.rrtScaling == 5);
+  CHECK(o.unboundCandidateNum == 7);
+  CHECK(o.tors == 1);
+  // Errors: all listed, file problems with lines, command-line problems with their key.
+  write("[od_0100]\nc0 = \"x\"\nfoo = 1\nunboundCandidateNum = 2.5\n[od_0100.inter]\nvdW = 1\n"
+        "[od_0100.entropy]\nstam = nan\n[od_0100.shaking]\nstep = 0\nrrtScaling = -1\n[other]\n");
   try {
-    od::readFeParams(path);
+    od::loadFeParams(path, {{"od_0100.temperature", "abc"}, {"od_0100.shaking.radius", "-1"}});
     FAIL("no error");
   } catch (const od::Error& e) {
     const std::string m = e.what();
-    CHECK(m.find("5 problem(s)") != std::string::npos);
+    CHECK(m.find("10 problem(s)") != std::string::npos);
     CHECK(m.find("line 2: od_0100.c0: must be a number") != std::string::npos);
     CHECK(m.find("line 3: od_0100.foo: unknown key") != std::string::npos);
-    CHECK(m.find("line 5: od_0100.inter.vdW: unknown key") != std::string::npos);
-    CHECK(m.find("line 7: od_0100.entropy.stam: must be finite") != std::string::npos);
+    CHECK(m.find("line 4: od_0100.unboundCandidateNum: must be an integer") != std::string::npos);
+    CHECK(m.find("line 6: od_0100.inter.vdW: unknown key") != std::string::npos);
+    CHECK(m.find("line 8: od_0100.entropy.stam: must be finite") != std::string::npos);
+    CHECK(m.find("line 10: od_0100.shaking.step: must be > 0") != std::string::npos);
+    CHECK(m.find("line 11: od_0100.shaking.rrtScaling: must be >= 0") != std::string::npos);
     CHECK(m.find("other: unknown key") != std::string::npos);
+    CHECK(m.find("command line: od_0100.temperature (abc): must be a number") != std::string::npos);
+    CHECK(m.find("command line: od_0100.shaking.radius (-1): must be > 0") != std::string::npos);
   }
   write("[od_0100\n");
-  CHECK_THROWS_AS(od::readFeParams(path), od::Error);
+  CHECK_THROWS_AS(od::loadFeParams(path, {}), od::Error);
   std::filesystem::remove(path);
-  CHECK_THROWS_AS(od::readFeParams(path), od::Error);
+  CHECK_THROWS_AS(od::loadFeParams(path, {}), od::Error);
 }

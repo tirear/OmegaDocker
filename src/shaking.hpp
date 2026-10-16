@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
-#include <optional>
 #include <span>
 #include <vector>
 
@@ -36,8 +35,7 @@ struct ShakeParams {
   double radius = 1.4;         // Å, --shakingRadius
   double step = 0.2;           // Å, --shakingStep
   double temperature = 298.15;  // K, --temperature (RT of -TS)
-  std::optional<double> rrtScaling;  // mol/kcal, --rrtScaling; 1 / RT when not set
-  double rrt() const;
+  double rrtScaling = 4.0;      // mol/kcal, --rrtScaling
 };
 
 // Points (offsets) of the sphere: a cubic lattice with spacing step centred on
@@ -50,7 +48,6 @@ std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, co
                              std::span<const char> shake = {});
 
 constexpr double kGasConstant = 1.987204259e-3;  // kcal/(mol K)
-inline double ShakeParams::rrt() const { return rrtScaling ? *rrtScaling : 1.0 / (kGasConstant * temperature); }
 inline double minusTS(double sumLnF, const ShakeParams& p) { return -kGasConstant * p.temperature * sumLnF; }
 
 }  // namespace od

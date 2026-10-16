@@ -80,12 +80,8 @@ struct Options {
   bool feAdgpu16 = false;  // --freeEnergy (spec 10.2)
   bool feOd0100 = true;
   int outMinPerRank = 40;
-  std::string feParamFile;  // od_0100 coefficients; built-in defaults when empty
-  double shakingRadius = 1.4;
-  double shakingStep = 0.2;
-  double temperature = 298.15;
-  std::optional<double> rrtScaling;  // default 1 / (R temperature)
-  int unboundCandidateNum = 20;
+  std::string feParamFile;  // od_0100 parameters; built-in defaults when empty
+  std::vector<std::pair<std::string, std::string>> feOverrides;  // (key, value) of --fe*, --shaking*, ... (od::FeOverrides)
   CsgmOpts stamCsgm;  // --stamCsgmBuild, --stamGrowMaxRetry, ...
   CsgmOpts mobmCsgm;  // --mobmCsgmBuild, --mobmGrowMaxRetry, ...
   int confMinMaxStep = 100;

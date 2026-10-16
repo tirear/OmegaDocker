@@ -95,7 +95,7 @@ std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, co
   const Ad4Coeffs& c = ep.coeffs;
   const float half = static_cast<float>(0.5 * ep.smooth);
   const float rMin = static_cast<float>(ep.elecMinDistance);
-  const double rrt = p.rrt();
+  const double rrt = p.rrtScaling;
   const double reach = kElecCutoff + p.radius;
   std::vector<float> S(na), V(na);
   for (std::size_t a = 0; a < na; ++a) {

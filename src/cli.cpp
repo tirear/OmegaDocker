@@ -4,9 +4,12 @@
 
 #include "cli.hpp"
 
+#include "feparams.hpp"
+
 #include <cmath>
 #include <algorithm>
 #include <charconv>
+#include <cctype>
 #include <format>
 #include <functional>
 #include <map>
@@ -112,7 +115,42 @@ std::vector<OptionDef> csgmOptions() {
 }
 
 // Inserts the 9a batch-limit and csgm options after the sample-number options.
+// od_0100 parameters: each overrides one key of --feParamFile (spec 10.2).
+std::vector<OptionDef> feOptions() {
+  std::vector<OptionDef> t;
+  auto fe = [&](const std::string& name, const std::string& key, const std::string& hint, const std::string& def,
+                const std::string& help) {
+    t.push_back({name, Kind::Value, hint, def, "od_0100 (" + key + "): " + help,
+                 [key](Options& o, const std::string& v) { o.feOverrides.emplace_back(key, v); }});
+  };
+  fe("feC0", "od_0100.c0", "<c>", "0", "constant term (kcal/mol)");
+  fe("feTors", "od_0100.tors", "<c>", "0", "coefficient of the MobM rotatable torsion number");
+  for (const char* g : {"inter", "intra"})
+    for (const char* term : kFeTermNames) {
+      std::string n = std::string("fe") + g + term;
+      n[2] = static_cast<char>(std::toupper(n[2]));
+      n[7] = static_cast<char>(std::toupper(n[7]));
+      fe(n, std::format("od_0100.{}.{}", g, term), "<c>", "0.7564",
+         std::format("coefficient of the {} {} energy", g == std::string("inter") ? "intermolecular" : "intramolecular deformation", term));
+    }
+  fe("feEntropyStam", "od_0100.entropy.stam", "<c>", "0.9", "coefficient of -TS of the StaM group");
+  fe("feEntropyMobm", "od_0100.entropy.mobm", "<c>", "0.9", "coefficient of -TS of the MobM");
+  fe("temperature", "od_0100.temperature", "<K>", "298.15", "temperature T of -TS = -RT sum ln f_i (K)");
+  fe("unboundCandidateNum", "od_0100.unboundCandidateNum", "<n>", "20",
+     "conformation samples with the lowest 9a energy evaluated for the unbound free energy");
+  fe("shakingRadius", "od_0100.shaking.radius", "<dist>", "1.4", "radius of the sphere each heavy atom is moved over (Å)");
+  fe("shakingStep", "od_0100.shaking.step", "<dist>", "0.2", "lattice spacing of the points in the sphere (Å)");
+  fe("rrtScaling", "od_0100.shaking.rrtScaling", "<c>", "4",
+     "reverse RT scaling of the shaking weights w_k = exp(-(E_k - E_min) x rrtScaling) (mol/kcal)");
+  return t;
+}
+
 std::vector<OptionDef> withCsgmOptions(std::vector<OptionDef> t) {
+  {
+    const auto at = std::find_if(t.begin(), t.end(), [](const OptionDef& d) { return d.name == "feParamFile"; });
+    const auto f = feOptions();
+    t.insert(at + 1, f.begin(), f.end());
+  }
   const auto at =
       std::find_if(t.begin(), t.end(), [](const OptionDef& d) { return d.name == "mobmEliteConfSampleNum"; });
   const auto c = csgmOptions();
@@ -234,20 +272,8 @@ const std::vector<OptionDef>& optionTable() {
       {"outMinPerRank", Kind::Value, "<n>", "40", "9d: output at least the first n samples of every ranking",
        [](Options& o, const std::string& v) { o.outMinPerRank = parseInt32("outMinPerRank", v); }},
       {"feParamFile", Kind::Value, "<file>", "built-in",
-       "od_0100: coefficients of the free energy terms (TOML; not calibrated yet); the values used are written to <outPrefix>/feparams.used.toml",
+       "od_0100: free energy parameters (TOML; not calibrated yet); the options below override it; the values used are written to <outPrefix>/feparams.used.toml",
        [](Options& o, const std::string& v) { o.feParamFile = v; }},
-      {"shakingRadius", Kind::Value, "<dist>", "1.4", "od_0100: radius of the sphere each heavy atom is moved over (Å)",
-       [](Options& o, const std::string& v) { o.shakingRadius = parseDouble("shakingRadius", v); }},
-      {"shakingStep", Kind::Value, "<dist>", "0.2", "od_0100: lattice spacing of the points in the sphere (Å)",
-       [](Options& o, const std::string& v) { o.shakingStep = parseDouble("shakingStep", v); }},
-      {"temperature", Kind::Value, "<K>", "298.15", "od_0100: temperature T of -TS = -RT sum ln f_i (K)",
-       [](Options& o, const std::string& v) { o.temperature = parseDouble("temperature", v); }},
-      {"rrtScaling", Kind::Value, "<c>", "1/(R x temperature) = 1.6878 at 298.15 K",
-       "od_0100: reverse RT scaling of the shaking weights w_k = exp(-(E_k - E_min) x rrtScaling) (mol/kcal)",
-       [](Options& o, const std::string& v) { o.rrtScaling = parseDouble("rrtScaling", v); }},
-      {"unboundCandidateNum", Kind::Value, "<n>", "20",
-       "od_0100: conformation samples with the lowest 9a energy evaluated for the unbound free energy",
-       [](Options& o, const std::string& v) { o.unboundCandidateNum = parseInt32("unboundCandidateNum", v); }},
       {"rotStep", Kind::Value, "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
        [](Options& o, const std::string& v) { o.rotStep = parseDouble("rotStep", v); }},
       {"maxNearDistance", Kind::Value, "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -391,11 +417,6 @@ void validateOptions(const Options& o) {
   if (o.midTopSampleFactor && *o.midTopSampleFactor < 1) fail("--midTopSampleFactor must be >= 1");
   if (o.symMaxPerm < 0) fail("--symMaxPerm must be >= 0");
   if (o.outMinPerRank < 1) fail("--outMinPerRank must be >= 1");
-  if (!(o.shakingRadius > 0)) fail("--shakingRadius must be > 0");
-  if (!(o.shakingStep > 0)) fail("--shakingStep must be > 0");
-  if (!(o.temperature > 0)) fail("--temperature must be > 0");
-  if (o.rrtScaling && !(*o.rrtScaling >= 0 && std::isfinite(*o.rrtScaling))) fail("--rrtScaling must be a finite number >= 0");
-  if (o.unboundCandidateNum < 1) fail("--unboundCandidateNum must be >= 1");
   if (!(o.Kclash >= 0)) fail("--Kclash must be >= 0");
   if (!(o.EclashBase > o.Emax)) fail("--EclashBase must be greater than --Emax");
   for (SampleSet set : {SampleSet::StaM, SampleSet::MobM}) {
