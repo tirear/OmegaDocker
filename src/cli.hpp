@@ -34,6 +34,11 @@ struct CsgmOpts {
   double crossoverRate = 80.0;
   double mutationRate = 2.0;
   double absMaxDang = 90.0;
+  bool pathExploring = false;  // <set>.csgmGA = "csgm3"
+  // csgm3 (spec 7.7).
+  int peMaxOffset = 30;
+  double peCoverAngle = 360.0;
+  int peSampleNumPerLine = 4;
 };
 
 struct Options {

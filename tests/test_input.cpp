@@ -31,6 +31,7 @@
 #include "conf9a.hpp"
 #include "csgm1.hpp"
 #include "csgm2.hpp"
+#include "csgm3.hpp"
 #include "dock9b.hpp"
 #include "dock9c.hpp"
 #include "log.hpp"
@@ -1467,6 +1468,109 @@ TEST_CASE("csgm2: tournament, crossover and mutation") {
   CHECK_THROWS_AS(od::csgm2Offspring(r3, std::vector<od::Csgm2Parent>{}, noCis, od::Csgm2Params{}, c1), od::Error);
 }
 
+TEST_CASE("csgm3: lines through the end points") {
+  using V = std::vector<float>;
+  od::Csgm3Params p0{0, 360.0, 4};
+  CHECK(od::csgm3SampleNum(3, p0) == 24);
+  CHECK(od::csgm3SampleNum(2000, p0) == 2000LL * 1999 * 4);
+  const std::vector<bool> noCis(2, false);
+  auto line = [&](std::span<const V* const> ends, long long l, const od::Csgm3Params& p, std::uint64_t seed,
+                  const std::vector<bool>& cis) {
+    std::vector<std::vector<double>> s;
+    for (int m = 0; m < p.perLine; ++m) {
+      std::vector<double> a(ends[0]->size());
+      od::csgm3Sample(od::Rng(seed, 1, 100), ends, l, m, cis, p, a);
+      s.push_back(a);
+    }
+    return s;
+  };
+  // No offset: the samples cover 360 degrees along the line in steps of 90, from either end point.
+  const V e0{0.0f, 0.0f}, e1{90.0f, 0.0f};
+  const std::vector<const V*> two{&e0, &e1};
+  for (std::uint64_t seed = 0; seed < 20; ++seed)
+    for (long long l = 0; l < 2; ++l) {
+      auto s = line(two, l, p0, seed, noCis);
+      std::vector<double> x;
+      for (const auto& a : s) {
+        CHECK(a[1] == doctest::Approx(0.0).epsilon(1e-12));
+        x.push_back(a[0]);
+      }
+      std::sort(x.begin(), x.end());
+      CHECK(x == std::vector<double>{-90.0, 0.0, 90.0, 180.0});
+      CHECK((s[0][0] == 0.0 || s[0][0] == 90.0));
+      // Line 0 goes from end 0 to end 1 (+90 per step), line 1 the other way.
+      CHECK(od::wrapDeg(s[1][0] - s[0][0]) == doctest::Approx(l == 0 ? 90.0 : -90.0));
+    }
+  // The shortest periodic difference sets the direction: 170 -> -170 goes through 180.
+  const V f0{170.0f, 0.0f}, f1{-170.0f, 0.0f};
+  const std::vector<const V*> wrapEnds{&f0, &f1};
+  od::Csgm3Params p8{0, 360.0, 8};
+  auto s = line(wrapEnds, 0, p8, 3, noCis);
+  for (int m = 1; m < 8; ++m) CHECK(od::wrapDeg(s[m][0] - s[m - 1][0]) == doctest::Approx(45.0));
+  for (const auto& a : s) {
+    CHECK(a[0] > -180.0);
+    CHECK(a[0] <= 180.0);
+  }
+  // Offsets: perpendicular to the end-point direction, integer length <= peMaxOffset.
+  const V g0{10.0f, 20.0f, -30.0f, 40.0f}, g1{50.0f, -60.0f, 70.0f, 0.0f}, g2{-120.0f, 160.0f, 5.0f, -90.0f};
+  const std::vector<const V*> three{&g0, &g1, &g2};
+  od::Csgm3Params p30{30, 360.0, 4};
+  const std::vector<bool> noCis4(4, false);
+  int nonZero = 0;
+  for (std::uint64_t seed = 0; seed < 200; ++seed)
+    for (long long l = 0; l < 6; ++l) {
+      std::vector<double> a(4);
+      od::csgm3Sample(od::Rng(seed, 2, 0), three, l, 0, noCis4, p30, a);
+      const long long i = l / 2;
+      long long j = l % 2;
+      if (j >= i) ++j;
+      std::vector<double> u(4);
+      double un = 0;
+      for (int t = 0; t < 4; ++t) {
+        u[t] = od::wrapDeg(static_cast<double>((*three[j])[t]) - (*three[i])[t]);
+        un += u[t] * u[t];
+      }
+      bool found = false;
+      for (const V* e : {three[i], three[j]}) {
+        double dot = 0, len = 0;
+        for (int t = 0; t < 4; ++t) {
+          const double v = od::wrapDeg(a[t] - (*e)[t]);
+          dot += v * u[t];
+          len += v * v;
+        }
+        len = std::sqrt(len);
+        if (std::abs(dot) / std::sqrt(un) < 1e-6 && len <= 30.0 + 1e-6 && std::abs(len - std::round(len)) < 1e-6) {
+          found = true;
+          nonZero += len > 0.5;
+        }
+      }
+      CHECK(found);
+    }
+  CHECK(nonZero > 1000);
+  // Same generator state: same samples; cisTrans genes are 0 or 180.
+  std::vector<double> c1(4), c2(4);
+  od::csgm3Sample(od::Rng(7, 7, 7), three, 3, 2, noCis4, p30, c1);
+  od::csgm3Sample(od::Rng(7, 7, 7), three, 3, 2, noCis4, p30, c2);
+  CHECK(c1 == c2);
+  const std::vector<bool> cis{false, true, false, true};
+  for (std::uint64_t seed = 0; seed < 50; ++seed)
+    for (int m = 0; m < 4; ++m) {
+      std::vector<double> a(4);
+      od::csgm3Sample(od::Rng(seed, 3, 0), three, seed % 6, m, cis, p30, a);
+      CHECK((a[1] == 0.0 || a[1] == 180.0));
+      CHECK((a[3] == 0.0 || a[3] == 180.0));
+    }
+  // One torsion: no perpendicular direction, so no offset.
+  const V h0{-60.0f}, h1{60.0f};
+  const std::vector<const V*> one{&h0, &h1};
+  std::vector<double> b(1);
+  od::csgm3Sample(od::Rng(1, 1, 1), one, 0, 0, std::vector<bool>{false}, p30, b);
+  CHECK((b[0] == -60.0 || b[0] == 60.0));
+  CHECK_THROWS_AS(od::csgm3Sample(od::Rng(1, 1, 1), std::vector<const V*>{&h0}, 0, 0, std::vector<bool>{false}, p30, b),
+                  od::Error);
+  CHECK_THROWS_AS(od::csgm3Sample(od::Rng(1, 1, 1), one, 2, 0, std::vector<bool>{false}, p30, b), od::Error);
+}
+
 TEST_CASE("csgm1: csgm1b types") {
   Csgm1Fixture x;
   auto& s = x.s();
@@ -1589,7 +1693,7 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
   const od::Molecule& m = x.m();
   const od::EnergySystem sys({{&m, &x.s().tree}}, {});
   const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
-  const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) {
+  const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex&, std::span<double> a) {
     smp.sample(r, a);
     return true;
   };
@@ -1640,6 +1744,26 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
   std::uint64_t counter = 0;
   CHECK_THROWS_AS(od::fillL2Pool(sys, gen, 6, p, counter, c), od::Error);
   CHECK(counter == 30);
+
+  // fixedL1: every batch has that size; the last one is cut at maxL1Total. GenIndex.local restarts per batch.
+  p.fixedL1 = 7;
+  p.maxL1Total = 18;
+  std::vector<std::pair<std::uint64_t, long long>> seen;
+  const od::ConfGenerator rec = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
+#pragma omp critical
+    seen.emplace_back(idx.global, idx.local);
+    smp.sample(r, a);
+    return true;
+  };
+  counter = 5;
+  CHECK_THROWS_AS(od::fillL2Pool(sys, rec, 100, p, counter, c), od::Error);
+  CHECK(counter == 5 + 18);
+  std::sort(seen.begin(), seen.end());
+  REQUIRE(seen.size() == 18);
+  for (std::size_t i = 0; i < seen.size(); ++i) {
+    CHECK(seen[i].first == 5 + i);
+    CHECK(seen[i].second == static_cast<long long>(i % 7));
+  }
 }
 
 namespace {

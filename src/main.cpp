@@ -26,6 +26,7 @@
 #include "conf9a.hpp"
 #include "csgm1.hpp"
 #include "csgm2.hpp"
+#include "csgm3.hpp"
 #include "dssp.hpp"
 #include "energy.hpp"
 #include "dock9b.hpp"
@@ -185,6 +186,7 @@ class ConfSet {
       sampler_.add(od::Csgm1Sampler(*parts_[k].mol, *settings_[k], cfg, cp));
     cisTrans_ = sampler_.cisTransMask();
     ga_ = {csgm_.tournamentRate / 100.0, csgm_.crossoverRate / 100.0, csgm_.mutationRate / 100.0, csgm_.absMaxDang};
+    pe_ = {csgm_.peMaxOffset, csgm_.peCoverAngle, csgm_.peSampleNumPerLine};
     n_ = od::confSampleNums(opt, set);
     p_.minL2 = n_.minL2;
     p_.maxL1Batch = csgm_.maxL1BatchNum;
@@ -247,13 +249,23 @@ class ConfSet {
   }
 
  private:
-  // csgm1 while the dcss has fewer than eliteConfSampleNum samples, csgm2 otherwise (csgm3 is not implemented yet).
+  // csgm1 while the dcss has fewer than eliteConfSampleNum samples, csgmGA (csgm2 or csgm3) otherwise.
   void refill(const std::vector<std::pair<int, float>>& dcss) {
     const bool ga = static_cast<int>(dcss.size()) >= n_.elite;
+    const bool pe = ga && csgm_.pathExploring;
     std::vector<od::Csgm2Parent> parents;
-    for (const auto& [id, e] : dcss) parents.push_back({&samples_[id].angles, e});
+    std::vector<const std::vector<float>*> ends;
+    for (const auto& [id, e] : dcss) {
+      parents.push_back({&samples_[id].angles, e});
+      ends.push_back(&samples_[id].angles);
+    }
     const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { sampler_.sampleSegment(r, seg, a); };
-    const od::ConfGenerator gen = [&](od::Rng& r, std::span<double> a) {
+    const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
+      if (pe) {
+        const int m = static_cast<int>(idx.local % pe_.perLine);
+        od::csgm3Sample(od::Rng(p_.seed, p_.stream, idx.global - m), ends, idx.local / pe_.perLine, m, cisTrans_, pe_, a);
+        return !grow_ || grow_->build(r, a, {}).ok;
+      }
       if (ga) {
         od::csgm2Offspring(r, parents, cisTrans_, ga_, a);
         return !grow_ || grow_->build(r, a, {}).ok;
@@ -263,6 +275,7 @@ class ConfSet {
     };
     const long long l1 = first_ ? n_.initL1 : nextL1_;
     first_ = false;
+    p_.fixedL1 = pe ? od::csgm3SampleNum(ends.size(), pe_) : 0;
     const auto t0 = std::chrono::steady_clock::now();
     const auto st = od::fillL2Pool(sys_, gen, l1, p_, counter_, pool_);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -270,7 +283,7 @@ class ConfSet {
     const long long minimized = st.l1 - st.growFailed;
     od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, E >= Emax {}, "
                             "not closed {})  steps/sample {:.1f}  {:.2f} s",
-                            name_, ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(), st.growFailed, st.overEmax, st.notClosed,
+                            name_, pe ? "csgm3" : ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(), st.growFailed, st.overEmax, st.notClosed,
                             minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   }
 
@@ -283,6 +296,7 @@ class ConfSet {
   od::Csgm1GroupSampler sampler_;
   std::vector<bool> cisTrans_;
   od::Csgm2Params ga_;
+  od::Csgm3Params pe_;
   std::optional<od::GrowBuilder> grow_;
   od::ConfSampleNums n_;
   od::Fill9aParams p_;

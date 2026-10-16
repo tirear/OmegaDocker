@@ -165,6 +165,16 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.stamCsgm.absMaxDang = 180;
   CHECK_NOTHROW(od::validateOptions(o));
+  o.mobmCsgm.peMaxOffset = 181;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.mobmCsgm.peMaxOffset = 0;
+  o.mobmCsgm.peCoverAngle = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.mobmCsgm.peCoverAngle = 360;
+  o.mobmCsgm.peSampleNumPerLine = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.mobmCsgm.peSampleNumPerLine = 1;
+  CHECK_NOTHROW(od::validateOptions(o));
 
   auto s = parse({"--stam_dockingConfSampleNum=12", "--stam_minL2confSampleNum=30", "--stam_initL1confSampleNum=40", "--stam_eliteConfSampleNum=4", "--mobm_dockingConfSampleNum=8", "--mobm_minL2confSampleNum=16", "--mobm_initL1confSampleNum=17", "--mobm_eliteConfSampleNum=2"});
   CHECK(*s.stam.docking == 12);
@@ -208,7 +218,14 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(ga.mobmCsgm.crossoverRate == 50);
   CHECK(ga.mobmCsgm.mutationRate == 5);
   CHECK(ga.mobmCsgm.absMaxDang == 45);
-  CHECK_THROWS_AS(parse({"--mobm_csgmGA=csgm3"}), od::Error);  // not implemented yet
+  CHECK_FALSE(ga.stamCsgm.pathExploring);
+  auto pe = parse({"--mobm_csgmGA=csgm3", "--mobm_peMaxOffset=10", "--mobm_peCoverAngle=180", "--mobm_peSampleNumPerLine=6"});
+  CHECK(pe.mobmCsgm.pathExploring);
+  CHECK_FALSE(pe.stamCsgm.pathExploring);
+  CHECK(pe.mobmCsgm.peMaxOffset == 10);
+  CHECK(pe.mobmCsgm.peCoverAngle == 180);
+  CHECK(pe.mobmCsgm.peSampleNumPerLine == 6);
+  CHECK(pe.stamCsgm.peSampleNumPerLine == 4);
   CHECK_THROWS_AS(parse({"--mobm_csgmGA=csgm1"}), od::Error);
   CHECK_THROWS_AS(parse({"--seed=-1"}), od::Error);
   CHECK_THROWS_AS(parse({"--conf9a_minMaxStep=1.5"}), od::Error);

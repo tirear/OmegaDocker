@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.37 |
+| 文件版本 | 1.38 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -491,8 +491,7 @@ if |L2pool| < need:
 
 - 「使用者指定」：StaM 群用 `stam.csgmGA`，MobM 用 `mobm.csgmGA`。
 - csgm1 的父代不依賴 dcss。
-- 目前只實作 csgm2；`csgmGA` 只接受 `csgm2`（`csgm3` 報錯「尚未實作」）。
-- StaM 群：L2 pool 由所有 MobM 共用（7.10），補充時的 dcss 是觸發補充的那個 MobM 的 StaM dcss，適應度也是對該 MobM 的值；產生的樣本進入共用的 L2 pool，之後可能被其他 MobM 取用。
+- StaM 群：L2 pool 由所有 MobM 共用（7.10），補充時的 dcss 是觸發補充的那個 MobM 的 StaM dcss（csgm2 的父代、csgm3 的端點），適應度也是對該 MobM 的值；產生的樣本進入共用的 L2 pool，之後可能被其他 MobM 取用。
 - csgm2 的父代、csgm3 的端點 = 目前 dcss 中的樣本（必定 ≥ `eliteConfSampleNum` ≥ 2 個，且都已有 9b 能量）。
 
 ### 7.4 下一批 L1 數量
@@ -506,6 +505,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ```
 
 - `nowL2`：加入後 L2 pool 的樣本數；`addedL2`：本批新增數；`L1`：本批產生數。
+- csgm3 不使用上式：每次產生的 L1 固定為 k(k−1)·n（7.7），第一次也不用 `initL1confSampleNum`；仍以 `MaxL1BatchNum` 分批處理、受 `MaxL1TotalNum` 限制（最後一次可能只產生部分線上的樣本）。之後若改回 csgm1，沿用上式由最後一次 csgm3 算出的 nextL1。
 - `MaxL1BatchNum`：由 `gpu.memLimit` 推算的單批上限；超過時分批處理。CPU 版以 `stam.maxL1BatchNum`／`mobm.maxL1BatchNum`（預設 65536）指定。
 - 一批（L1 個）全部處理完才檢查是否達到 `minL2confSampleNum`，因此 L2 pool 可能超過該數。
 - 單次補充的累計 L1 達 `MaxL1TotalNum` 仍未達到 `minL2confSampleNum` → 報錯並結束；最後一批的數量不超過剩餘額度。
@@ -587,6 +587,15 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    5. 延伸長度 `Ltot`：使 `|w|` 最大分量的維度涵蓋 `PeCoverAngle`（預設 360°）。
    6. 新樣本：`S + m·(Ltot/n)·w`，m = 0 … n−1，每一維 wrap 到 (−180°, 180°]。
 3. 新樣本數 = `k(k−1)·n`；n = `PeSampleNumPerLine`（預設 4）。
+
+實作細節：
+- 線的編號：有序配對 (i, j) 依 i、再依 j 排序（i = 線號 / (k−1)，j 為其餘 k−1 個中的第 線號 mod (k−1) 個）；線上第 m 個樣本的 L1 序號 = 線號 × n + m。
+- 亂數：同一條線的所有樣本使用同一個亂數狀態 `(seed, 分子的串流, 該線第一個樣本的全域序號)`，因此 v1、v2、S 在線上一致，且與執行緒數、分批無關。取用順序：v1 的長度、v1 的方向、v2 的長度、v2 的方向、S。
+- 隨機向量 r 的各分量為標準常態分佈（方向均勻）；r 與 u 平行時重抽（最多 64 次）。D = 1 或 P_i、P_j 相同（u = 0）時：D = 1 沒有垂直方向，偏移為 0；u = 0 時 v 直接取 r 的方向。
+- `Ltot = PeCoverAngle / max|w_d|`（w 已正規化），步長 `Ltot / n`；m = 0 即 S。w = 0（A = B）時 n 個樣本都等於 S。
+- `cisTrans` 的 ω：wrap 之後改為較近的 0° 或 180°（與 0° 相差 < 90° → 0°，否則 → 180°），以符合 4.2。
+- 不做菁英保留；端點仍留在 dcss 中。
+- 參數範圍：`peMaxOffset` 為整數，[0, 180]；`peCoverAngle` (0, 360]；`peSampleNumPerLine` ≥ 1。
 
 - **每次產生全部 k(k−1) 條線**，依 `gpu.memLimit` 分批在 GPU 上即時產生、篩選，只有通過的樣本寫入 L2 pool。
 - 規模參考（k = 2000、n = 4）：約 1,600 萬個 L1 樣本；記憶體由分批控制，計算時間隨樣本數線性增加。
@@ -1214,16 +1223,16 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `{stam,mobm}.eliteConfSampleNum` | `--{stam,mobm}_eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
 | `{stam,mobm}.maxL1TotalNum` | `--{stam,mobm}_maxL1TotalNum` | 10⁹ | 7.4 |
 | `{stam,mobm}.maxL1BatchNum` | `--{stam,mobm}_maxL1BatchNum` | 65536（CPU 版；GPU 版由 `gpu.memLimit` 推算） | 7.4 |
-| `{stam,mobm}.csgmGA` | `--{stam,mobm}_csgmGA` | `csgm2` | 7.3（`csgm2`；`csgm3` 未實作） |
+| `{stam,mobm}.csgmGA` | `--{stam,mobm}_csgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
 | `{stam,mobm}.csgmBuild` | `--{stam,mobm}_csgmBuild` | `whole` | 7.8 |
 | `{stam,mobm}.growMaxRetry` | `--{stam,mobm}_growMaxRetry` | 16 | 7.8 |
 | `{stam,mobm}.csgm1AngleStep` | `--{stam,mobm}_csgm1AngleStep` | 1° | 7.5 |
 | `{stam,mobm}.ramaFloor` | `--{stam,mobm}_ramaFloor` | 1×10⁻⁴ | 7.5 |
 | `{stam,mobm}.tournamentRate`、`.crossoverRate`、`.mutationRate` | `--{stam,mobm}_tournamentRate` 等 | 60、80、2（%） | 7.6 |
 | `{stam,mobm}.absMaxDang` | `--{stam,mobm}_absMaxDang` | 90° | 7.6 |
-| `{stam,mobm}.peMaxOffset`（未實作） | `--{stam,mobm}_peMaxOffset` | 30° | 7.7 |
-| `{stam,mobm}.peCoverAngle`（未實作） | `--{stam,mobm}_peCoverAngle` | 360° | 7.7 |
-| `{stam,mobm}.peSampleNumPerLine`（未實作） | `--{stam,mobm}_peSampleNumPerLine` | 4 | 7.7 |
+| `{stam,mobm}.peMaxOffset` | `--{stam,mobm}_peMaxOffset` | 30° | 7.7 |
+| `{stam,mobm}.peCoverAngle` | `--{stam,mobm}_peCoverAngle` | 360° | 7.7 |
+| `{stam,mobm}.peSampleNumPerLine` | `--{stam,mobm}_peSampleNumPerLine` | 4 | 7.7 |
 | `conf9a.minMethod`（未實作） | `--conf9a_minMethod` | `fire` | 7.9 |
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
@@ -1536,3 +1545,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.35 | 2026-10-16 | od_0100 的所有參數（含 `temperature`、`unboundCandidateNum`、`shaking.radius`、`shaking.step`、`shaking.rrtScaling`）放入參數檔，命令列選項改為覆寫參數檔；新增 `--feC0`、`--feTors`、`--feInter*`、`--feIntra*`、`--feEntropy*`；`rrtScaling` 預設暫定 4，不再依 `temperature`（10.2、14） |
 | 1.36 | 2026-10-16 | 參數檔 `--paramFile`（TOML）涵蓋所有執行參數，命令列 `--<表>_<鍵>=<值>` 覆寫；取代 `--feParamFile` 與 `--fe*` 選項，舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；寫出 `params.used.toml`（取代 `feparams.used.toml`）；隨機 seed 限 63 位元（14.1、14.2，並更新各節的參數名稱） |
 | 1.37 | 2026-10-16 | 實作 csgm2（7.6）：適應度為上一輪 9c 的本輪最低排序能量；AutoDock-GPU 1.6 的錦標賽、兩點／單點交配與突變只作用在兩面角；`cisTrans` 的 ω 突變為 0°／180° 切換；不做菁英保留；StaM 群以觸發補充的 MobM 的 dcss 為父代（7.3）；`grow` 搭配 csgm2 時失敗即捨棄（7.8）；新增 `csgmGA`、`tournamentRate`、`crossoverRate`、`mutationRate`、`absMaxDang`（14.2） |
+| 1.38 | 2026-10-16 | 實作 csgm3（7.7）：線的編號與亂數（每條線一個亂數狀態）、r 為常態分佈、D = 1 與端點相同時的處理、`cisTrans` 的 ω 取較近的 0°／180°；csgm3 每次的 L1 固定為 k(k−1)·n，不使用 7.4 的 nextL1（7.4）；`csgmGA` 接受 `csgm3`，新增 `peMaxOffset`、`peCoverAngle`、`peSampleNumPerLine`（14.2） |

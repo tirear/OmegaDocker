@@ -24,6 +24,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
                        std::uint64_t& counter, std::vector<ConfSample>& pool) {
   Fill9aStats st;
   const int d = sys.torsionCount();
+  if (p.fixedL1 > 0) l1 = p.fixedL1;
   if (l1 < 1) l1 = 1;
   while (static_cast<long long>(pool.size()) < p.minL2) {
     long long added = 0;
@@ -37,7 +38,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
       for (long long i = 0; i < n; ++i) {
         Rng rng(p.seed, p.stream, counter + done + i);
         std::span<double> a(angles.data() + i * d, d);
-        built[i] = gen(rng, a);
+        built[i] = gen(rng, GenIndex{counter + done + i, done + i}, a);
         if (built[i]) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
       }
       for (long long i = 0; i < n; ++i) {
@@ -75,7 +76,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
       fail("9a: {} samples generated (stam.maxL1TotalNum / mobm.maxL1TotalNum) but only {} of {} passed the filters "
            "(discarded while growing: {}, energy >= energy.Emax: {}, closure deviation > topology.maxBreakDist: {})",
            st.l1, nowL2, p.minL2, st.growFailed, st.overEmax, st.notClosed);
-    l1 = std::min(next, p.maxL1Total - st.l1);
+    l1 = std::min(p.fixedL1 > 0 ? p.fixedL1 : next, p.maxL1Total - st.l1);
   }
   return st;
 }

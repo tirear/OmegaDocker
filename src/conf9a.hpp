@@ -21,8 +21,16 @@ struct ConfSample {
   float energy = 0;           // EnergyTerms::filterEnergy after 9a minimization
 };
 
+// Index of a generated sample: global numbers the random streams (counter of
+// fillL2Pool); local counts from 0 within the current L1 batch (all of its parts).
+struct GenIndex {
+  std::uint64_t global = 0;
+  long long local = 0;
+};
+
 // Writes one sample to anglesDeg; false: discarded before minimization (csgmBuild = grow).
-using ConfGenerator = std::function<bool(Rng& rng, std::span<double> anglesDeg)>;
+// rng: Rng(seed, stream, index.global).
+using ConfGenerator = std::function<bool(Rng& rng, const GenIndex& index, std::span<double> anglesDeg)>;
 
 struct Fill9aParams {
   int minL2 = 0;                       // minL2confSampleNum
@@ -33,6 +41,7 @@ struct Fill9aParams {
   MinParams min;
   std::uint64_t seed = 0;
   std::uint64_t stream = 0;            // one per StaM group / MobM
+  long long fixedL1 = 0;               // > 0: every L1 batch has this size (csgm3) instead of spec 7.4
 };
 
 struct Fill9aStats {
@@ -48,7 +57,7 @@ struct Fill9aStats {
 
 // Generates batches of L1 samples, minimizes them and adds those passing the
 // filters to pool until pool.size() >= minL2 (spec 7.3, 7.4). l1 is the size of
-// the first batch; counter numbers the random streams of the samples and is
+// the first batch (fixedL1 when set); counter numbers the random streams of the samples and is
 // advanced by the samples generated. Throws od::Error when maxL1Total samples
 // are generated without reaching minL2.
 Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long long l1, const Fill9aParams& p,

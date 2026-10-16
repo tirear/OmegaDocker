@@ -170,13 +170,15 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                },
                [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).grow ? "grow" : "whole"}; }});
   t.push_back({set + ".csgmGA", Type::Str, "csgm2", "csgm2",
-               who + "9a: method once the dcss has eliteConfSampleNum samples (csgm3 is not implemented yet)",
-               [](Options&, const Tokens& v) {
+               who + "9a: method once the dcss has eliteConfSampleNum samples (csgm2 or csgm3)",
+               [csgm](Options& o, const Tokens& v) {
                  const std::string& s = one(v);
-                 if (s == "csgm3") fail("csgm3 is not implemented yet");
-                 if (s != "csgm2") fail("expected csgm2 but got '{}'", s);
+                 if (s != "csgm2" && s != "csgm3") fail("expected csgm2 or csgm3 but got '{}'", s);
+                 csgm(o).pathExploring = s == "csgm3";
                },
-               [](const Options&) -> std::optional<Tokens> { return Tokens{"csgm2"}; }});
+               [csgm](const Options& o) -> std::optional<Tokens> {
+                 return Tokens{csgm(o).pathExploring ? "csgm3" : "csgm2"};
+               }});
   t.push_back(real(set + ".tournamentRate", "<%>", "60", who + "csgm2: probability (%) that the fitter of two candidates is chosen",
                    [csgm](auto& o) -> auto& { return csgm(o).tournamentRate; }));
   t.push_back(real(set + ".crossoverRate", "<%>", "80", who + "csgm2: probability (%) of two-point crossover",
@@ -185,6 +187,12 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                    [csgm](auto& o) -> auto& { return csgm(o).mutationRate; }));
   t.push_back(real(set + ".absMaxDang", "<deg>", "90", who + "csgm2: largest torsion change of a mutation",
                    [csgm](auto& o) -> auto& { return csgm(o).absMaxDang; }));
+  t.push_back(integer(set + ".peMaxOffset", "<deg>", "30", who + "csgm3: largest offset of a line end point (integer degrees)",
+                      [csgm](auto& o) -> auto& { return csgm(o).peMaxOffset; }));
+  t.push_back(real(set + ".peCoverAngle", "<deg>", "360", who + "csgm3: span of a line along its largest component",
+                   [csgm](auto& o) -> auto& { return csgm(o).peCoverAngle; }));
+  t.push_back(integer(set + ".peSampleNumPerLine", "<n>", "4", who + "csgm3: samples per line",
+                      [csgm](auto& o) -> auto& { return csgm(o).peSampleNumPerLine; }));
   t.push_back(integer(set + ".growMaxRetry", "<n>", "16", who + "csgmBuild = grow, csgm1: resamplings of a failing segment before discarding",
                       [csgm](auto& o) -> auto& { return csgm(o).growMaxRetry; }));
   t.push_back(real(set + ".csgm1AngleStep", "<deg>", "1", who + "csgm1a / R: sampled angles are multiples of this step",
@@ -679,6 +687,9 @@ void validateOptions(const Options& o) {
     check(c->crossoverRate >= 0 && c->crossoverRate <= 100, set + ".crossoverRate", "within [0, 100]");
     check(c->mutationRate >= 0 && c->mutationRate <= 100, set + ".mutationRate", "within [0, 100]");
     check(c->absMaxDang > 0 && c->absMaxDang <= 180, set + ".absMaxDang", "within (0, 180]");
+    check(c->peMaxOffset >= 0 && c->peMaxOffset <= 180, set + ".peMaxOffset", "within [0, 180]");
+    check(c->peCoverAngle > 0 && c->peCoverAngle <= 360, set + ".peCoverAngle", "within (0, 360]");
+    check(c->peSampleNumPerLine >= 1, set + ".peSampleNumPerLine", ">= 1");
   }
   check(o.confMinMaxStep >= 0, "conf9a.minMaxStep", ">= 0");
   check(o.confMinDeltaE >= 0, "conf9a.minDeltaE", ">= 0");
