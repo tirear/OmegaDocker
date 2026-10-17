@@ -55,14 +55,13 @@ std::uint64_t dockStream(std::uint64_t round, std::uint64_t mobm, std::uint64_t 
   return splitmix(s ^ mobmSample);
 }
 
-MobmDocker::MobmDocker(const EnergySystem& sys, const EnergyGrids& grids, const DistanceGrid& dist,
-                       const Dock9bParams& p)
-    : sys_(sys), grids_(grids), dist_(dist), p_(p) {
+MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p)
+    : sys_(sys), field_(field), p_(p) {
   const Ad4Typing& t = sys.typing(0);
   const int off = sys.coordOffset(0);
   for (std::size_t a = 0; a < t.type.size(); ++a) {
     if (t.type[a] == Ad4Type::Merged) continue;
-    const int m = grids.mapOf(t.type[a]);
+    const int m = field.mapOf(t.type[a]);
     if (m < 0) fail("no grid map for AD4 type {}", ad4TypeName(t.type[a]));
     probe_.push_back(off + static_cast<int>(a));
     map_.push_back(m);
@@ -177,7 +176,7 @@ bool MobmDocker::quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats
         return false;
       }
     if (!heavy_[k]) continue;
-    const float dd = interpolate(dist_.geom, dist_.d, w);
+    const float dd = field_.distance<float>(w, nullptr);
     if (dd < cd) ++overlap;
     if (dd <= nearD) near = true;
   }
@@ -208,7 +207,7 @@ MobmDocker::PoseEnergy MobmDocker::evaluateT(const Conf& c, const Pose& pose, st
     else return rotate(conj(pose.q), v);
   };
   const V ctr = castVec<T>(c.center), tt = castVec<T>(pose.t);
-  const V gLo = castVec<T>(grids_.geom.origin), gHi = castVec<T>(grids_.geom.max());
+  const V gLo = castVec<T>(field_.geom().origin), gHi = castVec<T>(field_.geom().max());
   const T cd = static_cast<T>(p_.clashDistance), clashBase = static_cast<T>(p_.clashBase),
           clashK = static_cast<T>(p_.clashK);
   const ExternalTermT<T> ext = [&](const std::vector<V>& x, std::vector<Vec3>* g) {
@@ -222,15 +221,11 @@ MobmDocker::PoseEnergy MobmDocker::evaluateT(const Conf& c, const Pose& pose, st
         ++pe.outside;
         continue;
       }
-      const T q = static_cast<T>(charge_[k]), aq = std::abs(q);
-      V a{}, b{}, s{}, dg{};
-      const T ew = interpolate(grids_.geom, grids_.typeMaps[map_[k]], w, g ? &a : nullptr) +
-                   q * interpolate(grids_.geom, grids_.elecMap, w, g ? &b : nullptr) +
-                   aq * interpolate(grids_.geom, grids_.desolvMap, w, g ? &s : nullptr);
-      pe.inter += ew;
-      V gw{a[0] + q * b[0] + aq * s[0], a[1] + q * b[1] + aq * s[1], a[2] + q * b[2] + aq * s[2]};
+      const T q = static_cast<T>(charge_[k]);
+      V gw{}, dg{};
+      pe.inter += field_.energy<T>(map_[k], q, w, g ? &gw : nullptr);
       if (heavy_[k]) {
-        const T d = interpolate(dist_.geom, dist_.d, w, g ? &dg : nullptr);
+        const T d = field_.distance<T>(w, g ? &dg : nullptr);
         if (d < cd) {
           pe.interClash += clashBase + clashK * (cd - d) * (cd - d);
           for (int i = 0; i < 3; ++i) gw[i] += -2 * clashK * (cd - d) * dg[i];

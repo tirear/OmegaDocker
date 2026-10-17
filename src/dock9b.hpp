@@ -77,8 +77,8 @@ struct Dock9bStats {
 
 class MobmDocker {
  public:
-  // sys: energy system of the single MobM (parts = {mob}).
-  MobmDocker(const EnergySystem& sys, const EnergyGrids& grids, const DistanceGrid& dist, const Dock9bParams& p);
+  // sys: energy system of the single MobM (parts = {mob}); field: the StaM conformation (spec 8.1, 8.2).
+  MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p);
 
   // Lattice indices of the positions keeping every probe atom kPosMargin inside
   // the box for one orientation (spec 8.4); empty when lo > hi on an axis.
@@ -142,8 +142,7 @@ class MobmDocker {
                        std::vector<double>* grad) const;
 
   const EnergySystem& sys_;
-  const EnergyGrids& grids_;
-  const DistanceGrid& dist_;
+  const StamField& field_;
   Dock9bParams p_;
   std::vector<int> probe_;  // coordinate indices of the probe atoms
   std::vector<int> map_;    // type map per probe atom

@@ -228,6 +228,12 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(rc.stamCsgm.growMaxBacktrack == 2);
   CHECK(rc.mobmCsgm.growMaxBacktrack == 4);
   CHECK_THROWS_AS(parse({"--stam_rcdClash=always"}), od::Error);
+  CHECK(rc.gridMode == "auto");
+  CHECK(rc.gridDeltaThreshold == doctest::Approx(1e-4));
+  auto gm = parse({"--grid_mode=flexres", "--grid_deltaThreshold=0.01"});
+  CHECK(gm.gridMode == "flexres");
+  CHECK(gm.gridDeltaThreshold == doctest::Approx(0.01));
+  CHECK_THROWS_AS(parse({"--grid_mode=partial"}), od::Error);
   rc.stamCsgm.rcdClashWeight = 0;
   CHECK_THROWS_AS(od::validateOptions(rc), od::Error);
   auto ga = parse({"--stam_tournamentRate=70", "--mobm_crossoverRate=50", "--mobm_mutationRate=5", "--mobm_absMaxDang=45",

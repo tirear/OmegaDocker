@@ -2551,6 +2551,143 @@ TEST_CASE("lbfgs: quadratic and Rosenbrock") {
   CHECK(od::minimizeLbfgs(stop, x, p).aborted);
 }
 
+TEST_CASE("grid: flexres and delta fields (2KJJ, 1L2Y)") {
+  GridFixture x;
+  const od::Vec3 c = x.stamCenter();
+  const auto geom = od::boxGrid(c, {16, 16, 16}, 0.375);
+  const double cap = 6.75;
+  CHECK(od::movedGridAtoms(*x.staSys, x.staParts).size() == x.stam.size());
+  std::vector<char> mask(x.stam.size());
+  for (std::size_t a = 0; a < mask.size(); ++a) mask[a] = a % 4 == 0;
+  auto shared = [&](const od::GridAtoms& a) {
+    return std::pair{std::make_shared<const od::EnergyGrids>(od::buildEnergyGrids(geom, a, x.mobm.type, {})),
+                     std::make_shared<const od::DistanceGrid>(od::buildDistanceGrid(geom, a, cap))};
+  };
+  const auto [g, d] = shared(x.stam);
+  const auto full = od::StamField::full(g, d);
+  const od::GridAtoms fixedAtoms = od::subset(x.stam, mask, false), moved = od::subset(x.stam, mask, true);
+  CHECK(fixedAtoms.size() + moved.size() == x.stam.size());
+  const auto [gf, df] = shared(fixedAtoms);
+  const auto flex = od::StamField::flexres(gf, df, moved, {});
+  CHECK(flex.mode() == od::GridMode::Flexres);
+  CHECK(flex.movedAtomCount() == moved.size());
+
+  auto probeAt = [&](const od::Vec3& p, int m, double q) {
+    od::GridAtoms one;
+    one.xyz = {p};
+    one.type = {g->types[m]};
+    one.charge = {q};
+    one.heavy = {1};
+    return one;
+  };
+  std::mt19937 rng(11);
+  std::uniform_int_distribution<int> ui(2, geom.n[0] - 3);
+  std::uniform_real_distribution<double> ur(-0.5, 0.5);
+  // At grid points away from clashes both equal the pair sum.
+  int checked = 0;
+  for (int k = 0; k < 3000 && checked < 100; ++k) {
+    const od::Vec3 p = geom.point(ui(rng), ui(rng), ui(rng));
+    if (full.distance<double>(p, nullptr) < 2.5) continue;
+    ++checked;
+    CHECK(flex.distance<double>(p, nullptr) == doctest::Approx(full.distance<double>(p, nullptr)).epsilon(1e-5));
+    for (int m = 0; m < static_cast<int>(g->types.size()); ++m)
+      for (double q : {-0.4, 0.3})
+        CHECK(flex.energy<double>(m, q, p, nullptr) ==
+              doctest::Approx(full.energy<double>(m, q, p, nullptr)).epsilon(1e-4).scale(1.0));
+  }
+  CHECK(checked == 100);
+  // Between grid points the pair sum of the moved atoms is exact: closer to the pair reference.
+  double errFull = 0, errFlex = 0;
+  checked = 0;
+  for (int k = 0; k < 3000 && checked < 200; ++k) {
+    const auto q0 = geom.point(ui(rng), ui(rng), ui(rng));
+    const od::Vec3 p{q0[0] + 0.375 * ur(rng), q0[1] + 0.375 * ur(rng), q0[2] + 0.375 * ur(rng)};
+    if (full.distance<double>(p, nullptr) < 2.5) continue;
+    ++checked;
+    const int m = checked % static_cast<int>(g->types.size());
+    const double ref = od::pairInterEnergy(x.stam, probeAt(p, m, 0.3), {});
+    errFull += std::abs(full.energy<double>(m, 0.3, p, nullptr) - ref);
+    errFlex += std::abs(flex.energy<double>(m, 0.3, p, nullptr) - ref);
+    // Gradients (finite differences) of the flexres energy and distance.
+    od::Vec3 ge, gd;
+    flex.energy<double>(m, 0.3, p, &ge);
+    flex.distance<double>(p, &gd);
+    const double h = 1e-5;
+    for (int i = 0; i < 3; ++i) {
+      od::Vec3 a = p, b = p;
+      a[i] += h;
+      b[i] -= h;
+      const double fe = (flex.energy<double>(m, 0.3, a, nullptr) - flex.energy<double>(m, 0.3, b, nullptr)) / (2 * h);
+      CHECK(ge[i] == doctest::Approx(fe).epsilon(1e-3).scale(1e-2));
+      const double fd = (flex.distance<double>(a, nullptr) - flex.distance<double>(b, nullptr)) / (2 * h);
+      CHECK(gd[i] == doctest::Approx(fd).epsilon(1e-3).scale(1e-3));
+    }
+  }
+  MESSAGE(std::format("mean |E - pair sum| between grid points: full {:.4f}, flexres {:.4f}", errFull / checked, errFlex / checked));
+  CHECK(errFlex < errFull);
+  // Float evaluation follows the double one.
+  const od::Vec3f pf{static_cast<float>(c[0] + 0.1), static_cast<float>(c[1] + 0.2), static_cast<float>(c[2] + 7.3)};
+  const od::Vec3 pd{pf[0], pf[1], pf[2]};
+  CHECK(flex.energy<float>(0, 0.3f, pf, nullptr) == doctest::Approx(flex.energy<double>(0, 0.3, pd, nullptr)).epsilon(1e-4).scale(1e-3));
+
+  // delta: moved atoms on one side shifted by 0.7 Å.
+  od::GridAtoms sample = x.stam;
+  for (std::size_t a = 0; a < sample.size(); ++a)
+    if (mask[a] && sample.xyz[a][0] > c[0] + 4) sample.xyz[a][0] += 0.7;
+  const auto [gs, ds] = shared(sample);
+  const auto fullS = od::StamField::full(gs, ds);
+  const auto d0 = od::StamField::delta(g, d, *gs, *ds, 0.0);
+  const auto d1 = od::StamField::delta(g, d, *gs, *ds, 1e-2);
+  CHECK(d0.blockCount() == 6 * 6 * 6);  // 45 points per axis, blocks of 8
+  CHECK(d1.deltaBlockCount() > 0);
+  CHECK(d1.deltaBlockCount() < d0.deltaBlockCount());
+  // Electrostatics reach 20.48 Å: in a 16 Å box nearly every block differs by more than 1e-4 (spec 8.1).
+  MESSAGE(std::format("delta blocks stored: threshold 0: {} of {}; 1e-2: {}", d0.deltaBlockCount(), d0.blockCount(),
+                      d1.deltaBlockCount()));
+  for (int k = 0; k < 300; ++k) {
+    const auto q0 = geom.point(ui(rng), ui(rng), ui(rng));
+    const od::Vec3f p{static_cast<float>(q0[0] + 0.375 * ur(rng)), static_cast<float>(q0[1] + 0.375 * ur(rng)),
+                      static_cast<float>(q0[2] + 0.375 * ur(rng))};
+    const int m = k % static_cast<int>(g->types.size());
+    od::Vec3f a, b;
+    CHECK(d0.energy<float>(m, -0.35f, p, &a) == fullS.energy<float>(m, -0.35f, p, &b));
+    CHECK(a == b);
+    CHECK(d0.distance<float>(p, nullptr) == fullS.distance<float>(p, nullptr));
+    CHECK(std::abs(d1.energy<float>(m, -0.35f, p, nullptr) - fullS.energy<float>(m, -0.35f, p, nullptr)) <= 1e-2f * 1.7f + 1e-4f);
+  }
+}
+
+TEST_CASE("dock9b: flexres pose energy and gradient (2KJJ, 1L2Y)") {
+  GridFixture x;
+  od::Dock9bParams p;
+  p.boxCenter = x.stamCenter();
+  p.boxSize = {48, 48, 48};
+  const auto geom = od::boxGrid(p.boxCenter, p.boxSize, 0.375);
+  const double cap = std::max(p.maxNearDistance, p.clashDistance) + 0.75;
+  std::vector<char> mask(x.stam.size());
+  for (std::size_t a = 0; a < mask.size(); ++a) mask[a] = a % 3 == 0;
+  const od::GridAtoms fixedAtoms = od::subset(x.stam, mask, false);
+  const auto flex = od::StamField::flexres(std::make_shared<const od::EnergyGrids>(od::buildEnergyGrids(geom, fixedAtoms, x.mobm.type, {})),
+                                           std::make_shared<const od::DistanceGrid>(od::buildDistanceGrid(geom, fixedAtoms, cap)),
+                                           od::subset(x.stam, mask, true), {});
+  const od::MobmDocker dk(*x.mobSys, flex, p);
+  const auto angles = x.mobSys->inputAngles();
+  const auto c = dk.conformation(angles);
+  od::Pose pose{{p.boxCenter[0] + 9, p.boxCenter[1] + 2, p.boxCenter[2] - 3}, od::normalized(od::Quat{0.9, 0.1, -0.3, 0.2})};
+  std::vector<double> g;
+  const auto pe = dk.evaluateDouble(c, pose, angles, &g);
+  CHECK(pe.outside == 0);
+  CHECK(dk.evaluate(c, pose, angles).objective() == doctest::Approx(pe.objective()).epsilon(1e-4).scale(1.0));
+  const double h = 1e-5;
+  for (int i = 0; i < 3; ++i) {
+    od::Pose a = pose, b = pose;
+    a.t[i] += h;
+    b.t[i] -= h;
+    const double fd = (dk.evaluateDouble(c, a, angles).objective() - dk.evaluateDouble(c, b, angles).objective()) / (2 * h);
+    CHECK(g[i] == doctest::Approx(fd).epsilon(1e-3).scale(1e-2));
+  }
+}
+
 namespace {
 
 struct DockFixture {
@@ -2558,6 +2695,7 @@ struct DockFixture {
   od::Dock9bParams p;
   od::EnergyGrids grids;
   od::DistanceGrid dist;
+  od::StamField field;
   DockFixture(od::Posm posm = od::Posm::Posm1) {
     p.posm = posm;
     p.boxCenter = x.stamCenter();
@@ -2567,7 +2705,7 @@ struct DockFixture {
     p.seed = 3;
     const auto geom = od::boxGrid(p.boxCenter, p.boxSize, 0.375);
     grids = od::buildEnergyGrids(geom, x.stam, x.mobm.type, {});
-    dist = od::buildDistanceGrid(geom, x.stam, std::max(p.maxNearDistance, p.clashDistance) + 0.75);
+    dist = od::buildDistanceGrid(geom, x.stam, std::max(p.maxNearDistance, p.clashDistance) + 0.75);    field = od::StamField::full(std::make_shared<const od::EnergyGrids>(grids), std::make_shared<const od::DistanceGrid>(dist));
   }
 };
 
@@ -2575,7 +2713,7 @@ struct DockFixture {
 
 TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   DockFixture f;
-  const od::MobmDocker dk(*f.x.mobSys, f.grids, f.dist, f.p);
+  const od::MobmDocker dk(*f.x.mobSys, f.field, f.p);
   const auto angles = f.x.mobSys->inputAngles();
   const auto c = dk.conformation(angles);
   // Heavy-atom centre.
@@ -2637,7 +2775,7 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   }
   // posm2: per Hopf orientation, exactly the lattice positions keeping the MobM in the box.
   DockFixture f2(od::Posm::Posm2);
-  const od::MobmDocker dk2(*f2.x.mobSys, f2.grids, f2.dist, f2.p);
+  const od::MobmDocker dk2(*f2.x.mobSys, f2.field, f2.p);
   const auto c2 = dk2.conformation(angles);
   const auto hopf = od::hopfGrid(0);
   REQUIRE(c2.hopfRange.size() == 72);
@@ -2747,7 +2885,7 @@ TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
   DockFixture f;
   f.p.posm1SampleNum = 1500;
   f.p.lbfgs.maxSteps = 300;
-  const od::MobmDocker dk(*f.x.mobSys, f.grids, f.dist, f.p);
+  const od::MobmDocker dk(*f.x.mobSys, f.field, f.p);
   const auto angles = f.x.mobSys->inputAngles();
   const auto c = dk.conformation(angles);
   std::vector<od::DockSample> out;
@@ -2804,7 +2942,7 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   DockFixture f;
   f.p.posm1SampleNum = 600;
   f.p.lbfgs.maxSteps = 100;
-  const od::MobmDocker dk(*f.x.mobSys, f.grids, f.dist, f.p);
+  const od::MobmDocker dk(*f.x.mobSys, f.field, f.p);
   const auto angles = f.x.mobSys->inputAngles();
   std::vector<od::DockSample> out;
   dk.dockPair(angles, 9, out);

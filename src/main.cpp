@@ -244,6 +244,7 @@ class ConfSet {
   bool movable() const { return sys_.torsionCount() > 0; }
   const od::EnergySystem& sys() const { return sys_; }
   const std::vector<od::EnergyPart>& parts() const { return parts_; }
+  const std::vector<const od::MolSettings*>& settings() const { return settings_; }
   const od::ConfSample& sample(int id) const { return samples_[id]; }
   // Lowest 9a energy of the conformation samples made so far (L2 pool and dcss samples).
   float minEnergy() const {
@@ -877,9 +878,25 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const od::Dock9bParams dp = dockParams(opt, seed);
   const bool deterministic = dp.posm == od::Posm::Posm2;
 
-  // Grids of the input conformation, kept across rounds when the StaM group has no rotatable torsions.
-  std::unique_ptr<const od::EnergyGrids> fixedGrids;
-  std::unique_ptr<const od::DistanceGrid> fixedDist;
+  // grid.mode (spec 8.1); auto: flexres when no StaM backbone torsion is rotatable.
+  od::GridMode gridMode = od::GridMode::Full;
+  bool backboneMoves = false;
+  for (std::size_t k = 0; k < stamSet.parts().size(); ++k)
+    for (const od::TreeTorsion& tt : stamSet.parts()[k].tree->torsions)
+      backboneMoves |= stamSet.settings()[k]->topology.torsions[tt.torsion].backbone != od::BackboneAngle::None;
+  if (opt.gridMode == "flexres") gridMode = od::GridMode::Flexres;
+  else if (opt.gridMode == "delta") gridMode = od::GridMode::Delta;
+  else if (opt.gridMode == "auto" && !backboneMoves) gridMode = od::GridMode::Flexres;
+  const std::vector<char> movedMask = od::movedGridAtoms(stamSet.sys(), stamSet.parts());
+  const auto movedNum = std::count(movedMask.begin(), movedMask.end(), 1);
+  od::logInfo(std::format("9b grid.mode {}{}: StaM grid atoms {}, moved by torsions {}, backbone {}", od::gridModeName(gridMode),
+                          opt.gridMode == "auto" ? " (auto)" : "", movedMask.size(), movedNum,
+                          backboneMoves ? "movable" : "fixed"));
+  const double distCap = std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing;
+  // Grids built once and kept across rounds: full without StaM torsions (input conformation),
+  // flexres (fixed atoms of the input conformation), delta (reference: input conformation).
+  std::shared_ptr<const od::EnergyGrids> fixedGrids;
+  std::shared_ptr<const od::DistanceGrid> fixedDist;
 
   std::vector<MobState> ms(mobSets.size());
   for (std::size_t i = 0; i < ms.size(); ++i) {
@@ -978,33 +995,47 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     double gridSec = 0;
     bool gridsReused = false;
     const auto d0 = std::chrono::steady_clock::now();
+    long long movedSum = 0, blockSum = 0, blockTotal = 0;
     for (int sid : stamIds) {
       const auto g0 = std::chrono::steady_clock::now();
-      std::unique_ptr<const od::EnergyGrids> ownGrids;
-      std::unique_ptr<const od::DistanceGrid> ownDist;
-      if (stamSet.movable() || !fixedGrids) {
+      auto stamAtoms = [&](bool input) {
         const auto& sa = stamSet.sample(sid).angles;
-        std::vector<double> angles = stamSet.movable() ? std::vector<double>(sa.begin(), sa.end()) : stamSet.sys().inputAngles();
+        std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end())
+                                                                 : stamSet.sys().inputAngles();
         std::vector<od::Vec3> x;
         stamSet.sys().evaluate(angles, nullptr, &x);
-        const od::GridAtoms stam = od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
-        ownGrids = std::make_unique<const od::EnergyGrids>(od::buildEnergyGrids(geom, stam, probe, energyParams(opt)));
-        ownDist = std::make_unique<const od::DistanceGrid>(
-            od::buildDistanceGrid(geom, stam, std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing));
-        if (!stamSet.movable()) {
-          fixedGrids = std::move(ownGrids);
-          fixedDist = std::move(ownDist);
-        }
+        return od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
+      };
+      auto build = [&](const od::GridAtoms& a) {
+        return std::pair{std::make_shared<const od::EnergyGrids>(od::buildEnergyGrids(geom, a, probe, energyParams(opt))),
+                         std::make_shared<const od::DistanceGrid>(od::buildDistanceGrid(geom, a, distCap))};
+      };
+      const bool firstBuild = !fixedGrids;
+      od::StamField field;
+      if (gridMode == od::GridMode::Flexres) {
+        if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(od::subset(stamAtoms(true), movedMask, false));
+        od::GridAtoms moved = od::subset(stamAtoms(false), movedMask, true);
+        movedSum += static_cast<long long>(moved.size());
+        field = od::StamField::flexres(fixedGrids, fixedDist, std::move(moved), energyParams(opt));
+      } else if (!stamSet.movable()) {
+        if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(stamAtoms(true));
+        field = od::StamField::full(fixedGrids, fixedDist);
+      } else if (gridMode == od::GridMode::Delta) {
+        if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(stamAtoms(true));
+        const auto [g, d] = build(stamAtoms(false));
+        field = od::StamField::delta(fixedGrids, fixedDist, *g, *d, opt.gridDeltaThreshold);
+        blockSum += static_cast<long long>(field.deltaBlockCount());
+        blockTotal += static_cast<long long>(field.blockCount());
       } else {
-        gridsReused = true;
+        const auto [g, d] = build(stamAtoms(false));
+        field = od::StamField::full(g, d);
       }
-      const od::EnergyGrids& grids = stamSet.movable() ? *ownGrids : *fixedGrids;
-      const od::DistanceGrid& dist = stamSet.movable() ? *ownDist : *fixedDist;
+      if (!firstBuild && (gridMode == od::GridMode::Flexres || !stamSet.movable())) gridsReused = true;
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
       for (std::size_t i = 0; i < ms.size(); ++i) {
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
         const ConfSet& mob = *mobSets[i];
-        const od::MobmDocker dk(mob.sys(), grids, dist, dp);
+        const od::MobmDocker dk(mob.sys(), field, dp);
         for (int mid : ms[i].mobDcss) {
           const std::uint64_t key = pairKey(sid, mid);
           if (deterministic && ms[i].pairLowest.contains(key)) {
@@ -1037,10 +1068,16 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     double partialSec = 0;
     for (double s : selectSec) partialSec += s;
     const double dockSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count() - gridSec - partialSec;
-    if (gridsReused)
-      od::logInfo("  9b grids of the StaM input conformation reused from the first round");
-    else
-      od::logInfo(std::format("  9b grids for {} StaM conformation(s): {:.2f} s", stamIds.size(), gridSec));
+    {
+      std::string what = std::format("  9b grids for {} StaM conformation(s): {:.2f} s", stamIds.size(), gridSec);
+      if (gridsReused)
+        what += gridMode == od::GridMode::Flexres ? " (grids of the fixed atoms reused)" : " (grids of the input conformation reused)";
+      if (gridMode == od::GridMode::Flexres && !stamIds.empty())
+        what += std::format("; moved atoms per conformation {:.1f}", static_cast<double>(movedSum) / static_cast<double>(stamIds.size()));
+      if (blockTotal > 0)
+        what += std::format("; delta blocks stored {} of {} ({:.1f}%)", blockSum, blockTotal, 100.0 * static_cast<double>(blockSum) / static_cast<double>(blockTotal));
+      od::logInfo(what);
+    }
 
     // 9c (spec 9).
     for (std::size_t i = 0; i < ms.size(); ++i) {

@@ -14,70 +14,45 @@ namespace od {
 
 namespace {
 
-// Uniform cell list over atom positions.
-class CellList {
- public:
-  CellList(std::span<const Vec3> xyz, double cell) : cell_(cell) {
-    if (xyz.empty()) return;
-    lo_ = xyz[0];
-    Vec3 hi = xyz[0];
-    for (const Vec3& p : xyz)
-      for (int c = 0; c < 3; ++c) {
-        lo_[c] = std::min(lo_[c], p[c]);
-        hi[c] = std::max(hi[c], p[c]);
-      }
-    for (int c = 0; c < 3; ++c) n_[c] = static_cast<int>((hi[c] - lo_[c]) / cell_) + 1;
-    start_.assign(static_cast<std::size_t>(n_[0]) * n_[1] * n_[2] + 1, 0);
-    std::vector<std::size_t> of(xyz.size());
-    for (std::size_t a = 0; a < xyz.size(); ++a) {
-      of[a] = flat(cellOf(xyz[a]));
-      ++start_[of[a] + 1];
-    }
-    for (std::size_t c = 1; c < start_.size(); ++c) start_[c] += start_[c - 1];
-    atoms_.resize(xyz.size());
-    std::vector<int> fill(start_.begin(), start_.end() - 1);
-    for (std::size_t a = 0; a < xyz.size(); ++a) atoms_[fill[of[a]]++] = static_cast<int>(a);
-  }
-
-  // Calls f(atom) for every atom in the cells overlapping the cube p ± r.
-  template <class F>
-  void forNear(const Vec3& p, double r, F&& f) const {
-    if (atoms_.empty()) return;
-    std::array<int, 3> a{}, b{};
-    for (int c = 0; c < 3; ++c) {
-      a[c] = std::max(0, static_cast<int>(std::floor((p[c] - r - lo_[c]) / cell_)));
-      b[c] = std::min(n_[c] - 1, static_cast<int>(std::floor((p[c] + r - lo_[c]) / cell_)));
-      if (a[c] > b[c]) return;
-    }
-    for (int z = a[2]; z <= b[2]; ++z)
-      for (int y = a[1]; y <= b[1]; ++y) {
-        const std::size_t row = flat({0, y, z});
-        for (int k = start_[row + a[0]]; k < start_[row + b[0] + 1]; ++k) f(atoms_[k]);
-      }
-  }
-
- private:
-  std::array<int, 3> cellOf(const Vec3& p) const {
-    std::array<int, 3> c{};
-    for (int k = 0; k < 3; ++k) c[k] = std::clamp(static_cast<int>((p[k] - lo_[k]) / cell_), 0, n_[k] - 1);
-    return c;
-  }
-  std::size_t flat(const std::array<int, 3>& c) const {
-    return (static_cast<std::size_t>(c[2]) * n_[1] + c[1]) * n_[0] + c[0];
-  }
-  double cell_;
-  Vec3 lo_{};
-  std::array<int, 3> n_{};
-  std::vector<int> start_;
-  std::vector<int> atoms_;
-};
-
 double dist2(const Vec3& a, const Vec3& b) {
   const double x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
   return x * x + y * y + z * z;
 }
 
 }  // namespace
+
+namespace detail {
+
+CellList::CellList(std::span<const Vec3> xyz, double cell) : cell_(cell) {
+  if (xyz.empty()) return;
+  lo_ = xyz[0];
+  Vec3 hi = xyz[0];
+  for (const Vec3& p : xyz)
+    for (int c = 0; c < 3; ++c) {
+      lo_[c] = std::min(lo_[c], p[c]);
+      hi[c] = std::max(hi[c], p[c]);
+    }
+  for (int c = 0; c < 3; ++c) n_[c] = static_cast<int>((hi[c] - lo_[c]) / cell_) + 1;
+  start_.assign(static_cast<std::size_t>(n_[0]) * n_[1] * n_[2] + 1, 0);
+  auto flatOf = [&](const Vec3& p) {
+    std::array<int, 3> c{};
+    for (int k = 0; k < 3; ++k) c[k] = std::clamp(static_cast<int>((p[k] - lo_[k]) / cell_), 0, n_[k] - 1);
+    return (static_cast<std::size_t>(c[2]) * n_[1] + c[1]) * n_[0] + c[0];
+  };
+  std::vector<std::size_t> of(xyz.size());
+  for (std::size_t a = 0; a < xyz.size(); ++a) {
+    of[a] = flatOf(xyz[a]);
+    ++start_[of[a] + 1];
+  }
+  for (std::size_t c = 1; c < start_.size(); ++c) start_[c] += start_[c - 1];
+  atoms_.resize(xyz.size());
+  std::vector<int> fill(start_.begin(), start_.end() - 1);
+  for (std::size_t a = 0; a < xyz.size(); ++a) atoms_[fill[of[a]]++] = static_cast<int>(a);
+}
+
+}  // namespace detail
+
+using detail::CellList;
 
 bool GridGeometry::inside(const Vec3& p) const {
   const Vec3 hi = max();
@@ -213,8 +188,9 @@ DistanceGrid buildDistanceGrid(const GridGeometry& geom, const GridAtoms& stam, 
 
 namespace {
 
-template <class T>
-T interpolateT(const GridGeometry& geom, std::span<const float> map, const Vec3T<T>& p, Vec3T<T>* grad) {
+// at(i, j, k): map value at a grid point.
+template <class T, class At>
+T interpolateAt(const GridGeometry& geom, const At& at, const Vec3T<T>& p, Vec3T<T>* grad) {
   const T spacing = static_cast<T>(geom.spacing);
   std::array<int, 3> i0{};
   std::array<T, 3> f{};
@@ -226,7 +202,7 @@ T interpolateT(const GridGeometry& geom, std::span<const float> map, const Vec3T
   T v[2][2][2];
   for (int z = 0; z < 2; ++z)
     for (int y = 0; y < 2; ++y)
-      for (int x = 0; x < 2; ++x) v[z][y][x] = map[geom.index(i0[0] + x, i0[1] + y, i0[2] + z)];
+      for (int x = 0; x < 2; ++x) v[z][y][x] = at(i0[0] + x, i0[1] + y, i0[2] + z);
   const T fx = f[0], fy = f[1], fz = f[2];
   auto lerp = [](T a, T b, T t) { return a + (b - a) * t; };
   const T c00 = lerp(v[0][0][0], v[0][0][1], fx), c10 = lerp(v[0][1][0], v[0][1][1], fx);
@@ -240,6 +216,11 @@ T interpolateT(const GridGeometry& geom, std::span<const float> map, const Vec3T
     (*grad)[2] = (c1 - c0) / spacing;
   }
   return lerp(c0, c1, fz);
+}
+
+template <class T>
+T interpolateT(const GridGeometry& geom, std::span<const float> map, const Vec3T<T>& p, Vec3T<T>* grad) {
+  return interpolateAt(geom, [&](int i, int j, int k) { return map[geom.index(i, j, k)]; }, p, grad);
 }
 
 }  // namespace
@@ -301,5 +282,256 @@ double pairInterEnergy(const GridAtoms& stam, const GridAtoms& probe, const Ener
   }
   return sum;
 }
+
+GridAtoms subset(const GridAtoms& atoms, std::span<const char> mask, bool keep) {
+  GridAtoms g;
+  for (std::size_t a = 0; a < atoms.size(); ++a) {
+    if ((mask[a] != 0) != keep) continue;
+    g.xyz.push_back(atoms.xyz[a]);
+    g.type.push_back(atoms.type[a]);
+    g.charge.push_back(atoms.charge[a]);
+    g.heavy.push_back(atoms.heavy[a]);
+  }
+  return g;
+}
+
+std::vector<char> movedGridAtoms(const EnergySystem& sys, const std::vector<EnergyPart>& parts) {
+  std::vector<char> mask;
+  for (std::size_t k = 0; k < parts.size(); ++k) {
+    const Molecule& m = *parts[k].mol;
+    const TorsionTree& tree = *parts[k].tree;
+    std::vector<char> moved(m.atoms.size(), 0);
+    for (const TreeTorsion& tt : tree.torsions)
+      for (int c : tt.moving)
+        if (c < static_cast<int>(m.atoms.size())) moved[c] = 1;
+    const Ad4Typing& t = sys.typing(static_cast<int>(k));
+    for (std::size_t a = 0; a < m.atoms.size(); ++a)
+      if (t.type[a] != Ad4Type::Merged) mask.push_back(moved[a]);
+  }
+  return mask;
+}
+
+const char* gridModeName(GridMode m) {
+  switch (m) {
+    case GridMode::Full: return "full";
+    case GridMode::Flexres: return "flexres";
+    case GridMode::Delta: return "delta";
+  }
+  return "";
+}
+
+StamField StamField::full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist) {
+  StamField f;
+  f.mode_ = GridMode::Full;
+  f.grids_ = std::move(grids);
+  f.dist_ = std::move(dist);
+  f.mapCount_ = static_cast<int>(f.grids_->types.size()) + 3;
+  return f;
+}
+
+StamField StamField::flexres(std::shared_ptr<const EnergyGrids> fixed, std::shared_ptr<const DistanceGrid> fixedDist,
+                             GridAtoms moved, const EnergyParams& params) {
+  StamField f = full(std::move(fixed), std::move(fixedDist));
+  f.mode_ = GridMode::Flexres;
+  const Ad4Coeffs& c = params.coeffs;
+  f.cDesolv_ = c.desolv;
+  f.qasp_ = c.qasp;
+  f.halfSmooth_ = 0.5 * params.smooth;
+  f.rMin_ = params.elecMinDistance;
+  const auto& types = f.grids_->types;
+  const int nTypes = static_cast<int>(Ad4Type::Count);
+  for (Ad4Type t : types) {
+    f.solT_.push_back(ad4Params(t).solpar);
+    f.volT_.push_back(ad4Params(t).volume);
+    for (int j = 0; j < nTypes; ++j) {
+      const Ad4PairParams q = ad4PairParams(t, static_cast<Ad4Type>(j), c);
+      f.pairAC_.push_back(q.AC);
+      f.pairBD_.push_back(q.BD);
+      f.pairReqm_.push_back(q.reqm);
+      f.pairM_.push_back(q.m);
+      f.pairN_.push_back(q.n);
+    }
+  }
+  std::vector<Vec3> xyz, heavyXyz;
+  for (std::size_t a = 0; a < moved.size(); ++a) {
+    Moved m;
+    m.xyz = moved.xyz[a];
+    m.type = static_cast<int>(moved.type[a]);
+    m.elecQ = c.elec * moved.charge[a];
+    m.S = ad4Params(moved.type[a]).solpar + c.qasp * std::abs(moved.charge[a]);
+    m.V = ad4Params(moved.type[a]).volume;
+    m.heavy = moved.heavy[a] != 0;
+    if (m.heavy) {
+      f.movedHeavy_.push_back(static_cast<int>(a));
+      heavyXyz.push_back(m.xyz);
+    }
+    xyz.push_back(m.xyz);
+    f.moved_.push_back(m);
+  }
+  f.cells_ = CellList(xyz, 4.0);
+  f.heavyCells_ = CellList(heavyXyz, std::max(f.dist_->cap, 1.0));
+  return f;
+}
+
+StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
+                           const EnergyGrids& grids, const DistanceGrid& dist, double threshold) {
+  StamField f = full(std::move(ref), std::move(refDist));
+  f.mode_ = GridMode::Delta;
+  const GridGeometry& g = f.grids_->geom;
+  const int nt = static_cast<int>(f.grids_->types.size());
+  if (grids.types != f.grids_->types || grids.geom.n != g.n || dist.geom.n != g.n)
+    fail("delta grids: the sample's grids differ in layout from the reference");
+  auto sampleMap = [&](int m) -> std::span<const float> {
+    if (m < nt) return grids.typeMaps[m];
+    if (m == nt) return grids.elecMap;
+    if (m == nt + 1) return grids.desolvMap;
+    return dist.d;
+  };
+  auto refMap = [&](int m) -> std::span<const float> {
+    if (m < nt) return f.grids_->typeMaps[m];
+    if (m == nt) return f.grids_->elecMap;
+    if (m == nt + 1) return f.grids_->desolvMap;
+    return f.dist_->d;
+  };
+  constexpr int B = kDeltaBlock;
+  for (int c = 0; c < 3; ++c) f.nb_[c] = (g.n[c] + B - 1) / B;
+  f.block_.assign(static_cast<std::size_t>(f.nb_[0]) * f.nb_[1] * f.nb_[2], -1);
+  const std::size_t bs = static_cast<std::size_t>(B) * B * B;
+  for (int bz = 0; bz < f.nb_[2]; ++bz)
+    for (int by = 0; by < f.nb_[1]; ++by)
+      for (int bx = 0; bx < f.nb_[0]; ++bx) {
+        bool differs = false;
+        for (int m = 0; m < f.mapCount_ && !differs; ++m) {
+          const auto s = sampleMap(m), r = refMap(m);
+          for (int z = bz * B; z < std::min(g.n[2], bz * B + B) && !differs; ++z)
+            for (int y = by * B; y < std::min(g.n[1], by * B + B) && !differs; ++y)
+              for (int x = bx * B; x < std::min(g.n[0], bx * B + B); ++x) {
+                const std::size_t i = g.index(x, y, z);
+                if (std::abs(static_cast<double>(s[i]) - r[i]) > threshold) {
+                  differs = true;
+                  break;
+                }
+              }
+        }
+        if (!differs) continue;
+        const std::size_t b = (static_cast<std::size_t>(bz) * f.nb_[1] + by) * f.nb_[0] + bx;
+        f.block_[b] = static_cast<int>(f.data_.size() / (bs * f.mapCount_));
+        const std::size_t base = f.data_.size();
+        f.data_.resize(base + bs * f.mapCount_, 0.0f);
+        for (int m = 0; m < f.mapCount_; ++m) {
+          const auto s = sampleMap(m);
+          for (int z = bz * B; z < std::min(g.n[2], bz * B + B); ++z)
+            for (int y = by * B; y < std::min(g.n[1], by * B + B); ++y)
+              for (int x = bx * B; x < std::min(g.n[0], bx * B + B); ++x)
+                f.data_[base + m * bs + ((z - bz * B) * B + (y - by * B)) * B + (x - bx * B)] = s[g.index(x, y, z)];
+        }
+      }
+  return f;
+}
+
+std::size_t StamField::deltaBlockCount() const {
+  return static_cast<std::size_t>(std::count_if(block_.begin(), block_.end(), [](int b) { return b >= 0; }));
+}
+
+template <class T>
+T StamField::map(int m, const Vec3T<T>& p, Vec3T<T>* grad) const {
+  const int nt = static_cast<int>(grids_->types.size());
+  const std::span<const float> r = m < nt        ? std::span<const float>(grids_->typeMaps[m])
+                                   : m == nt     ? std::span<const float>(grids_->elecMap)
+                                   : m == nt + 1 ? std::span<const float>(grids_->desolvMap)
+                                                 : std::span<const float>(dist_->d);
+  const GridGeometry& g = grids_->geom;
+  if (mode_ != GridMode::Delta) return interpolateT(g, r, p, grad);
+  constexpr int B = kDeltaBlock;
+  const std::size_t bs = static_cast<std::size_t>(B) * B * B;
+  return interpolateAt(
+      g,
+      [&](int i, int j, int k) {
+        const int b = block_[(static_cast<std::size_t>(k / B) * nb_[1] + j / B) * nb_[0] + i / B];
+        if (b < 0) return r[g.index(i, j, k)];
+        return data_[(static_cast<std::size_t>(b) * mapCount_ + m) * bs + ((k % B) * B + j % B) * B + i % B];
+      },
+      p, grad);
+}
+
+template <class T>
+T StamField::energy(int m, T q, const Vec3T<T>& p, Vec3T<T>* grad) const {
+  using V = Vec3T<T>;
+  const int nt = static_cast<int>(grids_->types.size());
+  V a{}, b{}, s{};
+  const T aq = std::abs(q);
+  const T grid = map(m, p, grad ? &a : nullptr) + q * map(nt, p, grad ? &b : nullptr) + aq * map(nt + 1, p, grad ? &s : nullptr);
+  if (grad)
+    for (int i = 0; i < 3; ++i) (*grad)[i] = a[i] + q * b[i] + aq * s[i];
+  if (mode_ != GridMode::Flexres || moved_.empty()) return grid;
+  // Pair sum over the moved StaM atoms: the grid terms of spec 8.1 per atom (no clamp).
+  const int nTypes = static_cast<int>(Ad4Type::Count);
+  const T rMin = static_cast<T>(rMin_), half = static_cast<T>(halfSmooth_);
+  const T cut2 = static_cast<T>(kElecCutoff * kElecCutoff), vdwCut = static_cast<T>(kVdwCutoff);
+  const T solT = static_cast<T>(solT_[m]), volT = static_cast<T>(volT_[m]);
+  const T cd = static_cast<T>(cDesolv_), cdq = static_cast<T>(cDesolv_ * qasp_);
+  double sum = 0;
+  Vec3 gs{};
+  cells_.forNear({static_cast<double>(p[0]), static_cast<double>(p[1]), static_cast<double>(p[2])}, kElecCutoff,
+                 [&](int j) {
+                   const Moved& at = moved_[j];
+                   const V d{p[0] - static_cast<T>(at.xyz[0]), p[1] - static_cast<T>(at.xyz[1]),
+                             p[2] - static_cast<T>(at.xyz[2])};
+                   const T r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                   if (r2 >= cut2) return;
+                   const T r = std::sqrt(r2);
+                   T gauss, dgauss, el, del;
+                   ad4Desolv(r, T(1), rMin, gauss, dgauss);
+                   ad4Elec(r, static_cast<T>(at.elecQ), rMin, el, del);
+                   const T V_ = static_cast<T>(at.V), S_ = static_cast<T>(at.S);
+                   const T w = cd * (solT * V_ + S_ * volT) + aq * cdq * V_;
+                   T e = w * gauss + q * el, dedr = w * dgauss + q * del;
+                   if (r < vdwCut) {
+                     const std::size_t k = static_cast<std::size_t>(m) * nTypes + at.type;
+                     T ev, dv;
+                     ad4VdwHb(r, static_cast<T>(pairAC_[k]), static_cast<T>(pairBD_[k]), pairM_[k], pairN_[k],
+                              static_cast<T>(pairReqm_[k]), half, ev, dv);
+                     e += ev;
+                     dedr += dv;
+                   }
+                   sum += e;
+                   if (grad && r > 0)
+                     for (int i = 0; i < 3; ++i) gs[i] += dedr / r * d[i];
+                 });
+  if (grad)
+    for (int i = 0; i < 3; ++i) (*grad)[i] = static_cast<T>((*grad)[i] + gs[i]);
+  return static_cast<T>(grid + sum);
+}
+
+template <class T>
+T StamField::distance(const Vec3T<T>& p, Vec3T<T>* grad) const {
+  const int nt = static_cast<int>(grids_->types.size());
+  T d = map(nt + 2, p, grad);
+  if (mode_ != GridMode::Flexres || movedHeavy_.empty()) return d;
+  const double cap = dist_->cap;
+  int best = -1;
+  T best2 = d * d;
+  heavyCells_.forNear({static_cast<double>(p[0]), static_cast<double>(p[1]), static_cast<double>(p[2])}, cap, [&](int h) {
+    const Vec3& x = moved_[movedHeavy_[h]].xyz;
+    const T dx = p[0] - static_cast<T>(x[0]), dy = p[1] - static_cast<T>(x[1]), dz = p[2] - static_cast<T>(x[2]);
+    const T r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 < best2) {
+      best2 = r2;
+      best = movedHeavy_[h];
+    }
+  });
+  if (best < 0) return d;
+  const T r = std::sqrt(best2);
+  if (grad) {
+    const Vec3& x = moved_[best].xyz;
+    for (int i = 0; i < 3; ++i) (*grad)[i] = r > 0 ? (p[i] - static_cast<T>(x[i])) / r : T(0);
+  }
+  return r;
+}
+
+template float StamField::energy<float>(int, float, const Vec3f&, Vec3f*) const;
+template double StamField::energy<double>(int, double, const Vec3&, Vec3*) const;
+template float StamField::distance<float>(const Vec3f&, Vec3f*) const;
+template double StamField::distance<double>(const Vec3&, Vec3*) const;
 
 }  // namespace od

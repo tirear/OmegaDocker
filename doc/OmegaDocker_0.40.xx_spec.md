@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.44 |
+| 文件版本 | 1.45 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -840,22 +840,30 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 網格在程式內以 GPU 計算，不需外部 AutoGrid。網格間距 `gridSpacing`（預設 0.375 Å），參數檔沿用 AD4。
 
-| `gridMode` | 做法 | 適用 |
+| `grid.mode` | 做法 | 適用 |
 |---|---|---|
 | `full` | 每個 StaM 構型樣本一份完整網格 | 任何情況；對照基準 |
 | `flexres` | 固定原子用一份網格；可動原子與 MobM 逐對計算（鄰近表） | StaM 主鏈不可動時最有效率 |
 | `delta` | 樣本 0 完整網格；其他樣本只存差異區塊 | 主鏈不可動或局部變動 |
 
-- 預設：StaM 主鏈全部不可動 → `flexres`；否則 → `full`。
-- **固定原子**：不在任何可動兩面角下游的 StaM 原子。
-- `delta` 實作：
-  - 網格切成 8³ 格點的區塊。
-  - 樣本 k 對每個區塊記錄一個索引：−1 表示沿用樣本 0；否則指向差異區塊。
-  - 差異區塊 = 樣本 k 與樣本 0 在該區塊有任一格點差值 > `deltaThreshold`（預設 1×10⁻⁴ kcal/mol）。
-  - 差異區塊儲存樣本 k 的完整數值（不是差值），查詢時不需相加。
+- 預設 `grid.mode = "auto"`：StaM 群沒有可轉動的主鏈兩面角（扭轉樹中沒有 phi／psi／omega／alpha–zeta 等主鏈角）→ `flexres`；否則 → `full`。
+- **固定原子**：不在任何可動兩面角下游的 StaM 原子（扭轉樹任一兩面角的 `moving` 都不含該原子）；其餘為**可動原子**。只計網格原子（8.1 網格範圍與內容）。
+- `flexres` 實作（CPU 參考版）：
+  - 固定原子的網格（能量、距離）以輸入構型建立一次，跨輪次沿用。
+  - 可動原子對 MobM 探針原子逐對計算 8.1 網格的各項（同一分解：`vdW/H-bond(t, j) + c_desolv·(S_t·V_j + S_j·V_t)·G(r) + q·c_elec·q_j·ε(r)/r + |q|·c_desolv·qasp·V_j·G(r)`），截斷距離同 7.9，不設 1×10⁵ 上限；以 4 Å 的 cell list 找 20.48 Å 內的原子。
+  - 距離（8.2）= min（固定原子距離網格的內插值，到可動重原子的最近距離）；梯度取較小者。
+  - 逐對項以 float 計算，總和以 double 累加（12.1）。
+- `delta` 實作（CPU 參考版）：
+  - 參考構型 = StaM 輸入構型（「樣本 0」），其完整網格建立一次，跨輪次沿用。
+  - 網格切成 8³ 格點的區塊（邊緣區塊不足 8 的部分不使用）。
+  - 樣本 k 對每個區塊記錄一個索引：−1 表示沿用參考構型；否則指向差異區塊。
+  - 差異區塊 = 樣本 k 與參考構型在該區塊的任一張圖（各 type map、elec、desolv、距離網格）有任一格點差值 > `grid.deltaThreshold`（預設 1×10⁻⁴；距離網格的單位為 Å）。
+  - 差異區塊儲存樣本 k 所有圖的完整數值（不是差值），查詢時不需相加。CPU 版仍需先建立樣本 k 的完整網格再比較，只節省記憶體。
+  - StaM 群沒有可轉動兩面角時，三種模式都只用輸入構型的網格。
 - 網格依 StaM 構型快取，多個 MobM 選到同一 StaM 構型時共用。
+- 執行紀錄：開始時印出實際的模式、網格原子數、可動原子數、主鏈是否可動；每輪印出建網格時間、`flexres` 的可動原子數、`delta` 儲存的區塊比例。
 
-**網格範圍與內容**（CPU 參考版已實作 `full`）：
+**網格範圍與內容**（三種模式共用）：
 - 範圍：以 `boxCenter` 為中心，每軸的間隔數為 ≥ `boxSize / gridSpacing` 的最小偶數，格點數 = 間隔數 + 1。
 - 產生網格的原子：StaM 的實際原子；併入重原子的非極性氫與斷鍵的複製原子不列入。
 - 探針類型：所有 MobM 的 AD4 類型聯集（第 11 節），每個類型一張 type map；另有 elec map 與 desolv map。
@@ -868,11 +876,42 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 格點以 float 儲存。
 - 網格外的 MobM 原子不計入網格能量，另外計數；9b 最佳化中出現網格外原子時移除該 pos（8.6）。
 
+#### 8.1.1 `grid.mode` 的測試結果（CPU 參考版）
+
+- 單元測試（2KJJ 為 StaM、1L2Y 的原子類型為探針，16 Å 的盒子，四分之一的原子當作可動原子）：
+  - 格點上 `flexres` 與 `full` 一致（相對誤差 < 1×10⁻⁴），兩者都等於逐對總和。
+  - 格點之間與逐對總和的平均絕對誤差：`full` 0.0716、`flexres` 0.0513 kcal/mol（可動原子部分為精確值）。
+  - `flexres` 的能量、距離梯度與有限差分一致；9b pose 的能量、梯度亦同。
+  - `delta`：門檻 0 時與 `full` 的 float 結果逐位元相同；門檻 τ 時差值 ≤ τ·(1 + 2|q|)。
+- `delta` 的差異區塊比例（只將一個側鏈大小的 8 個原子沿 x 移動 0.7 Å）：
+
+| 盒子 | 門檻 | 差異區塊（任一張圖） | 只看 type map | 只看 elec | 只看 desolv |
+|---|---|---|---|---|---|
+| 16 Å（216 塊） | 1×10⁻⁴ | 100% | | | |
+| 30 Å（1331 塊） | 1×10⁻⁴ | 88.9% | 511 | 1130 | 599 |
+| 30 Å | 1×10⁻³ | 65.8% | 330 | 694 | 337 |
+| 30 Å | 1×10⁻² | 14.4% | 101 | 140 | 95 |
+| 48 Å（4913 塊） | 1×10⁻⁴ | 45.2% | 528 | 2172 | 630 |
+| 48 Å | 1×10⁻² | 8.1% | 101 | 348 | 95 |
+
+  - 原因：elec（以及 type map、desolv 中的 desolvation 項）的截斷距離為 20.48 Å，一個帶電原子移動就改變其 20 Å 內的所有格點；elec 影響最大。
+- 完整執行（2KJJ 預設分子設定檔：StaM 主鏈不可動，491 個網格原子中 223 個可動；MobM `BTN_ideal.sdf`；`box_size` 30 Å、`posm1`、`posm1SampleNum` 1000、`{stam,mobm}.dockingConfSampleNum` 8、`maxRound` 1、`seed` 3；AMD Ryzen 7 9700X，16 執行緒）：
+
+| 模式 | 建網格（8 個 StaM 構型） | 9b 對接 | L2poss | 對接樣本 | `E_top_max` |
+|---|---|---|---|---|---|
+| `full` | 1.98 s | 0.97 s | 19792 | 14120 | 25.068 |
+| `flexres`（`auto` 的選擇） | 0.14 s | 11.33 s | 19742 | 13660 | 24.653 |
+| `delta` | 2.17 s（區塊 100% 儲存） | 0.98 s | 19792 | 14120 | 25.068 |
+
+  - `flexres` 省下建網格的時間，但每次能量計算要逐對計算 223 個可動原子（20.48 Å 內），9b 慢約 12 倍；此例中每個 StaM 構型約 2,500 個 L2poss，`flexres` 只有在每個 StaM 構型的 pose 數很少時才較快。`flexres` 的結果與 `full` 不同（可動原子為精確值，最佳化路徑因而不同）。
+  - `delta` 的結果與 `full` 相同；實際的 StaM 樣本有許多側鏈同時移動，所有區塊都被儲存，沒有節省記憶體。
+  - 以上為 CPU 參考版的結果；GPU 版的成本比例不同，須另行評估。
+
 ### 8.2 距離網格
 
 - 每個格點存「到最近 StaM 重原子的距離」（distance transform），上限為 `max(maxNearDistance, clashDistance)` 再加 2 個 `gridSpacing`；超過者存上限值。
 - 查詢以三線性內插取值。
-- 與能量網格使用相同的 `gridMode`（`flexres` 時：固定原子用網格，可動原子逐對計算）。
+- 與能量網格使用相同的 `grid.mode`（`flexres` 時：固定原子用網格，可動原子逐對計算；`delta` 時與能量網格一起分區塊儲存）。
 - 用途：8.5 的快速篩選。
 
 ### 8.3 定向表示
@@ -1338,8 +1377,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `ccd` | `--ccd` | `[]` | 3.1 |
 | `box.center`、`box.size` | `--box_center`、`--box_size` | 必填 | 3.3 |
 | `grid.spacing` | `--grid_spacing` | 0.375 Å | 8.1 |
-| `grid.mode`（未實作） | `--grid_mode` | 依主鏈可動與否 | 8.1 |
-| `grid.deltaThreshold`（未實作） | `--grid_deltaThreshold` | 1×10⁻⁴ kcal/mol | 8.1 |
+| `grid.mode` | `--grid_mode` | `auto`（依主鏈可動與否） | 8.1（`auto`、`full`、`flexres`、`delta`） |
+| `grid.deltaThreshold` | `--grid_deltaThreshold` | 1×10⁻⁴ | 8.1（kcal/mol；距離網格為 Å） |
 | `gpu.memLimit`（未實作） | `--gpu_memLimit` | 可用量 90% | 13 |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
@@ -1716,3 +1755,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.42 | 2026-10-17 | 記錄閉合後碰撞處理的四項嘗試（7.11.1）；新增 `{stam,mobm}.rcdClash`、`{stam,mobm}.rcdClashWeight`（7.11、14）；修正耦合斷鍵分組的錯誤（1.41 版中遞移的組可能漏掉成員；7.11） |
 | 1.43 | 2026-10-17 | 7.11.1 嘗試 4 補上 `rcdMaxIter` 40000、80000 的結果（飽和）；確定 `rcdClash` 保留為選項，預設 `none` |
 | 1.44 | 2026-10-17 | `{stam,mobm}.rcdMaxIter` 預設由 1000 改為 20000（7.11、7.11.1、14） |
+| 1.45 | 2026-10-17 | 實作 `grid.mode`（`auto`、`full`、`flexres`、`delta`）與 `grid.deltaThreshold`（CPU 參考版）：補充固定／可動原子、`flexres` 的逐對計算與距離、`delta` 的參考構型與比較範圍（8.1、8.2）；新增 8.1.1 測試結果 |

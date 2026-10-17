@@ -252,6 +252,17 @@ const std::vector<Param>& params() {
     t.push_back(vec3("box.size", "Docking box size (Å)", OD_ACC(boxSize)));
 
     t.push_back(real("grid.spacing", "<dist>", "0.375", "9b: spacing of the energy and distance grids (Å)", OD_ACC(gridSpacing)));
+    t.push_back({"grid.mode", Type::Str, "auto|full|flexres|delta", "auto",
+                 "9b: StaM grids (auto: flexres when no StaM backbone torsion is rotatable, otherwise full)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "auto" && s != "full" && s != "flexres" && s != "delta")
+                     fail("expected auto, full, flexres or delta but got '{}'", s);
+                   o.gridMode = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.gridMode}; }});
+    t.push_back(real("grid.deltaThreshold", "<E>", "1e-4",
+                     "9b: grid.mode = delta: a block is stored when a point differs by more than this", OD_ACC(gridDeltaThreshold)));
 
     t.push_back(boolean("output.pdb", "true", "Write PDB output", OD_ACC(outPdb)));
     t.push_back(boolean("output.cif", "false", "Write mmCIF output", OD_ACC(outCif)));
@@ -684,6 +695,7 @@ void validateOptions(const Options& o) {
   check(o.Kclash >= 0, "energy.Kclash", ">= 0");
   check(o.EclashBase > o.Emax, "energy.EclashBase", "greater than energy.Emax");
   check(o.gridSpacing > 0, "grid.spacing", "> 0");
+  check(o.gridDeltaThreshold >= 0, "grid.deltaThreshold", ">= 0");
   check(o.maxNearDistance > 0, "dock9b.maxNearDistance", "> 0");
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");
   check(o.posStep > 0, "dock9b.posStep", "> 0");

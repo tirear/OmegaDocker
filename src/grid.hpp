@@ -3,8 +3,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -14,8 +18,8 @@
 
 namespace od {
 
-// StaM–MobM intermolecular energy grids (spec 8.1, gridMode = full) and the
-// distance grid (spec 8.2). CPU reference implementation.
+// StaM–MobM intermolecular energy grids (spec 8.1) and the distance grid
+// (spec 8.2). CPU reference implementation.
 
 constexpr double kGridClamp = 1.0e5;  // kcal/mol, upper bound of a type-map value (AutoGrid EINTCLAMP)
 
@@ -87,5 +91,111 @@ InterEnergy gridEnergy(const EnergyGrids& g, const GridAtoms& probe, std::vector
 
 // Reference: direct sum over StaM–probe atom pairs with the grid's terms (no clamp).
 double pairInterEnergy(const GridAtoms& stam, const GridAtoms& probe, const EnergyParams& params);
+
+// Atoms of a GridAtoms list with mask[a] == keep.
+GridAtoms subset(const GridAtoms& atoms, std::span<const char> mask, bool keep);
+// Per atom of gridAtoms(sys, parts, ...): 1 when a torsion of the parts' trees moves it.
+std::vector<char> movedGridAtoms(const EnergySystem& sys, const std::vector<EnergyPart>& parts);
+
+namespace detail {
+
+// Uniform cell list over atom positions.
+class CellList {
+ public:
+  CellList() = default;
+  CellList(std::span<const Vec3> xyz, double cell);
+  // Calls f(atom) for every atom in the cells overlapping the cube p ± r.
+  template <class F>
+  void forNear(const Vec3& p, double r, F&& f) const {
+    if (atoms_.empty()) return;
+    std::array<int, 3> a{}, b{};
+    for (int c = 0; c < 3; ++c) {
+      a[c] = std::max(0, static_cast<int>(std::floor((p[c] - r - lo_[c]) / cell_)));
+      b[c] = std::min(n_[c] - 1, static_cast<int>(std::floor((p[c] + r - lo_[c]) / cell_)));
+      if (a[c] > b[c]) return;
+    }
+    for (int z = a[2]; z <= b[2]; ++z)
+      for (int y = a[1]; y <= b[1]; ++y) {
+        const std::size_t row = (static_cast<std::size_t>(z) * n_[1] + y) * n_[0];
+        for (int k = start_[row + a[0]]; k < start_[row + b[0] + 1]; ++k) f(atoms_[k]);
+      }
+  }
+
+ private:
+  double cell_ = 1;
+  Vec3 lo_{};
+  std::array<int, 3> n_{};
+  std::vector<int> start_;
+  std::vector<int> atoms_;
+};
+
+}  // namespace detail
+
+// gridMode (spec 8.1).
+enum class GridMode : std::uint8_t { Full, Flexres, Delta };
+const char* gridModeName(GridMode m);  // "full" | "flexres" | "delta"
+
+// Blocks of kDeltaBlock^3 points (spec 8.1 delta).
+constexpr int kDeltaBlock = 8;
+
+// The StaM side of the 9b energy for one StaM conformation sample (spec 8.1, 8.2):
+// full: energy and distance grids of the sample; flexres: grids of the fixed atoms
+// plus a pair sum over the moved atoms; delta: the grids of a reference conformation
+// with the blocks that differ replaced by the sample's values.
+class StamField {
+ public:
+  StamField() = default;
+  static StamField full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist);
+  // fixed: grids of the fixed atoms; moved: the other StaM grid atoms of the sample.
+  static StamField flexres(std::shared_ptr<const EnergyGrids> fixed, std::shared_ptr<const DistanceGrid> fixedDist,
+                           GridAtoms moved, const EnergyParams& params);
+  // Blocks with a point differing from the reference by more than threshold in any map
+  // (type maps, elec, desolv, distance) store the sample's values.
+  static StamField delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
+                         const EnergyGrids& grids, const DistanceGrid& dist, double threshold);
+
+  GridMode mode() const { return mode_; }
+  const GridGeometry& geom() const { return grids_->geom; }
+  int mapOf(Ad4Type t) const { return grids_->mapOf(t); }
+  double distanceCap() const { return dist_->cap; }
+  std::size_t movedAtomCount() const { return moved_.size(); }  // flexres
+  std::size_t blockCount() const { return block_.size(); }      // delta: all blocks
+  std::size_t deltaBlockCount() const;                          // delta: blocks with their own values
+
+  // Energy of a probe atom of map `map` and charge q at p (inside geom()); grad: dE/dp.
+  template <class T>
+  T energy(int map, T q, const Vec3T<T>& p, Vec3T<T>* grad) const;
+  // Distance to the nearest StaM heavy atom (at most distanceCap()); grad: dd/dp.
+  template <class T>
+  T distance(const Vec3T<T>& p, Vec3T<T>* grad) const;
+
+ private:
+  template <class T>
+  T map(int m, const Vec3T<T>& p, Vec3T<T>* grad) const;  // m: type maps, then elec, desolv, distance
+
+  GridMode mode_ = GridMode::Full;
+  std::shared_ptr<const EnergyGrids> grids_;
+  std::shared_ptr<const DistanceGrid> dist_;
+  // flexres
+  struct Moved {
+    Vec3 xyz{};
+    int type = 0;           // Ad4Type
+    double elecQ = 0;       // c_elec q_j
+    double S = 0, V = 0;    // S_j, V_j
+    bool heavy = false;
+  };
+  std::vector<Moved> moved_;
+  std::vector<int> movedHeavy_;          // indices into moved_
+  detail::CellList cells_, heavyCells_;  // over moved_, over movedHeavy_
+  std::vector<double> solT_, volT_;      // per map
+  std::vector<double> pairAC_, pairBD_, pairReqm_;  // per (map, Ad4Type)
+  std::vector<int> pairM_, pairN_;
+  double cDesolv_ = 0, qasp_ = 0, halfSmooth_ = 0, rMin_ = 0;
+  // delta
+  std::array<int, 3> nb_{};
+  std::vector<int> block_;   // per block: -1 (reference) or index of its values in data_
+  std::vector<float> data_;  // per stored block: maps x kDeltaBlock^3 values
+  int mapCount_ = 0;         // type maps + elec + desolv + distance
+};
 
 }  // namespace od

@@ -81,6 +81,8 @@ struct Options {
   ConfSampleOpts stam;  // stam.*ConfSampleNum: the StaM group
   ConfSampleOpts mobm;  // mobm.*ConfSampleNum: shared by all MobM
   double gridSpacing = 0.375;
+  std::string gridMode = "auto";  // auto | full | flexres | delta
+  double gridDeltaThreshold = 1e-4;
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
   std::string posm;  // posm1 | posm2
