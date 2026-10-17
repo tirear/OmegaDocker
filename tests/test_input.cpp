@@ -1668,7 +1668,7 @@ TEST_CASE("minimize: FIRE") {
   };
   std::vector<double> x{-100, 100, -170};
   od::MinParams p{1000, 1e-12, 10.0};
-  const auto r = od::minimizeFire(f, x, p);
+  const auto r = od::minimizeTorsions(f, x, p);
   for (std::size_t i = 0; i < x.size(); ++i) CHECK(std::abs(od::wrapDeg(x[i] - c[i])) < 0.01);
   CHECK(r.energy < 1e-6);
   CHECK(r.evaluations == r.steps + 1);
@@ -1680,14 +1680,34 @@ TEST_CASE("minimize: FIRE") {
 
   // Step limit and energy-change stop.
   x = {-100, 100, -170};
-  CHECK(od::minimizeFire(f, x, {7, 0.0, 10.0}).steps == 7);
+  CHECK(od::minimizeTorsions(f, x, {7, 0.0, 10.0}).steps == 7);
   x = {-100, 100, -170};
-  const auto r2 = od::minimizeFire(f, x, {1000, 1.0, 10.0});
+  const auto r2 = od::minimizeTorsions(f, x, {1000, 1.0, 10.0});
   CHECK(r2.steps < 1000);
   x = {-100, 100, -170};
-  const auto r0 = od::minimizeFire(f, x, {0, 1.0, 10.0});
+  const auto r0 = od::minimizeTorsions(f, x, {0, 1.0, 10.0});
   CHECK(r0.steps == 0);
   CHECK(x[0] == -100);
+  // Every method: converges, respects the angle step limit, returns the lowest point.
+  for (const char* name : {"sd", "cg", "fire", "lbfgs", "adadelta"}) {
+    const std::string nameS = name;
+    CAPTURE(nameS);
+    visited.clear();
+    // ADADELTA (rho 0.8, epsilon 1e-2, variables in degrees) takes small steps near the minimum
+    // and ends close to it only.
+    const bool ada = nameS == "adadelta";
+    x = {-100, 100, -170};
+    const auto rm = od::minimizeTorsions(f, x, {ada ? 50000 : 5000, 1e-14, 10.0, od::parseMinMethod(name)});
+    CHECK(rm.energy < (ada ? 1e-2 : 1e-4));
+    for (std::size_t i = 0; i < x.size(); ++i) CHECK(std::abs(od::wrapDeg(x[i] - c[i])) < (ada ? 3.0 : 0.5));
+    std::vector<double> gg;
+    CHECK(f(x, gg) == doctest::Approx(rm.energy).epsilon(1e-9).scale(1e-9));
+    double bigM = 0;
+    for (std::size_t s = 1; s < visited.size(); ++s)
+      for (std::size_t i = 0; i < x.size(); ++i) bigM = std::max(bigM, std::abs(od::wrapDeg(visited[s][i] - visited[s - 1][i])));
+    CHECK(bigM <= 10.0 + 1e-9);
+    CHECK(rm.evaluations >= rm.steps + 1);
+  }
 }
 
 TEST_CASE("9a: L2 pool refill (1L2Y)") {
@@ -2508,11 +2528,11 @@ TEST_CASE("lbfgs: quadratic and Rosenbrock") {
     }
     return true;
   };
-  od::LbfgsParams p;
+  od::VecMinParams p;
   p.deltaE = 1e-12;
   p.convSteps = 2;
   std::vector<double> x{5, -3, 7};
-  auto r = od::minimizeLbfgs(quad, x, p);
+  auto r = od::minimizeVec(quad, x, p);
   CHECK_FALSE(r.aborted);
   for (int i = 0; i < 3; ++i) CHECK(x[i] == doctest::Approx(i).scale(1).epsilon(1e-5));
   const od::VecObjective rosen = [](std::span<const double> x, double& e, std::vector<double>& g) {
@@ -2521,21 +2541,21 @@ TEST_CASE("lbfgs: quadratic and Rosenbrock") {
     return true;
   };
   x = {-1.2, 1};
-  r = od::minimizeLbfgs(rosen, x, p);
+  r = od::minimizeVec(rosen, x, p);
   CHECK(x[0] == doctest::Approx(1).epsilon(1e-4));
   CHECK(x[1] == doctest::Approx(1).epsilon(1e-4));
   // Step limit, accept hook and abort.
   int accepted = 0;
   p.stepLimit = [](std::span<const double> d) { return 0.1 / std::max(0.1, std::abs(d[0])); };
-  p.onAccept = [&](std::vector<double>&) { ++accepted; };
+  p.onAccept = [&](std::vector<double>&, bool) { ++accepted; };
   x = {5, -3, 7};
   double last = 5;
   const od::VecObjective quad2 = [&](std::span<const double> v, double& e, std::vector<double>& g) {
     CHECK(std::abs(v[0] - last) <= 0.1 + 1e-12);
     return quad(v, e, g);
   };
-  p.onAccept = [&](std::vector<double>& v) { ++accepted; last = v[0]; };
-  r = od::minimizeLbfgs(quad2, x, p);
+  p.onAccept = [&](std::vector<double>& v, bool) { ++accepted; last = v[0]; };
+  r = od::minimizeVec(quad2, x, p);
   CHECK(accepted == r.steps);
   CHECK(r.steps >= 50);
   const od::VecObjective stop = [&](std::span<const double> v, double& e, std::vector<double>& g) {
@@ -2546,9 +2566,91 @@ TEST_CASE("lbfgs: quadratic and Rosenbrock") {
   p.stepLimit = {};
   p.onAccept = {};
   // An infeasible trial point aborts.
-  CHECK(od::minimizeLbfgs(stop, x, p).aborted);
+  CHECK(od::minimizeVec(stop, x, p).aborted);
   x = {3, -3, 7};
-  CHECK(od::minimizeLbfgs(stop, x, p).aborted);
+  CHECK(od::minimizeVec(stop, x, p).aborted);
+}
+
+TEST_CASE("minimize: all methods (quadratic, step limit, best point, abort)") {
+  const double a[3] = {1, 10, 100};
+  int evals = 0;
+  const od::VecObjective quad = [&](std::span<const double> x, double& e, std::vector<double>& g) {
+    ++evals;
+    e = 0;
+    g.assign(3, 0);
+    for (int i = 0; i < 3; ++i) {
+      e += 0.5 * a[i] * (x[i] - i) * (x[i] - i);
+      g[i] = a[i] * (x[i] - i);
+    }
+    return true;
+  };
+  for (const char* name : {"sd", "cg", "fire", "lbfgs", "adadelta"}) {
+    const std::string nameS = name;
+    CAPTURE(nameS);
+    const od::MinMethod m = od::parseMinMethod(name);
+    CHECK(std::string(od::minMethodName(m)) == name);
+    const bool monotone = m == od::MinMethod::Sd || m == od::MinMethod::Cg || m == od::MinMethod::Lbfgs;
+    od::VecMinParams p;
+    p.method = m;
+    p.maxSteps = 20000;
+    p.deltaE = 1e-14;
+    p.convSteps = 5;
+    // Step limit 0.1 on every variable; accepted energies, best flags.
+    std::vector<double> x{5, -3, 7}, prev = x, accE;
+    double bestSeen = 1e300;
+    int bestFlags = 0, stepErr = 0;
+    p.stepLimit = [](std::span<const double> d) {
+      double big = 0;
+      for (double v : d) big = std::max(big, std::abs(v));
+      return big > 0.1 ? 0.1 / big : 1.0;
+    };
+    p.onAccept = [&](std::vector<double>& v, bool best) {
+      for (int i = 0; i < 3; ++i)
+        if (std::abs(v[i] - prev[i]) > 0.1 + 1e-12) ++stepErr;
+      prev = v;
+      double e;
+      std::vector<double> g;
+      quad(v, e, g);
+      accE.push_back(e);
+      if (best != (e < bestSeen)) ++bestFlags;
+      bestSeen = std::min(bestSeen, e);
+    };
+    evals = 0;
+    auto r = od::minimizeVec(quad, x, p);
+    CHECK_FALSE(r.aborted);
+    CHECK(stepErr == 0);
+    CHECK(bestFlags == 0);
+    CHECK(r.steps == static_cast<int>(accE.size()));
+    CHECK(r.energy < 1e-6);
+    CHECK(r.energy == doctest::Approx(std::min(bestSeen, 0.5 * (25 + 10 * 25 + 100 * 25))));
+    double e0;
+    std::vector<double> g0;
+    quad(x, e0, g0);
+    CHECK(e0 == r.energy);
+    if (monotone)
+      for (std::size_t k = 1; k < accE.size(); ++k) CHECK(accE[k] <= accE[k - 1]);
+    // An infeasible point aborts.
+    const od::VecObjective stop = [&](std::span<const double> v, double& e, std::vector<double>& g) {
+      quad(v, e, g);
+      return v[0] > 4;
+    };
+    p.onAccept = {};
+    x = {5, -3, 7};
+    CHECK(od::minimizeVec(stop, x, p).aborted);
+    // maxSteps.
+    p.maxSteps = 3;
+    p.stepLimit = {};
+    x = {5, -3, 7};
+    r = od::minimizeVec(quad, x, p);
+    CHECK(r.steps <= 3);
+    p.maxSteps = 0;
+    x = {5, -3, 7};
+    r = od::minimizeVec(quad, x, p);
+    CHECK(r.steps == 0);
+    CHECK(r.evaluations == 1);
+    CHECK(x[0] == 5);
+  }
+  CHECK_THROWS_AS(od::parseMinMethod("bfgs"), od::Error);
 }
 
 TEST_CASE("grid: flexres and delta fields (2KJJ, 1L2Y)") {
@@ -3181,7 +3283,7 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
 TEST_CASE("dock9b: docking one conformation pair (2KJJ, 1L2Y)") {
   DockFixture f;
   f.p.posm1SampleNum = 1500;
-  f.p.lbfgs.maxSteps = 300;
+  f.p.minimizer.maxSteps = 300;
   const od::MobmDocker dk(*f.x.mobSys, f.field, f.p);
   const auto angles = f.x.mobSys->inputAngles();
   const auto c = dk.conformation(angles);
@@ -3238,7 +3340,7 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   // Docking samples of one conformation pair.
   DockFixture f;
   f.p.posm1SampleNum = 600;
-  f.p.lbfgs.maxSteps = 100;
+  f.p.minimizer.maxSteps = 100;
   const od::MobmDocker dk(*f.x.mobSys, f.field, f.p);
   const auto angles = f.x.mobSys->inputAngles();
   std::vector<od::DockSample> out;

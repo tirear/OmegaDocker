@@ -17,6 +17,7 @@
 #include <toml.hpp>
 
 #include "log.hpp"
+#include "minimize.hpp"
 #include "version.hpp"
 
 namespace od {
@@ -88,6 +89,17 @@ Param real(std::string key, std::string hint, std::string def, std::string help,
   return {std::move(key), Type::Real, std::move(hint), std::move(def), std::move(help),
           [acc](Options& o, const Tokens& t) { acc(o) = toReal(one(t)); },
           [acc](const Options& o) -> std::optional<Tokens> { return Tokens{fmtReal(acc(o))}; }};
+}
+
+template <typename Acc>
+Param minMethod(std::string key, std::string def, std::string stage, Acc acc) {
+  return {std::move(key), Type::Str, "sd|cg|fire|lbfgs|adadelta", std::move(def), stage + " minimization: method (spec 12)",
+          [acc](Options& o, const Tokens& t) {
+            const std::string& s = one(t);
+            parseMinMethod(s);
+            acc(o) = s;
+          },
+          [acc](const Options& o) -> std::optional<Tokens> { return Tokens{acc(o)}; }};
 }
 
 template <typename Acc>
@@ -299,6 +311,7 @@ const std::vector<Param>& params() {
     addSetParams(t, "stam");
     addSetParams(t, "mobm");
 
+    t.push_back(minMethod("conf9a.minMethod", "fire", "9a", OD_ACC(confMinMethod)));
     t.push_back(integer("conf9a.minMaxStep", "<n>", "100", "9a minimization: largest number of steps", OD_ACC(confMinMaxStep)));
     t.push_back(real("conf9a.minDeltaE", "<E>", "10", "9a minimization: stop when one step changes the energy by less (kcal/mol)",
                      OD_ACC(confMinDeltaE)));
@@ -357,6 +370,7 @@ const std::vector<Param>& params() {
     t.push_back(integer("dock9b.maxOverlapAtomNum", "<n>", "1",
                         "9b: poses with this many MobM heavy atoms closer than energy.clashDistance to the StaM are removed",
                         OD_ACC(maxOverlapAtomNum)));
+    t.push_back(minMethod("dock9b.minMethod", "lbfgs", "9b", OD_ACC(dockMinMethod)));
     t.push_back(integer("dock9b.minMaxStep", "<n>", "1000", "9b minimization: largest number of steps", OD_ACC(dockMinMaxStep)));
     t.push_back(integer("dock9b.minConvSteps", "<n>", "10",
                         "9b minimization: stop after this many consecutive steps with |dE| < dock9b.minDeltaE",

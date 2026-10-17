@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.53 |
+| 文件版本 | 1.54 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -696,11 +696,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 **篩選**：最佳化後 `E < E_max` → L2 pool；否則捨棄。
 `E_max` 不再作為停止條件，但仍是 L1 → L2 的篩選條件。
 
-**最佳化方法**：預設 FIRE（第 12 節）；每步每個兩面角變化上限 `confMaxDihedralStep`（預設 10°）。
+**最佳化方法**：`conf9a.minMethod`，預設 FIRE（第 12 節）；每步每個兩面角變化上限 `confMaxDihedralStep`（預設 10°）。
 - 最佳化的目標函數為含閉合約束的總能量；篩選用的能量（比較 `E_max`）不含閉合約束（4.5）。
 - FIRE 細節：變數為兩面角（rad），質量 1；`dt₀ = 0.1`、`dt_max = 1.0`；每步先依 FIRE 規則調整速度，再 `v += dt·F`、`Δx = dt·v`；任一兩面角的變化超過 `confMaxDihedralStep` 時，整個 `Δx` 等比例縮小（保持方向）。
 - 每步計算一次能量與梯度；`confMinMaxStep = 0` 時只計算能量。
 - 回傳最佳化過程中能量最低的構型（不一定是最後一步）。
+- 停止條件：步數達 `confMinMaxStep`，或一步的 |ΔE| < `confMinDeltaE`（即第 12 節的連續步數取 1），或 line search 找不到下降（`sd`、`cg`、`lbfgs`）。
 
 **亂數**：每個樣本的亂數由 (`seed`, 分子串流, 樣本序號) 決定，與執行緒數及分批方式無關；StaM 群為串流 0，第 i 個 MobM 為串流 i。未指定 `seed` 時隨機產生，並寫入執行紀錄。
 
@@ -1153,12 +1154,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 停止條件（任一成立）：
   1. 步數達 `dockMinMaxStep`（預設 1000）。
   2. 連續 `dockMinConvSteps`（預設 10）步 `|ΔE| < dockMinDeltaE`（預設 1×10⁻³ kcal/mol）。
-- 最佳化方法：預設 L-BFGS（第 12 節）。
+- 最佳化方法：`dock9b.minMethod`，預設 L-BFGS（第 12 節）。
 - **移出網格**：最佳化過程中任一 MobM 探針原子（8.1 的實際原子，不含併入重原子的非極性氫）移出網格範圍，即移除該 pos，不再最佳化，也不進入 9c，並計數（`left grid`）。line search 的試探點也算在內。
   - 起始 pos 已由 8.4 保證在對接範圍（⊆ 網格）內。
   - 出界判定不設容許值。
 - **計算精度**：能量在 float 的 pose（`float(t)`、`float(q)`）與 float 的兩面角上計算（精度分工見 12.1）。
-- **對接樣本 = 最後被接受的點**：儲存的 pose、兩面角（float）與能量，就是最後一次被接受的那次計算所用的值與結果，不在最佳化之後重算；以相同的值重算會得到完全相同的結果。
+- **對接樣本 = 能量最低的被接受點**：儲存的 pose、兩面角（float）與能量，就是被接受的點中能量最低者（含起點）那次計算所用的值與結果，不在最佳化之後重算；以相同的值重算會得到完全相同的結果。`sd`、`cg`、`lbfgs` 只接受能量下降的步，此點即最後被接受的點；`fire`、`adadelta` 每步都接受，此點不一定是最後一步。
 - 每個構型配對記錄其所有對接樣本中的最低能量，作為 9c 篩選 dcss 的依據；StaM 構型樣本與 MobM 構型樣本的「最低能量」分別取其參與之所有構型配對的最小值。
 
 ---
@@ -1440,7 +1441,41 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - two-loop recursion，初始 Hessian 取 `(sᵀy / yᵀy)·I`；`sᵀy ≤ 10⁻¹²` 的步不存入記憶。
   - 方向不是下降方向時清空記憶，改用最陡下降方向。
   - Armijo 條件 `E(x + αd) ≤ E(x) + 10⁻⁴·α·∇Eᵀd`，α 從 1 開始每次減半，最多 20 次；仍不滿足時視為收斂並停止。目標函數回報不可行（8.6 移出網格）時立即中止最佳化。
-- 目前只實作 9b 的 `lbfgs` 與 9a 的 `fire`，尚未提供 `dock9b.minMethod`、`conf9a.minMethod`。
+- 各方法細節（CPU 參考版，1.54；9a、9b 共用同一實作）：
+  - 共同：每步的變化先依上述每步最大變化等比例縮小（9a 為 `confMaxDihedralStep`）。「被接受的點」為成為目前位置的點；回傳能量最低的被接受點（含起點）。停止：被接受的步數達上限、連續 `convSteps` 步 |ΔE| < `deltaE`（9a 為 1 步、`confMinDeltaE`）、梯度為 0，或下列各方法的停止條件。目標函數回報不可行時立即中止。
+  - `sd`：方向 −∇E，步長因子 a（起始 1；縮小後的步長若較小，a 改為縮小後的值）。Armijo 條件成立則接受並 a × 1.2，否則 a × 0.5；連續 20 次不成立即停止。
+  - `cg`：Polak–Ribière（PR+，β = max(0, ∇Eₖᵀ(∇Eₖ − ∇Eₖ₋₁) / ∇Eₖ₋₁ᵀ∇Eₖ₋₁)）；不是下降方向時改用 −∇E。試探步長取 αₖ₋₁ (∇Eₖ₋₁ᵀdₖ₋₁)/(∇Eₖᵀdₖ)（第 1 步為 1），縮小後以 L-BFGS 相同的 Armijo 回溯；找不到下降即停止。
+  - `fire`：7.9 的參數與規則；每步計算一次能量與梯度，每步都接受。
+  - `lbfgs`：如上；9a 的記憶步數固定為 7（`dock9b.lbfgsMemory` 只用於 9b）。
+  - `adadelta`：ρ = 0.8、ε = 10⁻²（同 AutoDock-GPU）；E[g²] ← ρE[g²] + (1−ρ)g²，Δx = −g·√((E[Δx²] + ε)/(E[g²] + ε))，縮小後 E[Δx²] ← ρE[Δx²] + (1−ρ)Δx²；每步都接受。變數使用 AutoDock-GPU 的單位：平移以網格間距、旋轉與兩面角以度（再乘上 `scaleTrans` 等）。以 rad 為單位時起始步約 0.22 rad，1L2Y（MobM）測試中 3000 個 pose 全部移出網格。
+
+**實測（1.54）**：AMD Ryzen 7 9700X，16 執行緒，2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å、`seed` 3，其餘為預設值。
+
+9b（posm1、`posm1SampleNum` 6250、16 個構型配對，共 10⁵ 個 L1poss，30,804 個進入最佳化；`maxRound` 1）：
+
+| `dock9b.minMethod` | 步數／pose | 移出網格 | 對接樣本 | 9b 時間 | `E_top_max` | 第 1 名 |
+|---|---|---|---|---|---|---|
+| `lbfgs`（預設） | 55.1 | 9,051 | 21,753 | 1.39 s | −6.807 | −7.474 |
+| `cg` | 45.4 | 6,927 | 23,877 | 0.68 s | −5.161 | −5.636 |
+| `sd` | 43.7 | 5,900 | 24,904 | 0.73 s | −4.750 | −5.590 |
+| `fire` | 43.4 | 7,035 | 23,769 | 0.51 s | −4.756 | −5.526 |
+| `adadelta` | 793.2 | 4,198 | 26,606 | 8.63 s | −6.471 | −7.245 |
+
+- `minDeltaE` 改為 10⁻⁶ 時 `sd`、`cg`、`fire` 的結果不變（`lbfgs` 第 1 名 −7.640），差異不是停止條件造成。
+- 診斷（1L2Y 對 2KJJ 單元測試設定，3000 個起點）：`sd`、`cg`、`fire` 的平移平均只移動 0.07–0.22 Å（`lbfgs` 0.74 Å），最後的能量平均約 −36 kcal/mol（`lbfgs` −46.7）。原因是方向依原始梯度、兩面角梯度遠大於平移梯度，整步依兩面角的上限縮小；`scaleTors`、`scaleRot` 取 0.1 時平移可移動 1.2–1.8 Å，但能量平均仍約 −38。這三種方法停在 line search 找不到下降之處（網格三線性內插在格子邊界不平滑，且能量以 float 計算）。
+
+9a（`stam.dockingConfSampleNum`、`mobm.dockingConfSampleNum` 16，StaM 群；L1 依 7.4 自動增加至 L2 足夠為止）：
+
+| `conf9a.minMethod` | L1 | L2 | 通過率 | 步數／樣本 | 9a 時間 |
+|---|---|---|---|---|---|
+| `fire`（預設） | 9,232 | 45 | 0.49% | 54.6 | 40.4 s |
+| `lbfgs` | 4,882 | 34 | 0.70% | 26.8 | 20.0 s |
+| `cg` | 32,800 | 68 | 0.21% | 28.9 | 116 s |
+| `sd` | 67,552 | 37 | 0.055% | 43.9 | 318 s |
+| `adadelta` | 4,000（上限） | 0 | 0% | — | 31 s 後中止 |
+
+- 捨棄的樣本幾乎都是 E ≥ `Emax`。`adadelta` 以度為單位、最多 100 步，無法推開碰撞；不設上限時 2 小時仍未完成。
+- 此例 9a 以 `lbfgs` 最快（通過率較高、步數較少）；預設仍為 `fire`，是否更改待決定。
 
 ### 12.1 9b 的數值精度
 
@@ -1546,7 +1581,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `{stam,mobm}.kicMaxTrial` | `--{stam,mobm}_kicMaxTrial` | 100 | 7.11 |
 | `{stam,mobm}.rcdClash` | `--{stam,mobm}_rcdClash` | `none` | 7.11（`none`、`repair`、`full`） |
 | `{stam,mobm}.rcdClashWeight` | `--{stam,mobm}_rcdClashWeight` | 1 | 7.11 |
-| `conf9a.minMethod`（未實作） | `--conf9a_minMethod` | `fire` | 7.9 |
+| `conf9a.minMethod` | `--conf9a_minMethod` | `fire` | 7.9、12（`sd`、`cg`、`fire`、`lbfgs`、`adadelta`） |
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
 | `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
@@ -1568,7 +1603,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.sepaSamplingSingle` | `--dock9b_sepaSamplingSingle` | `false` | 8.4.4（posm3／posm4 時三者至少一個為 `true`） |
 | `dock9b.maxOverlapAtomNum` | `--dock9b_maxOverlapAtomNum` | 1 | 8.5 |
 | `dock9b.maxNearDistance` | `--dock9b_maxNearDistance` | 6 Å | 8.5 |
-| `dock9b.minMethod`（未實作） | `--dock9b_minMethod` | `lbfgs` | 8.6 |
+| `dock9b.minMethod` | `--dock9b_minMethod` | `lbfgs` | 8.6、12（同上） |
 | `dock9b.minMaxStep` | `--dock9b_minMaxStep` | 1000 | 8.6 |
 | `dock9b.minConvSteps` | `--dock9b_minConvSteps` | 10 | 8.6 |
 | `dock9b.minDeltaE` | `--dock9b_minDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
@@ -1919,3 +1954,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.51 | 2026-10-17 | 新增 `sepaSampling = "triple"`（三點取樣：三邊距離與正負號、共線排除、Kabsch 對齊與 RMSD 門檻、由配對清單延伸）；8.4.4.1 新增平移間距 1／1.5／2／4 Å（各 27 個平移）與三點取樣的測試結果 |
 | 1.52 | 2026-10-17 | 新增 `dock9b.sepaPosStep`（預設 2 Å），posm3 平移不再使用 `posStep`；`sepaPosRange` 預設等於 `sepaPosStep`，必須 ≥ `sepaPosStep`；`dock9b.sepaSampling` 改為 `sepaSamplingTriple`／`sepaSamplingPair`／`sepaSamplingSingle`（預設 true／true／false）；8.4.4.1 新增新預設的測試結果 |
 | 1.53 | 2026-10-17 | 實作 posm2_fft（CPU 參考版，pocketfft）：StaM 各格點值與上限（靜電 ±`fftClamp`）、FFT 大小（只補到 2、3、5、7 因數，不補 MobM 半徑）、MobM 三線性分配與通道、合法平移與保留順序、頻譜快取、平行化（8.4.3）；新增實測結果；`dock9b.fftClamp`、`dock9b.fftTopPerRot` 改為已實作 |
+| 1.54 | 2026-10-17 | 實作 `conf9a.minMethod`、`dock9b.minMethod`：`sd`、`cg`、`fire`、`lbfgs`、`adadelta` 共用一個實作，補充各方法細節；`adadelta` 使用 AutoDock-GPU 的變數單位；9a 補充停止條件；對接樣本改為「能量最低的被接受點」（`sd`、`cg`、`lbfgs` 即最後被接受的點）（7.9、8.6、12）；新增 9a、9b 各方法實測 |

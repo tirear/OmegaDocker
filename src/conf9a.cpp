@@ -15,7 +15,7 @@ EnergyTerms minimizeConf(const EnergySystem& sys, std::span<double> a, const Min
   const TorsionObjective f = [&](std::span<const double> x, std::vector<double>& g) {
     return sys.evaluate(x, &g).total();
   };
-  const MinResult r = minimizeFire(f, a, p);
+  const MinResult r = minimizeTorsions(f, a, p);
   if (steps) *steps = r.steps;
   return sys.evaluate(a);
 }

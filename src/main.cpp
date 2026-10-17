@@ -196,7 +196,7 @@ class ConfSet {
     p_.maxL1Total = csgm_.maxL1TotalNum;
     p_.Emax = opt.Emax;
     p_.maxBreakDist = opt.maxBreakDist;
-    p_.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep};
+    p_.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep, od::parseMinMethod(opt.confMinMethod)};
     p_.seed = seed;
     p_.stream = stream;
     od::ClosureParams clp;
@@ -414,10 +414,11 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   dp.clashDistance = opt.clashDistance;
   dp.clashBase = opt.EclashBase;
   dp.clashK = opt.Kclash;
-  dp.lbfgs.maxSteps = opt.dockMinMaxStep;
-  dp.lbfgs.convSteps = opt.dockMinConvSteps;
-  dp.lbfgs.deltaE = opt.dockMinDeltaE;
-  dp.lbfgs.memory = opt.lbfgsMemory;
+  dp.minimizer.method = od::parseMinMethod(opt.dockMinMethod);
+  dp.minimizer.maxSteps = opt.dockMinMaxStep;
+  dp.minimizer.convSteps = opt.dockMinConvSteps;
+  dp.minimizer.deltaE = opt.dockMinDeltaE;
+  dp.minimizer.memory = opt.lbfgsMemory;
   dp.scaleTrans = opt.scaleTrans;
   dp.scaleRot = opt.scaleRot;
   dp.scaleTors = opt.scaleTors;

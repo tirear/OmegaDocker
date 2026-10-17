@@ -48,8 +48,8 @@ struct Dock9bParams {
   double clashDistance = 1.8;
   double clashBase = 10000.0;
   double clashK = 1000.0;
-  // L-BFGS (spec 12)
-  LbfgsParams lbfgs;
+  // Minimization (spec 12)
+  VecMinParams minimizer;
   double scaleTrans = 1, scaleRot = 1, scaleTors = 1;
   double maxTransStep = 0.5;     // Å
   double maxAngleStep = 10.0;    // degrees

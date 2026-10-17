@@ -42,6 +42,16 @@ TEST_CASE("cli: required options and values") {
   CHECK(o.dockMinConvSteps == 10);
   CHECK(o.dockMinDeltaE == doctest::Approx(1e-3));
   CHECK(o.lbfgsMemory == 7);
+  CHECK(o.confMinMethod == "fire");
+  CHECK(o.dockMinMethod == "lbfgs");
+  {
+    const auto pm = parse({"--conf9a_minMethod=lbfgs", "--dock9b_minMethod=adadelta"});
+    CHECK(pm.confMinMethod == "lbfgs");
+    CHECK(pm.dockMinMethod == "adadelta");
+    for (const char* m : {"sd", "cg", "fire", "lbfgs", "adadelta"}) CHECK(parse({std::format("--dock9b_minMethod={}", m).c_str()}).dockMinMethod == m);
+    CHECK_THROWS_AS(parse({"--dock9b_minMethod=bfgs"}), od::Error);
+    CHECK_THROWS_AS(parse({"--conf9a_minMethod=FIRE"}), od::Error);
+  }
   CHECK(o.maxTransStep == doctest::Approx(0.5));
   CHECK(o.maxAngleStep == doctest::Approx(10));
   CHECK(o.maxRound == 10);

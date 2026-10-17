@@ -99,6 +99,7 @@ struct Options {
   std::optional<double> sepaPosRange;  // default: sepaPosStep
   bool sepaSamplingTriple = true, sepaSamplingPair = true, sepaSamplingSingle = false;
   int maxOverlapAtomNum = 1;
+  std::string dockMinMethod = "lbfgs";
   int dockMinMaxStep = 1000;
   int dockMinConvSteps = 10;
   double dockMinDeltaE = 1e-3;
@@ -119,6 +120,7 @@ struct Options {
   FeParams fe;  // [od_0100]
   CsgmOpts stamCsgm;  // stam.csgmBuild, stam.growMaxRetry, ...
   CsgmOpts mobmCsgm;  // mobm.csgmBuild, mobm.growMaxRetry, ...
+  std::string confMinMethod = "fire";  // sd | cg | fire | lbfgs | adadelta
   int confMinMaxStep = 100;
   double confMinDeltaE = 10.0;
   double confMaxDihedralStep = 10.0;

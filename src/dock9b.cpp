@@ -626,7 +626,10 @@ MobmDocker::PoseEnergy MobmDocker::evaluateDouble(const Conf& c, const Pose& pos
 
 bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const {
   const std::size_t nt = c.anglesDeg.size();
-  const double sT = p_.scaleTrans, sR = p_.scaleRot, sA = p_.scaleTors;
+  // adadelta: AutoDock-GPU units (translation in grid spacings, angles in degrees).
+  const bool ada = p_.minimizer.method == MinMethod::Adadelta;
+  const double uT = ada ? field_.geom().spacing : 1.0, uA = ada ? kDeg : 1.0;
+  const double sT = p_.scaleTrans * uT, sR = p_.scaleRot * uA, sA = p_.scaleTors * uA;
   Quat q0 = start.q;
   // z = (t / sT, rotation vector / sR, torsions in rad / sA); the rotation is re-based after each step.
   std::vector<double> z(6 + nt);
@@ -638,7 +641,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
     std::vector<double> angles;  // float values, wrapped to (-180, 180]
     PoseEnergy pe;
   };
-  Point trial, accepted;
+  Point trial, best;
   trial.angles.resize(nt);
   bool started = false;
   std::vector<double> g;
@@ -654,7 +657,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
     trial.pe = evaluate(c, trial.pose, trial.angles, &g);
     if (trial.pe.outside > 0) return false;
     if (!started) {
-      accepted = trial;
+      best = trial;
       started = true;
     }
     e = trial.pe.objective();
@@ -662,7 +665,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
     for (std::size_t i = 0; i < g.size(); ++i) grad[i] = g[i] * (i < 3 ? sT : i < 6 ? sR : sA);
     return true;
   };
-  LbfgsParams lp = p_.lbfgs;
+  VecMinParams lp = p_.minimizer;
   const double maxA = p_.maxAngleStep * kDeg;
   lp.stepLimit = [&](std::span<const double> d) {
     double s = 1;
@@ -674,22 +677,22 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
       if (sA * std::abs(d[k]) > maxA) s = std::min(s, maxA / (sA * std::abs(d[k])));
     return s;
   };
-  // The accepted point is the last one evaluated (the line search stops at it).
-  lp.onAccept = [&](std::vector<double>& v) {
-    accepted = trial;
-    q0 = accepted.pose.q;
+  // An accepted point is the last one evaluated (a line search stops at it).
+  lp.onAccept = [&](std::vector<double>& v, bool isBest) {
+    if (isBest) best = trial;
+    q0 = trial.pose.q;
     v[3] = v[4] = v[5] = 0;
   };
-  const LbfgsResult r = minimizeLbfgs(f, z, lp);
+  const VecMinResult r = minimizeVec(f, z, lp);
   stats.steps += r.steps;
   stats.evaluations += r.evaluations;
   if (r.aborted) {
     ++stats.leftGrid;
     return false;
   }
-  const PoseEnergy& pe = accepted.pe;
-  out.pose = accepted.pose;
-  out.angles.assign(accepted.angles.begin(), accepted.angles.end());
+  const PoseEnergy& pe = best.pe;
+  out.pose = best.pose;
+  out.angles.assign(best.angles.begin(), best.angles.end());
   out.energy = static_cast<float>(pe.ranking());
   out.inter = static_cast<float>(pe.inter);
   out.interClash = static_cast<float>(pe.interClash);
