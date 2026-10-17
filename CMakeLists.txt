@@ -97,6 +97,7 @@ add_library(od_core STATIC
   src/write_struct.cpp
   src/orient.cpp
   src/dock9b.cpp
+  src/fft_dock.cpp
   src/dock9c.cpp
   src/symrmsd.cpp
   src/checkpoint.cpp
@@ -104,6 +105,7 @@ add_library(od_core STATIC
   ${OD_CCD_EMBED}
   ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_include_directories(od_core SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pocketfft)
 target_link_libraries(od_core PUBLIC od_gemmi od_tomlpp ${OD_RDKIT_LIBS} Eigen3::Eigen)
 if(OD_STATIC_DEPS)
   target_compile_options(od_core PUBLIC ${OpenMP_CXX_FLAGS})

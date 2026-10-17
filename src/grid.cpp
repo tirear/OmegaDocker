@@ -464,6 +464,13 @@ T StamField::energy(int m, T q, const Vec3T<T>& p, Vec3T<T>* grad) const {
   if (grad)
     for (int i = 0; i < 3; ++i) (*grad)[i] = a[i] + q * b[i] + aq * s[i];
   if (mode_ != GridMode::Flexres || moved_.empty()) return grid;
+  return static_cast<T>(grid + movedSum(m, q, p, grad));
+}
+
+template <class T>
+T StamField::movedSum(int m, T q, const Vec3T<T>& p, Vec3T<T>* grad) const {
+  using V = Vec3T<T>;
+  const T aq = std::abs(q);
   // Pair sum over the moved StaM atoms: the grid terms of spec 8.1 per atom (no clamp).
   const int nTypes = static_cast<int>(Ad4Type::Count);
   const T rMin = static_cast<T>(rMin_), half = static_cast<T>(halfSmooth_);
@@ -500,7 +507,45 @@ T StamField::energy(int m, T q, const Vec3T<T>& p, Vec3T<T>* grad) const {
                  });
   if (grad)
     for (int i = 0; i < 3; ++i) (*grad)[i] = static_cast<T>((*grad)[i] + gs[i]);
-  return static_cast<T>(grid + sum);
+  return static_cast<T>(sum);
+}
+
+std::vector<float> StamField::pointMap(int m) const {
+  const GridGeometry& g = grids_->geom;
+  const int nt = typeMapCount();
+  if (m < 0 || m > nt + 1) fail("pointMap: map {} out of range", m);
+  const std::span<const float> r = m < nt ? std::span<const float>(grids_->typeMaps[m])
+                                   : m == nt ? std::span<const float>(grids_->elecMap)
+                                             : std::span<const float>(grids_->desolvMap);
+  std::vector<float> out(r.begin(), r.end());
+  if (mode_ == GridMode::Delta) {
+    constexpr int B = kDeltaBlock;
+    const std::size_t bs = static_cast<std::size_t>(B) * B * B;
+    for (int k = 0; k < g.n[2]; ++k)
+      for (int j = 0; j < g.n[1]; ++j)
+        for (int i = 0; i < g.n[0]; ++i) {
+          const int b = block_[(static_cast<std::size_t>(k / B) * nb_[1] + j / B) * nb_[0] + i / B];
+          if (b >= 0)
+            out[g.index(i, j, k)] = data_[(static_cast<std::size_t>(b) * mapCount_ + m) * bs + ((k % B) * B + j % B) * B + i % B];
+        }
+  }
+  if (mode_ == GridMode::Flexres && !moved_.empty()) {
+#pragma omp parallel for schedule(static)
+    for (int k = 0; k < g.n[2]; ++k)
+      for (int j = 0; j < g.n[1]; ++j)
+        for (int i = 0; i < g.n[0]; ++i) {
+          const Vec3 p = g.point(i, j, k);
+          double v;
+          if (m < nt) {
+            v = movedSum<double>(m, 0.0, p, nullptr);
+          } else {
+            const double ep = movedSum<double>(0, 1.0, p, nullptr), en = movedSum<double>(0, -1.0, p, nullptr);
+            v = m == nt ? 0.5 * (ep - en) : 0.5 * (ep + en) - movedSum<double>(0, 0.0, p, nullptr);
+          }
+          out[g.index(i, j, k)] += static_cast<float>(v);
+        }
+  }
+  return out;
 }
 
 template <class T>

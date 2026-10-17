@@ -169,7 +169,15 @@ class StamField {
   template <class T>
   T distance(const Vec3T<T>& p, Vec3T<T>* grad) const;
 
+  int typeMapCount() const { return static_cast<int>(grids_->types.size()); }
+  // Values of map m at the grid points (m: type maps, then elec, desolv), the moved atoms
+  // of flexres included: E = typeMap + q * elec + |q| * desolv at every point (posm2_fft).
+  std::vector<float> pointMap(int m) const;
+
  private:
+  // flexres: pair sum over the moved StaM atoms; adds dE/dp to grad.
+  template <class T>
+  T movedSum(int m, T q, const Vec3T<T>& p, Vec3T<T>* grad) const;
   template <class T>
   T map(int m, const Vec3T<T>& p, Vec3T<T>* grad) const;  // m: type maps, then elec, desolv, distance
 

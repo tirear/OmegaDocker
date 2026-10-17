@@ -2890,6 +2890,124 @@ TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   for (std::size_t i = 0; i < s4.size(); ++i) CHECK(s4[i].energy == s1[i].energy);
 }
 
+TEST_CASE("dock9b: posm2_fft (2KJJ, 1L2Y)") {
+  CHECK(od::fftSize(1) == 1);
+  CHECK(od::fftSize(11) == 12);
+  CHECK(od::fftSize(97) == 98);
+  CHECK(od::fftSize(129) == 135);
+  DockFixture f(od::Posm::Posm2Fft);
+  const od::FftStam s = od::buildFftStam(f.field, 10.0);
+  const od::GridGeometry& g = s.geom;
+  for (int d = 0; d < 3; ++d) CHECK(s.pad[d] == od::fftSize(g.n[d]));
+  const int nt = f.field.typeMapCount();
+  // Clamped maps (spec 8.4.3) and the direct trilinear sum.
+  std::vector<std::vector<float>> cm(static_cast<std::size_t>(nt) + 2);
+  for (int m = 0; m < nt + 2; ++m) {
+    cm[m] = f.field.pointMap(m);
+    CHECK(cm[m] == (m < nt ? f.grids.typeMaps[m] : m == nt ? f.grids.elecMap : f.grids.desolvMap));
+    for (float& v : cm[m]) v = m == nt ? std::clamp(v, -10.0f, 10.0f) : std::min(v, 10.0f);
+  }
+  const od::MobmDocker dk(*f.x.mobSys, f.field, f.p, nullptr, &s);
+  const auto c = dk.conformation(f.x.mobSys->inputAngles());
+  const auto& mt = f.x.mobSys->typing(0);
+  std::vector<int> probeOf, mapOf;
+  std::vector<double> qOf;
+  for (std::size_t a = 0; a < mt.type.size(); ++a)
+    if (mt.type[a] != od::Ad4Type::Merged) {
+      probeOf.push_back(f.x.mobSys->coordOffset(0) + static_cast<int>(a));
+      mapOf.push_back(f.field.mapOf(mt.type[a]));
+      qOf.push_back(mt.charge[a]);
+    }
+  auto direct = [&](const od::Pose& pose, bool* inBox = nullptr) {
+    double e = 0;
+    const od::QuatF qf = od::toFloat(pose.q);
+    for (std::size_t a = 0; a < probeOf.size(); ++a) {
+      const od::Vec3f& y = c.coords[probeOf[a]];
+      const od::Vec3f r = od::rotate(qf, {y[0] - static_cast<float>(c.center[0]), y[1] - static_cast<float>(c.center[1]),
+                                          y[2] - static_cast<float>(c.center[2])});
+      const od::Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
+      for (int d = 0; d < 3; ++d)
+        if (inBox && (w[d] < f.p.boxCenter[d] - 0.5 * f.p.boxSize[d] + 0.01 || w[d] > f.p.boxCenter[d] + 0.5 * f.p.boxSize[d] - 0.01))
+          *inBox = false;
+      if (!g.inside(w)) return 1e30;
+      e += od::interpolate(g, cm[mapOf[a]], w) + qOf[a] * od::interpolate(g, cm[nt], w) +
+           std::abs(qOf[a]) * od::interpolate(g, cm[nt + 1], w);
+    }
+    return e;
+  };
+  REQUIRE(!c.fftPoses.empty());
+  CHECK(c.fftPoses.size() <= 72);
+  CHECK(dk.l1Count(c) == static_cast<long long>(c.fftPoses.size()));
+  double maxErr = 0;
+  for (std::size_t k = 0; k < c.fftPoses.size(); ++k) {
+    const od::Pose& pose = c.fftPoses[k];
+    CHECK(dk.l1Pose(c, 0, static_cast<long long>(k))->t == pose.t);
+    bool in = true;
+    const double e = direct(pose, &in);
+    CHECK(in);
+    maxErr = std::max(maxErr, std::abs(e - c.fftEnergy[k]));
+    CHECK(c.fftEnergy[k] == doctest::Approx(e).epsilon(1e-4).scale(50.0));
+    // On a grid point.
+    for (int d = 0; d < 3; ++d) {
+      const double u = (pose.t[d] - g.origin[d]) / g.spacing;
+      CHECK(std::abs(u - std::round(u)) < 1e-9);
+    }
+    // Lowest among the in-box neighbouring translations.
+    if (k % 6 == 0)
+      for (int dz = -2; dz <= 2; ++dz)
+        for (int dy = -2; dy <= 2; ++dy)
+          for (int dx = -2; dx <= 2; ++dx) {
+            od::Pose p2 = pose;
+            p2.t = {pose.t[0] + dx * g.spacing, pose.t[1] + dy * g.spacing, pose.t[2] + dz * g.spacing};
+            bool in2 = true;
+            const double e2 = direct(p2, &in2);
+            if (in2) CHECK(e2 >= e - 1e-2);
+          }
+  }
+  MESSAGE(std::format("posm2_fft: pad {}x{}x{}, kept {}, max |FFT - direct| {:.2e}, lowest {:.3f}", s.pad[0], s.pad[1],
+                      s.pad[2], c.fftPoses.size(), maxErr, *std::min_element(c.fftEnergy.begin(), c.fftEnergy.end())));
+  // fftTopPerRot 3: ascending per orientation, the first one as with 1.
+  od::Dock9bParams p3 = f.p;
+  p3.fftTopPerRot = 3;
+  const od::MobmDocker dk3(*f.x.mobSys, f.field, p3, nullptr, &s);
+  const auto c3 = dk3.conformation(f.x.mobSys->inputAngles());
+  REQUIRE(c3.fftPoses.size() == 3 * c.fftPoses.size());
+  for (std::size_t k = 0; k < c.fftPoses.size(); ++k) {
+    CHECK(c3.fftPoses[3 * k].t == c.fftPoses[k].t);
+    CHECK(c3.fftEnergy[3 * k] <= c3.fftEnergy[3 * k + 1]);
+    CHECK(c3.fftEnergy[3 * k + 1] <= c3.fftEnergy[3 * k + 2]);
+  }
+  // 9b of the pair.
+  std::vector<od::DockSample> out;
+  const auto st = dk.dockPair(f.x.mobSys->inputAngles(), 0, out);
+  CHECK(st.l1 == dk.l1Count(c));
+  CHECK(st.l1 == st.overlap + st.far + st.l2);
+  CHECK(static_cast<long long>(out.size()) == st.l2 - st.leftGrid);
+  // flexres: pointMap includes the moved atoms.
+  const double cap = std::max(f.p.maxNearDistance, f.p.clashDistance) + 0.75;
+  std::vector<char> mask(f.x.stam.size());
+  for (std::size_t a = 0; a < mask.size(); ++a) mask[a] = a % 3 == 0;
+  const od::GridAtoms fixedAtoms = od::subset(f.x.stam, mask, false);
+  const auto flex = od::StamField::flexres(std::make_shared<const od::EnergyGrids>(od::buildEnergyGrids(g, fixedAtoms, f.x.mobm.type, {})),
+                                           std::make_shared<const od::DistanceGrid>(od::buildDistanceGrid(g, fixedAtoms, cap)),
+                                           od::subset(f.x.stam, mask, true), {});
+  std::vector<std::vector<float>> fm;
+  for (int m = 0; m < nt + 2; ++m) fm.push_back(flex.pointMap(m));
+  std::mt19937 rng(5);
+  for (int r = 0; r < 300; ++r) {
+    const int i = 1 + static_cast<int>(rng() % (g.n[0] - 2)), j = 1 + static_cast<int>(rng() % (g.n[1] - 2)),
+              k = 1 + static_cast<int>(rng() % (g.n[2] - 2));
+    const od::Vec3 p = g.point(i, j, k);
+    const int m = r % nt;
+    const std::size_t idx = g.index(i, j, k);
+    for (double q : {-0.4, 0.0, 0.7}) {
+      const double want = flex.energy<double>(m, q, p, nullptr);
+      const double got = fm[m][idx] + q * fm[nt][idx] + std::abs(q) * fm[nt + 1][idx];
+      CHECK(got == doctest::Approx(want).epsilon(1e-4).scale(1.0));
+    }
+  }
+}
+
 TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   DockFixture f;
   const od::MobmDocker dk(*f.x.mobSys, f.field, f.p);

@@ -206,8 +206,9 @@ Quat kabschQuat(const std::array<Vec3, 3>& from, const std::array<Vec3, 3>& to, 
 }  // namespace
 
 MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p,
-                       const std::vector<StamSepa>* sepas)
-    : sys_(sys), field_(field), p_(p), sepas_(sepas) {
+                       const std::vector<StamSepa>* sepas, const FftStam* fft)
+    : sys_(sys), field_(field), p_(p), sepas_(sepas), fft_(fft) {
+  if (p.posm == Posm::Posm2Fft && !fft) fail("posm2_fft: the StaM spectra are missing");
   const Ad4Typing& t = sys.typing(0);
   const int off = sys.coordOffset(0);
   for (std::size_t a = 0; a < t.type.size(); ++a) {
@@ -240,6 +241,7 @@ long long MobmDocker::l1Count(const Conf& c) const {
     case Posm::Posm2: return c.hopfOffset.back();
     case Posm::Posm3: return c.sepaPoses();
     case Posm::Posm4: return c.sepaPoses() + p_.posm1SampleNum;
+    case Posm::Posm2Fft: return static_cast<long long>(c.fftPoses.size());
   }
   return 0;
 }
@@ -285,6 +287,7 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
     for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfRange[j] = posRange(c, hopf_[j]);
     for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfOffset[j + 1] = c.hopfOffset[j] + c.hopfRange[j].count();
   }
+  if (p_.posm == Posm::Posm2Fft) fftPoses(c);
   if (p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4) {
     // MobM side: probe atoms with |q| >= sepaChargeThreshold (spec 8.4.4).
     std::vector<int> ms;
@@ -339,6 +342,68 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
     c.triplePoses = static_cast<long long>(c.triples.size()) * nt;
   }
   return c;
+}
+
+// posm2_fft (spec 8.4.3): per Hopf orientation, the fftTopPerRot lowest-energy grid translations
+// keeping every probe atom kPosMargin inside the box.
+void MobmDocker::fftPoses(Conf& c) const {
+  const FftStam& s = *fft_;
+  const GridGeometry& g = s.geom;
+  const std::size_t no = hopf_.size(), top = static_cast<std::size_t>(std::max(1, p_.fftTopPerRot));
+  std::vector<std::vector<std::pair<float, std::size_t>>> kept(no);
+  const Vec3f cf = castVec<float>(c.center);
+#pragma omp parallel
+  {
+    FftWork w;
+    std::vector<Vec3> f(probe_.size());
+#pragma omp for schedule(dynamic, 1)
+    for (std::size_t o = 0; o < no; ++o) {
+      const QuatF qf = toFloat(hopf_[o]);
+      std::array<int, 3> lo{}, hi{};
+      bool empty = false;
+      for (int d = 0; d < 3; ++d) {
+        float rlo = 1e30f, rhi = -1e30f;
+        for (std::size_t a = 0; a < probe_.size(); ++a) {
+          const Vec3f& y = c.coords[probe_[a]];
+          const float r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]})[d];
+          f[a][d] = r / g.spacing;
+          rlo = std::min(rlo, r);
+          rhi = std::max(rhi, r);
+        }
+        // Centre t = origin + T spacing with boxMin + margin <= t + rlo and t + rhi <= boxMax - margin.
+        const double bmin = p_.boxCenter[d] - 0.5 * p_.boxSize[d] + kPosMargin - g.origin[d];
+        const double bmax = p_.boxCenter[d] + 0.5 * p_.boxSize[d] - kPosMargin - g.origin[d];
+        lo[d] = std::max(0, static_cast<int>(std::ceil((bmin - rlo) / g.spacing - 1e-9)));
+        hi[d] = std::min(g.n[d] - 1, static_cast<int>(std::floor((bmax - rhi) / g.spacing + 1e-9)));
+        if (lo[d] > hi[d]) empty = true;
+      }
+      if (empty) continue;
+      fftCorrelate(s, f, map_, charge_, w);
+      auto& best = kept[o];  // max-heap on (energy, index)
+      for (int k = lo[2]; k <= hi[2]; ++k)
+        for (int j = lo[1]; j <= hi[1]; ++j)
+          for (int i = lo[0]; i <= hi[0]; ++i) {
+            const std::size_t idx = s.index(i, j, k);
+            const std::pair<float, std::size_t> e{w.energy[idx], idx};
+            if (best.size() < top) {
+              best.push_back(e);
+              std::push_heap(best.begin(), best.end());
+            } else if (e < best.front()) {
+              std::pop_heap(best.begin(), best.end());
+              best.back() = e;
+              std::push_heap(best.begin(), best.end());
+            }
+          }
+      std::sort_heap(best.begin(), best.end());
+    }
+  }
+  for (std::size_t o = 0; o < no; ++o)
+    for (const auto& [e, idx] : kept[o]) {
+      const int i = static_cast<int>(idx % s.pad[0]), j = static_cast<int>(idx / s.pad[0] % s.pad[1]),
+                k = static_cast<int>(idx / s.pad[0] / s.pad[1]);
+      c.fftPoses.push_back({g.point(i, j, k), hopf_[o]});
+      c.fftEnergy.push_back(e);
+    }
 }
 
 bool MobmDocker::fitsBox(const Conf& c, const Pose& pose) const {
@@ -416,6 +481,7 @@ std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
 }
 
 std::optional<Pose> MobmDocker::l1Pose(const Conf& conf, std::uint64_t stream, long long k) const {
+  if (p_.posm == Posm::Posm2Fft) return conf.fftPoses[static_cast<std::size_t>(k)];
   if (p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4) {
     const long long n3 = conf.sepaPoses();
     if (k < n3) return posm3Pose(conf, k);

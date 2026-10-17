@@ -88,6 +88,8 @@ struct Options {
   std::string posm;  // posm1 | posm2 | posm3 | posm4
   double posStep = 1.0;
   long long posm1SampleNum = 1000;
+  double fftClamp = 10.0;        // posm2_fft
+  long long fftTopPerRot = 1;
   double sepaShellMin = 2.5, sepaShellMax = 6.0;
   double sepaPotPercentile = 5.0;
   std::optional<double> sepaPotThreshold;

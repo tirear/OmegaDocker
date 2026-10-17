@@ -305,12 +305,11 @@ const std::vector<Param>& params() {
     t.push_back(real("conf9a.maxDihedralStep", "<deg>", "10", "9a minimization: largest change of one torsion per step",
                      OD_ACC(confMaxDihedralStep)));
 
-    t.push_back({"dock9b.posm", Type::Str, "posm1|posm2|posm3|posm4", "required", "9b: position and orientation sampling method",
+    t.push_back({"dock9b.posm", Type::Str, "posm1|posm2|posm2_fft|posm3|posm4", "required", "9b: position and orientation sampling method",
                  [](Options& o, const Tokens& v) {
                    const std::string& s = one(v);
-                   if (s == "posm2_fft") fail("{} is not implemented yet", s);
-                   if (s != "posm1" && s != "posm2" && s != "posm3" && s != "posm4")
-                     fail("expected posm1, posm2, posm3 or posm4 but got '{}'", s);
+                   if (s != "posm1" && s != "posm2" && s != "posm2_fft" && s != "posm3" && s != "posm4")
+                     fail("expected posm1, posm2, posm2_fft, posm3 or posm4 but got '{}'", s);
                    o.posm = s;
                  },
                  [](const Options& o) -> std::optional<Tokens> {
@@ -320,6 +319,10 @@ const std::vector<Param>& params() {
     t.push_back(real("dock9b.posStep", "<dist>", "1", "9b: spacing of the sampled positions of the MobM heavy-atom centre (Å)",
                      OD_ACC(posStep)));
     t.push_back(integer("dock9b.posm1SampleNum", "<n>", "1000", "9b, posm1 and posm4: random L1poss per conformation pair", OD_ACC(posm1SampleNum)));
+    t.push_back(real("dock9b.fftClamp", "<energy>", "10",
+                     "9b, posm2_fft: map values are clamped to this before the FFT (kcal/mol; elec map to +-this)", OD_ACC(fftClamp)));
+    t.push_back(integer("dock9b.fftTopPerRot", "<n>", "1", "9b, posm2_fft: lowest-energy translations kept per orientation",
+                        OD_ACC(fftTopPerRot)));
     t.push_back(real("dock9b.sepaShellMin", "<dist>", "2.5", "9b, posm3: StaM regions use grid points at least this far from the nearest StaM heavy atom (Å)",
                      OD_ACC(sepaShellMin)));
     t.push_back(real("dock9b.sepaShellMax", "<dist>", "6", "9b, posm3: ... and at most this far (Å)", OD_ACC(sepaShellMax)));
@@ -728,6 +731,8 @@ void validateOptions(const Options& o) {
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");
   check(o.posStep > 0, "dock9b.posStep", "> 0");
   check(o.posm1SampleNum >= 1, "dock9b.posm1SampleNum", ">= 1");
+  check(o.fftClamp > 0, "dock9b.fftClamp", "> 0");
+  check(o.fftTopPerRot >= 1 && o.fftTopPerRot <= 1000000, "dock9b.fftTopPerRot", "within [1, 1000000]");
   check(o.sepaShellMin >= 0, "dock9b.sepaShellMin", ">= 0");
   check(o.sepaShellMax > o.sepaShellMin, "dock9b.sepaShellMax", "greater than dock9b.sepaShellMin");
   check(o.sepaPotPercentile > 0 && o.sepaPotPercentile <= 100, "dock9b.sepaPotPercentile", "in (0, 100]");

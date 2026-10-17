@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.52 |
+| 文件版本 | 1.53 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -976,6 +976,27 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - `flexres` / `delta` 模式下，FFT 使用該 StaM 構型的完整網格（臨時組合）。
 
+**CPU 參考版的做法（1.53）：**
+- StaM 網格：取該 StaM 構型在各格點上的值（`flexres` 加上可動原子的成對加總，`delta` 取各區塊實際的值）。上限：原子類型網格與去溶劑化網格 ≤ `fftClamp`；靜電網格限制在 ±`fftClamp`（電荷有正負，只設上限會使負電荷的能量沒有下限）。
+- FFT 大小：每軸補到 ≥ 網格點數、只含 2、3、5、7 因數的最小值（15.2.1），補上的格點為 0。不另外補 MobM 半徑：只讀取所有探針原子都在盒子內的平移，這些平移的循環相關不會繞回，結果與直接加總相同。
+- MobM：探針原子（含極性氫）以三線性權重分配到格點；類型網格每個 MobM 用到的類型各 1 個通道，靜電通道權重 q，去溶劑化通道權重 |q|。各通道正向 FFT 後與 StaM 頻譜的共軛乘積累加，最後 1 次 IFFT。平移 T 的能量即為「重原子中心放在格點 T、各探針原子三線性內插」的格點能量（使用限制後的網格），與直接加總的差 < 10⁻⁴ kcal/mol（單元測試）。
+- 平移：重原子中心放在格點上，且所有探針原子在盒子內 0.01 Å（同 8.4 的 `m`）。沒有合法平移的定向略過。
+- 保留：每個定向能量最低的 `fftTopPerRot` 個平移（同能量時格點索引小者優先），依定向順序、定向內能量由低到高排列，作為 L1poss；之後照常 8.5 篩選與最佳化（最佳化使用未限制的網格）。
+- StaM 頻譜每個 StaM 構型計算一次；StaM 沒有可轉動兩面角且非 `flexres` 時跨輪次重複使用。
+- 平行化：各定向平行計算（OpenMP），每個 FFT 單執行緒。結果與執行緒數無關。
+
+**實測（1.53）**：2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å（81³ 個格點，FFT 81³）、16 個構型配對、`maxRound` 1、`seed` 3、`fftTopPerRot` 1，其餘為預設值；AMD Ryzen 7 9700X（8 核 16 執行緒）。
+
+| `rotStep` | 定向數 | 執行緒 | L1poss | 9b 時間 | 總時間 | 最大 RSS | `E_top_max` | 第 1 名 |
+|---|---|---|---|---|---|---|---|---|
+| 15° | 4,608 | 16 | 7.37×10⁴ | 236 s | 277 s | 0.28 GB | −7.191 | −7.758 |
+| 15° | 4,608 | 8 | 7.37×10⁴ | 170 s | 218 s | 0.20 GB | −7.191 | −7.758 |
+| 7.5°（預設） | 36,864 | 16 | 5.90×10⁵ | 2019 s | 2061 s | 0.32 GB | −7.327 | −7.823 |
+
+- 所有 L1poss 都通過 8.5 篩選（FFT 能量最低的平移不會有重疊或離 StaM 太遠）；最佳化中約 7.6% 移出網格。
+- 9b 時間幾乎都花在 FFT：每個定向 8 個 81³ FFT（5 個類型通道 + 靜電 + 去溶劑化 + 1 次 IFFT），單執行緒約 9 ms。每個執行緒的工作記憶體約 6 MB，16 個執行緒超過 L3 快取（32 MB），受記憶體頻寬限制，比 8 個執行緒慢。CPU 版建議 `OMP_NUM_THREADS` 設為實體核心數；GPU 版（cuFFT）另行測試。
+- 對照（同條件，8.4.4.1）：posm3 預設（三點 + 配對，2 Å）9b 78 s、`E_top_max` −7.008、第 1 名 −8.113；posm1 1×10⁵ 個 9b 22 s、`E_top_max` −6.998、第 1 名 −8.037。
+
 #### 8.4.4 posm3：最低靜電位能配對法
 
 **建立 sepas：**
@@ -1529,12 +1550,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
 | `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
-| `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4（`posm1`、`posm2`、`posm3`、`posm4`；`posm2_fft` 未實作） |
+| `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4（`posm1`、`posm2`、`posm2_fft`、`posm3`、`posm4`） |
 | `dock9b.posStep` | `--dock9b_posStep` | 1 Å | 8.4 |
 | `dock9b.posm1SampleNum` | `--dock9b_posm1SampleNum` | 1000 | 8.4.1、8.4.5 |
 | `dock9b.rotStep` | `--dock9b_rotStep` | 7.5° | 8.3、8.4.4（繞配對軸的角度間距） |
-| `dock9b.fftClamp`（未實作） | `--dock9b_fftClamp` | 10 kcal/mol | 8.4.3 |
-| `dock9b.fftTopPerRot`（未實作） | `--dock9b_fftTopPerRot` | 1 | 8.4.3 |
+| `dock9b.fftClamp` | `--dock9b_fftClamp` | 10 kcal/mol | 8.4.3（> 0；靜電網格限制在 ±此值） |
+| `dock9b.fftTopPerRot` | `--dock9b_fftTopPerRot` | 1 | 8.4.3（1–10⁶） |
 | `dock9b.sepaShellMin`、`dock9b.sepaShellMax` | `--dock9b_sepaShellMin` 等 | 2.5 Å、6 Å | 8.4.4 |
 | `dock9b.sepaPotPercentile` | `--dock9b_sepaPotPercentile` | 5% | 8.4.4 |
 | `dock9b.sepaPotThreshold` | `--dock9b_sepaPotThreshold` | 無（指定時取代百分位） | 8.4.4 |
@@ -1897,3 +1918,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.50 | 2026-10-17 | `dock9b.sepaPosRange` 預設改為 1 Å；新增 `dock9b.sepaSampling`（`pair`／`pairSingle`，預設 `pairSingle`），posm3 與 posm4 可選擇只做配對取樣；單點取樣的定向數不縮減；8.4.4.1 新增只做配對取樣與 `sepaPosRange` 0／1／2／4 Å 的測試結果 |
 | 1.51 | 2026-10-17 | 新增 `sepaSampling = "triple"`（三點取樣：三邊距離與正負號、共線排除、Kabsch 對齊與 RMSD 門檻、由配對清單延伸）；8.4.4.1 新增平移間距 1／1.5／2／4 Å（各 27 個平移）與三點取樣的測試結果 |
 | 1.52 | 2026-10-17 | 新增 `dock9b.sepaPosStep`（預設 2 Å），posm3 平移不再使用 `posStep`；`sepaPosRange` 預設等於 `sepaPosStep`，必須 ≥ `sepaPosStep`；`dock9b.sepaSampling` 改為 `sepaSamplingTriple`／`sepaSamplingPair`／`sepaSamplingSingle`（預設 true／true／false）；8.4.4.1 新增新預設的測試結果 |
+| 1.53 | 2026-10-17 | 實作 posm2_fft（CPU 參考版，pocketfft）：StaM 各格點值與上限（靜電 ±`fftClamp`）、FFT 大小（只補到 2、3、5、7 因數，不補 MobM 半徑）、MobM 三線性分配與通道、合法平移與保留順序、頻譜快取、平行化（8.4.3）；新增實測結果；`dock9b.fftClamp`、`dock9b.fftTopPerRot` 改為已實作 |

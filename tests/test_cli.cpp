@@ -81,7 +81,23 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(parse({"--outPrefix"}), od::Error);
   CHECK_THROWS_AS(parse({"--help=1"}), od::Error);
   CHECK_THROWS_AS(parse({"--dock9b_posm=posm9"}), od::Error);
-  CHECK_THROWS_AS(parse({"--dock9b_posm=posm2_fft"}), od::Error);
+  {
+    const auto pf = parse({"--dock9b_posm=posm2_fft"});
+    CHECK(pf.posm == "posm2_fft");
+    CHECK(pf.fftClamp == 10.0);
+    CHECK(pf.fftTopPerRot == 1);
+    const auto pg = parse({"--dock9b_posm=posm2_fft", "--dock9b_fftClamp=5", "--dock9b_fftTopPerRot=4"});
+    CHECK(pg.fftClamp == 5.0);
+    CHECK(pg.fftTopPerRot == 4);
+    auto v = [](std::vector<const char*> a) {
+      a.insert(a.end(), {"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20",
+                         "--outPrefix=out", "--mobm_dockingConfSampleNum=8"});
+      od::validateOptions(parse(a));
+    };
+    CHECK_NOTHROW(v({"--dock9b_posm=posm2_fft"}));
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm2_fft", "--dock9b_fftClamp=0"}), od::Error);
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm2_fft", "--dock9b_fftTopPerRot=0"}), od::Error);
+  }
   auto p3 = parse({"--dock9b_posm=posm3", "--dock9b_sepaPotThreshold=2.5", "--dock9b_sepaPosRange=2"});
   CHECK(p3.posm == "posm3");
   CHECK(p3.sepaPotThreshold == 2.5);

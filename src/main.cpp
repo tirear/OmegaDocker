@@ -387,12 +387,14 @@ class ConfSet {
 od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   od::Dock9bParams dp;
   dp.posm = opt.posm == "posm2"   ? od::Posm::Posm2
+            : opt.posm == "posm2_fft" ? od::Posm::Posm2Fft
             : opt.posm == "posm3" ? od::Posm::Posm3
             : opt.posm == "posm4" ? od::Posm::Posm4
                                   : od::Posm::Posm1;
   dp.posStep = opt.posStep;
   dp.hopfLevel = od::hopfLevelForStep(opt.rotStep);
   dp.posm1SampleNum = opt.posm1SampleNum;
+  dp.fftTopPerRot = static_cast<int>(opt.fftTopPerRot);
   dp.sepaShellMin = opt.sepaShellMin;
   dp.sepaShellMax = opt.sepaShellMax;
   dp.sepaPotPercentile = opt.sepaPotPercentile;
@@ -891,7 +893,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             od::hopfSpacingDeg(level), opt.rotStep));
   }
   const od::Dock9bParams dp = dockParams(opt, seed);
-  const bool deterministic = dp.posm == od::Posm::Posm2 || dp.posm == od::Posm::Posm3;
+  const bool deterministic = dp.posm == od::Posm::Posm2 || dp.posm == od::Posm::Posm2Fft || dp.posm == od::Posm::Posm3;
+  const bool usesFft = dp.posm == od::Posm::Posm2Fft;
   const bool usesSepas = dp.posm == od::Posm::Posm3 || dp.posm == od::Posm::Posm4;
 
   // grid.mode (spec 8.1); auto: delta when no StaM backbone torsion is rotatable.
@@ -914,6 +917,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   // Grids built once and kept across rounds: full without StaM torsions (input conformation),
   // flexres (fixed atoms of the input conformation), delta (reference: input conformation).
   std::shared_ptr<const od::EnergyGrids> fixedGrids;
+  std::shared_ptr<const od::FftStam> fixedFft;  // posm2_fft, StaM without torsions
   std::shared_ptr<const od::DistanceGrid> fixedDist;
 
   std::vector<MobState> ms(mobSets.size());
@@ -1011,7 +1015,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       }
       selectSec[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
     };
-    double gridSec = 0;
+    double gridSec = 0, fftSec = 0;
     bool gridsReused = false;
     const auto d0 = std::chrono::steady_clock::now();
     long long movedSum = 0, blockSum = 0, blockTotal = 0;
@@ -1064,11 +1068,22 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         sepaPos += pos;
         sepaCutSum += si.potCut;
       }
+      std::shared_ptr<const od::FftStam> fft;
+      if (usesFft) {
+        const auto f0 = std::chrono::steady_clock::now();
+        if (!stamSet.movable() && gridMode != od::GridMode::Flexres && fixedFft) {
+          fft = fixedFft;
+        } else {
+          fft = std::make_shared<const od::FftStam>(od::buildFftStam(field, opt.fftClamp));
+          if (!stamSet.movable() && gridMode != od::GridMode::Flexres) fixedFft = fft;
+        }
+        fftSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count();
+      }
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
       for (std::size_t i = 0; i < ms.size(); ++i) {
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
         const ConfSet& mob = *mobSets[i];
-        const od::MobmDocker dk(mob.sys(), field, dp, &sepas);
+        const od::MobmDocker dk(mob.sys(), field, dp, &sepas, fft.get());
         for (int mid : ms[i].mobDcss) {
           const std::uint64_t key = pairKey(sid, mid);
           if (deterministic && ms[i].pairLowest.contains(key)) {
@@ -1113,6 +1128,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         what += std::format("; moved atoms per conformation {:.1f}", static_cast<double>(movedSum) / static_cast<double>(stamIds.size()));
       if (blockTotal > 0)
         what += std::format("; delta blocks stored {} of {} ({:.1f}%)", blockSum, blockTotal, 100.0 * static_cast<double>(blockSum) / static_cast<double>(blockTotal));
+      if (usesFft) what += std::format("; posm2_fft StaM spectra {:.2f} s", fftSec);
       od::logInfo(what);
       if (usesSepas && !stamIds.empty()) {
         const double k = static_cast<double>(stamIds.size());

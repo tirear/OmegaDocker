@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "energy.hpp"
+#include "fft_dock.hpp"
 #include "grid.hpp"
 #include "minimize.hpp"
 #include "orient.hpp"
@@ -22,12 +23,13 @@ namespace od {
 // per-pair terms are single precision; sums, L-BFGS and pose updates are double
 // (spec 12.1).
 
-enum class Posm { Posm1, Posm2, Posm3, Posm4 };
+enum class Posm { Posm1, Posm2, Posm3, Posm4, Posm2Fft };
 
 struct Dock9bParams {
   Posm posm = Posm::Posm1;
   double posStep = 1.0;          // Å
-  int hopfLevel = 3;             // posm2 orientations (rotStep)
+  int hopfLevel = 3;             // posm2, posm2_fft orientations (rotStep)
+  int fftTopPerRot = 1;          // posm2_fft (spec 8.4.3)
   long long posm1SampleNum = 1000;
   // posm3 (spec 8.4.4)
   double sepaShellMin = 2.5, sepaShellMax = 6.0;  // Å
@@ -107,9 +109,9 @@ struct Dock9bStats {
 class MobmDocker {
  public:
   // sys: energy system of the single MobM (parts = {mob}); field: the StaM conformation (spec 8.1, 8.2);
-  // sepas: the regions of the StaM conformation (posm3, posm4).
+  // sepas: the regions of the StaM conformation (posm3, posm4); fft: its spectra (posm2_fft).
   MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p,
-             const std::vector<StamSepa>* sepas = nullptr);
+             const std::vector<StamSepa>* sepas = nullptr, const FftStam* fft = nullptr);
 
   // Lattice indices of the positions keeping every probe atom kPosMargin inside
   // the box for one orientation (spec 8.4); empty when lo > hi on an axis.
@@ -142,6 +144,9 @@ class MobmDocker {
     std::vector<TripleMatch> triples;
     long long pairPoses = 0, singlePoses = 0, triplePoses = 0;
     long long sepaPoses() const { return pairPoses + singlePoses + triplePoses; }
+    // posm2_fft: the kept translations, orientation-major, ascending FFT energy per orientation.
+    std::vector<Pose> fftPoses;
+    std::vector<float> fftEnergy;  // FFT (clamped-map) grid energy of each kept pose
   };
   Conf conformation(std::span<const double> anglesDeg) const;
 
@@ -197,6 +202,8 @@ class MobmDocker {
   std::array<int, 3> posN_{};  // positions per axis
   std::vector<Quat> hopf_;
   const std::vector<StamSepa>* sepas_ = nullptr;
+  const FftStam* fft_ = nullptr;
+  void fftPoses(Conf& c) const;
   int axisAngles_ = 0;  // posm3: rotations about the pair axis
   int transN_ = 0;      // posm3: translations per axis
   std::optional<Pose> posm3Pose(const Conf& c, long long k) const;
