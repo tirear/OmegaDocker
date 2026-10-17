@@ -335,8 +335,16 @@ const std::vector<Param>& params() {
     t.push_back(real("dock9b.sepaChargeThreshold", "<q>", "0.3", "9b, posm3: MobM atoms with |charge| >= this (e)", OD_ACC(sepaChargeThreshold)));
     t.push_back(real("dock9b.sepaDistTolerance", "<dist>", "1", "9b, posm3: pair distances of StaM and MobM may differ by this much (Å)",
                      OD_ACC(sepaDistTolerance)));
-    t.push_back(real("dock9b.sepaPosRange", "<dist>", "4", "9b, posm3: translations within +-this around the anchor (Å, step dock9b.posStep)",
+    t.push_back(real("dock9b.sepaPosRange", "<dist>", "1", "9b, posm3: translations within +-this around the anchor (Å, step dock9b.posStep)",
                      OD_ACC(sepaPosRange)));
+    t.push_back({"dock9b.sepaSampling", Type::Str, "pair|pairSingle", "pairSingle",
+                 "9b, posm3 and posm4: pair alignments only, or pair alignments followed by single placements",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "pair" && s != "pairSingle") fail("expected pair or pairSingle but got '{}'", s);
+                   o.sepaSampling = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.sepaSampling}; }});
     t.push_back(real("dock9b.rotStep", "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
                      OD_ACC(rotStep)));
     t.push_back(real("dock9b.maxNearDistance", "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",

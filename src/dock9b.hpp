@@ -35,7 +35,8 @@ struct Dock9bParams {
   std::optional<double> sepaPotThreshold;         // kcal/mol/e; replaces the percentile
   double sepaChargeThreshold = 0.3;               // e
   double sepaDistTolerance = 1.0;                 // Å
-  double sepaPosRange = 4.0;                      // Å
+  double sepaPosRange = 1.0;                      // Å
+  bool sepaSingle = true;                         // posm3: single placements after the pair alignments
   double rotStep = 7.5;                           // degrees, posm3 rotation about the pair axis
   Vec3 boxCenter{}, boxSize{};
   int maxOverlapAtomNum = 1;

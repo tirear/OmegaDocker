@@ -2714,6 +2714,9 @@ struct DockFixture {
 
 TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   DockFixture f(od::Posm::Posm3);
+  CHECK(f.p.sepaPosRange == 1.0);
+  CHECK(f.p.sepaSingle);
+  f.p.sepaPosRange = 4.0;
   od::StamSepaInfo info;
   const auto sepas = od::stamSepas(f.field, f.p, &info);
   const auto sepas26 = od::stamSepas(f.field, f.p, nullptr, 26);
@@ -2784,6 +2787,25 @@ TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   }
   CHECK(checkedPairs > 0);
   CHECK(checkedSingles > 0);
+  // Pair alignments only.
+  od::Dock9bParams pp = f.p;
+  pp.sepaSingle = false;
+  const od::MobmDocker dkp(*f.x.mobSys, f.field, pp, &sepas);
+  const auto cp = dkp.conformation(f.x.mobSys->inputAngles());
+  CHECK(cp.singles.empty());
+  CHECK(cp.pairs.size() == c.pairs.size());
+  CHECK(dkp.l1Count(cp) == c.pairPoses);
+  for (long long k = 0; k < c.pairPoses; k += c.pairPoses / 50 + 1) {
+    const auto a = dkp.l1Pose(cp, 0, k), b = dk.l1Pose(c, 0, k);
+    REQUIRE(a.has_value() == b.has_value());
+    if (a) CHECK(a->t == b->t);
+  }
+  // Default range 1 Å: 27 translations.
+  od::Dock9bParams p1 = f.p;
+  p1.sepaPosRange = 1.0;
+  const od::MobmDocker dkr(*f.x.mobSys, f.field, p1, &sepas);
+  const auto cr = dkr.conformation(f.x.mobSys->inputAngles());
+  CHECK(cr.pairPoses == static_cast<long long>(cr.pairs.size()) * 48 * 27);
   // posm4 = posm3 followed by posm1.
   od::Dock9bParams p4 = f.p;
   p4.posm = od::Posm::Posm4;

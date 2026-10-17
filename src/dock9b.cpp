@@ -270,9 +270,10 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
             c.pairs.push_back({static_cast<int>(i), static_cast<int>(j), a, b});
           }
       }
-    for (std::size_t i = 0; i < ss.size(); ++i)
-      for (int a : ms)
-        if (sgn(a) == -ss[i].sign) c.singles.push_back({static_cast<int>(i), a});
+    if (p_.sepaSingle)
+      for (std::size_t i = 0; i < ss.size(); ++i)
+        for (int a : ms)
+          if (sgn(a) == -ss[i].sign) c.singles.push_back({static_cast<int>(i), a});
     const long long nt = static_cast<long long>(transN_) * transN_ * transN_;
     c.pairPoses = static_cast<long long>(c.pairs.size()) * axisAngles_ * nt;
     c.singlePoses = static_cast<long long>(c.singles.size()) * static_cast<long long>(hopf_.size()) * nt;

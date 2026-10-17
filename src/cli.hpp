@@ -93,7 +93,8 @@ struct Options {
   std::optional<double> sepaPotThreshold;
   double sepaChargeThreshold = 0.3;
   double sepaDistTolerance = 1.0;
-  double sepaPosRange = 4.0;
+  double sepaPosRange = 1.0;
+  std::string sepaSampling = "pairSingle";  // pair | pairSingle
   int maxOverlapAtomNum = 1;
   int dockMinMaxStep = 1000;
   int dockMinConvSteps = 10;

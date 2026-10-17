@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.49 |
+| 文件版本 | 1.50 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -989,13 +989,20 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    - `|d_StaM − d_MobM| ≤ sepaDistTolerance`（預設 1.0 Å）。
    - 正負號互補：sign(m1) = −sign(s1) 且 sign(m2) = −sign(s2)。
 2. 對齊：MobM 的 m1→m2 軸對齊 s1→s2 軸，兩軸中點重合。
-3. 平移：中點周圍 ±`sepaPosRange`（預設 4 Å），間距 `posStep`（預設 1 Å）均勻取點。
+3. 平移：中點周圍 ±`sepaPosRange`（預設 1 Å），間距 `posStep`（預設 1 Å）均勻取點。其餘偏差交給 8.5 篩選與最佳化。
 4. 定向：繞配對軸每 `rotStep`（預設 7.5°）取一個角度。
 
-**單點取樣：**
+**單點取樣**（`sepaSampling = "pairSingle"` 時才做）：
 1. StaM 區域 s 與 MobM 原子 m 符號互補。
 2. 平移：使 m 落在 s 周圍 ±`sepaPosRange`、間距 `posStep` 的格點上。
 3. 定向：以 m 為中心，Hopf 格點（`rotStep`）。
+
+**取樣方式 `dock9b.sepaSampling`**（posm3 與 posm4 都適用）：
+
+| 值 | 內容 |
+|---|---|
+| `"pairSingle"`（預設） | 配對取樣 + 單點取樣 |
+| `"pair"` | 只做配對取樣 |
 
 - 以百分位為預設的原因：不同 StaM 的靜電勢大小差異很大，固定門檻在某些系統會選不到區域、在另一些系統會選到太多。實測後可再改為固定門檻。
 
@@ -1006,15 +1013,15 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - MobM：所有探針原子（含極性氫）中 |q| ≥ `sepaChargeThreshold` 者；位置與距離取自各 MobM 構型樣本的座標。
 - 配對：StaM 區域 i < j；MobM 原子取有序對 (a, b)，a ≠ b，所以 (m1, m2) 與 (m2, m1) 兩種方向都會檢查。
 - 對齊：先以最小旋轉將 m1→m2 的方向轉到 s1→s2，再繞 s1→s2 軸轉 `k × 360° / n`，`n = round(360 / rotStep)`（預設 48）。
-- 平移：每軸 `2 × floor(sepaPosRange / posStep) + 1` 個值（預設 9，共 729 個），以錨點為中心（配對：兩軸中點；單點：區域代表點）。
+- 平移：每軸 `2 × floor(sepaPosRange / posStep) + 1` 個值（預設 3，共 27 個），以錨點為中心（配對：兩軸中點；單點：區域代表點）。
 - 單點取樣的定向：Hopf 格點（`rotStep`，預設第 3 層，36,864 個）。
-- 樣本順序：先配對取樣（配對、繞軸角度、平移由外到內），再單點取樣（區域與原子、定向、平移）。
+- 樣本順序：先配對取樣（配對、繞軸角度、平移由外到內），再單點取樣（區域與原子、定向、平移）；`sepaSampling = "pair"` 時沒有單點取樣的樣本。
 - 盒子：所有探針原子須在對接範圍內 0.01 Å（同 8.4 的 `m`），否則捨棄（計入 outside box）。
 - posm3 為決定性方法（不用亂數）。
 
 #### 8.4.4.1 posm3 的測試結果（CPU 參考版）
 
-- 條件：2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å、`{stam,mobm}.dockingConfSampleNum` 4（16 個構型配對）、`maxRound` 1、`seed` 3，其餘為預設值；AMD Ryzen 7 9700X，16 執行緒，188 GB 記憶體。
+- 條件：2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å、`{stam,mobm}.dockingConfSampleNum` 4（16 個構型配對）、`maxRound` 1、`seed` 3，其餘為 1.48 的預設值（`sepaPosRange` 4 Å、`sepaSampling` `pairSingle`）；AMD Ryzen 7 9700X，16 執行緒，188 GB 記憶體。
 - 每個 StaM 構型約 86 個區域（約 19 萬個殼層格點中選出約 9,400 個）。單元測試（2KJJ，48 Å 的盒子）中，6 個鄰居得 94 個區域，26 個鄰居（共用面、邊或角都算相連）只有 24 個。
 - 第 1 個構型配對的數量：
 
@@ -1041,6 +1048,21 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - 參考：同條件下 posm1 跑完整輪（16 個構型配對）：`posm1SampleNum` 1000 時 9b 0.25 s，最低 −8.214，`E_top_max` −6.421；1×10⁵ 時 9b 22 s，最低 −9.559，`E_top_max` −6.998。
 - 參考（縮小取樣，非預設）：`sepaPosRange` 0、`rotStep` 30°（繞軸 12 個角度、Hopf 576 個定向、平移 1 個），2 輪共 56 s，`E_top_max` −7.052。
+
+**只做配對取樣（`sepaSampling = "pair"`）與 `sepaPosRange` 的影響**（1.50）：條件同上，跑完整輪（16 個構型配對）。「第 1 名」為 `rank_9b.tsv` 第 1 名的能量（kcal/mol），與上表 9b 樣本的最低能量不能直接比較（後者未經 9c／9d）。
+
+| 方法 | `sepaPosRange` | L1poss | L2poss | 9b 時間 | 總時間 | 最大 RSS | `E_top_max` | 第 1 名 |
+|---|---|---|---|---|---|---|---|---|
+| posm3 pair | 0 | 5.37×10⁵ | 2.69×10⁴ | 1.4 s | 43 s | 0.11 GB | −6.050 | −6.689 |
+| posm3 pair | 1（預設） | 1.45×10⁷ | 1.01×10⁶ | 52 s | 94 s | 0.14 GB | −6.736 | −7.160 |
+| posm4 pair | 1（預設） | 1.45×10⁷ | 1.01×10⁶ | 52 s | 93 s | 0.14 GB | −6.807 | −7.474 |
+| posm3 pair | 2 | 6.71×10⁷ | 6.27×10⁶ | 323 s | 364 s | 0.19 GB | −7.008 | −8.113 |
+| posm3 pair | 4 | 3.91×10⁸ | 4.84×10⁷ | 2474 s | 2521 s | 0.48 GB | −7.558 | −8.033 |
+| posm1 | — （1000 個） | 1.6×10⁴ | 4,993 | 0.25 s | 41 s | 0.11 GB | −6.421 | −7.474 |
+| posm1 | — （1×10⁵ 個） | 1.6×10⁶ | 4.92×10⁵ | 22 s | 63 s | 0.13 GB | −6.998 | −8.037 |
+
+- 總時間含 9a（約 36 s）與 9d。
+- `sepaPosRange` 1 Å、`pairSingle` 的單點取樣：每個構型配對約 259 × 36,864 × 27 ≈ 2.6×10⁸ 個 L1poss，依 1.48 的篩選比例估計約 3×10⁷ 個 L2poss，約 26 分鐘／構型配對，16 個構型配對約 7 小時（未實測）。
 
 #### 8.4.5 posm4
 - L1poss = posm3 結果 ∪ posm1 結果。
@@ -1482,7 +1504,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.sepaPotThreshold` | `--dock9b_sepaPotThreshold` | 無（指定時取代百分位） | 8.4.4 |
 | `dock9b.sepaChargeThreshold` | `--dock9b_sepaChargeThreshold` | 0.3 e | 8.4.4 |
 | `dock9b.sepaDistTolerance` | `--dock9b_sepaDistTolerance` | 1.0 Å | 8.4.4 |
-| `dock9b.sepaPosRange` | `--dock9b_sepaPosRange` | 4 Å | 8.4.4 |
+| `dock9b.sepaPosRange` | `--dock9b_sepaPosRange` | 1 Å | 8.4.4 |
+| `dock9b.sepaSampling` | `--dock9b_sepaSampling` | `pairSingle` | 8.4.4（`pair`：只做配對取樣；`pairSingle`：配對取樣 + 單點取樣） |
 | `dock9b.maxOverlapAtomNum` | `--dock9b_maxOverlapAtomNum` | 1 | 8.5 |
 | `dock9b.maxNearDistance` | `--dock9b_maxNearDistance` | 6 Å | 8.5 |
 | `dock9b.minMethod`（未實作） | `--dock9b_minMethod` | `lbfgs` | 8.6 |
@@ -1832,3 +1855,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.47 | 2026-10-17 | 註記靜電與去溶劑化截斷距離 20.48 Å 的來源（7.9）；`delta` 大盒子的記憶體測試延至 CUDA 版、門檻維持 1×10⁻⁴（8.1.1） |
 | 1.48 | 2026-10-17 | 實作 posm3、posm4（CPU 參考版）：靜電勢的取法、殼層與百分位、6 鄰居相連、配對方向、對齊與平移、樣本順序、盒子檢查（8.4.4）；新增 8.4.4.1 依規格預設值執行的時間、資源與最低能量；posm4 的樣本順序與已對接構型配對只重做 posm1 部分（8.4.5）；新增 15.2.1 pocketfft 與 FFTW 的效能比較；sepa 參數改為已實作 |
 | 1.49 | 2026-10-17 | 使用者確認 sepas 區域以 6 鄰居判斷相連（8.4.4） |
+| 1.50 | 2026-10-17 | `dock9b.sepaPosRange` 預設改為 1 Å；新增 `dock9b.sepaSampling`（`pair`／`pairSingle`，預設 `pairSingle`），posm3 與 posm4 可選擇只做配對取樣；單點取樣的定向數不縮減；8.4.4.1 新增只做配對取樣與 `sepaPosRange` 0／1／2／4 Å 的測試結果 |
