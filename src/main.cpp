@@ -878,7 +878,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const od::Dock9bParams dp = dockParams(opt, seed);
   const bool deterministic = dp.posm == od::Posm::Posm2;
 
-  // grid.mode (spec 8.1); auto: flexres when no StaM backbone torsion is rotatable.
+  // grid.mode (spec 8.1); auto: delta when no StaM backbone torsion is rotatable.
   od::GridMode gridMode = od::GridMode::Full;
   bool backboneMoves = false;
   for (std::size_t k = 0; k < stamSet.parts().size(); ++k)
@@ -886,7 +886,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       backboneMoves |= stamSet.settings()[k]->topology.torsions[tt.torsion].backbone != od::BackboneAngle::None;
   if (opt.gridMode == "flexres") gridMode = od::GridMode::Flexres;
   else if (opt.gridMode == "delta") gridMode = od::GridMode::Delta;
-  else if (opt.gridMode == "auto" && !backboneMoves) gridMode = od::GridMode::Flexres;
+  else if (opt.gridMode == "auto" && !backboneMoves) gridMode = od::GridMode::Delta;
   const std::vector<char> movedMask = od::movedGridAtoms(stamSet.sys(), stamSet.parts());
   const auto movedNum = std::count(movedMask.begin(), movedMask.end(), 1);
   od::logInfo(std::format("9b grid.mode {}{}: StaM grid atoms {}, moved by torsions {}, backbone {}", od::gridModeName(gridMode),

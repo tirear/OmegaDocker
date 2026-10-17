@@ -253,7 +253,7 @@ const std::vector<Param>& params() {
 
     t.push_back(real("grid.spacing", "<dist>", "0.375", "9b: spacing of the energy and distance grids (Å)", OD_ACC(gridSpacing)));
     t.push_back({"grid.mode", Type::Str, "auto|full|flexres|delta", "auto",
-                 "9b: StaM grids (auto: flexres when no StaM backbone torsion is rotatable, otherwise full)",
+                 "9b: StaM grids (auto: delta when no StaM backbone torsion is rotatable, otherwise full)",
                  [](Options& o, const Tokens& v) {
                    const std::string& s = one(v);
                    if (s != "auto" && s != "full" && s != "flexres" && s != "delta")
