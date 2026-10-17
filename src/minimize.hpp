@@ -51,7 +51,7 @@ struct MinParams {
   int maxSteps = 100;         // confMinMaxStep
   double deltaE = 10.0;       // confMinDeltaE: stop when one step changes E by less
   double maxStepDeg = 10.0;   // confMaxDihedralStep: largest change of one angle per step
-  MinMethod method = MinMethod::Fire;
+  MinMethod method = MinMethod::Lbfgs;
 };
 
 struct MinResult {

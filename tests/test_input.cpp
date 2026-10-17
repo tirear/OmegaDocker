@@ -1667,7 +1667,7 @@ TEST_CASE("minimize: FIRE") {
     return e;
   };
   std::vector<double> x{-100, 100, -170};
-  od::MinParams p{1000, 1e-12, 10.0};
+  od::MinParams p{1000, 1e-12, 10.0, od::MinMethod::Fire};
   const auto r = od::minimizeTorsions(f, x, p);
   for (std::size_t i = 0; i < x.size(); ++i) CHECK(std::abs(od::wrapDeg(x[i] - c[i])) < 0.01);
   CHECK(r.energy < 1e-6);

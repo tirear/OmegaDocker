@@ -120,7 +120,7 @@ struct Options {
   FeParams fe;  // [od_0100]
   CsgmOpts stamCsgm;  // stam.csgmBuild, stam.growMaxRetry, ...
   CsgmOpts mobmCsgm;  // mobm.csgmBuild, mobm.growMaxRetry, ...
-  std::string confMinMethod = "fire";  // sd | cg | fire | lbfgs | adadelta
+  std::string confMinMethod = "lbfgs";  // sd | cg | fire | lbfgs | adadelta
   int confMinMaxStep = 100;
   double confMinDeltaE = 10.0;
   double confMaxDihedralStep = 10.0;

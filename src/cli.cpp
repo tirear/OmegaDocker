@@ -311,7 +311,7 @@ const std::vector<Param>& params() {
     addSetParams(t, "stam");
     addSetParams(t, "mobm");
 
-    t.push_back(minMethod("conf9a.minMethod", "fire", "9a", OD_ACC(confMinMethod)));
+    t.push_back(minMethod("conf9a.minMethod", "lbfgs", "9a", OD_ACC(confMinMethod)));
     t.push_back(integer("conf9a.minMaxStep", "<n>", "100", "9a minimization: largest number of steps", OD_ACC(confMinMaxStep)));
     t.push_back(real("conf9a.minDeltaE", "<E>", "10", "9a minimization: stop when one step changes the energy by less (kcal/mol)",
                      OD_ACC(confMinDeltaE)));

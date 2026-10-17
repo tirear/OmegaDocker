@@ -42,7 +42,7 @@ TEST_CASE("cli: required options and values") {
   CHECK(o.dockMinConvSteps == 10);
   CHECK(o.dockMinDeltaE == doctest::Approx(1e-3));
   CHECK(o.lbfgsMemory == 7);
-  CHECK(o.confMinMethod == "fire");
+  CHECK(o.confMinMethod == "lbfgs");
   CHECK(o.dockMinMethod == "lbfgs");
   {
     const auto pm = parse({"--conf9a_minMethod=lbfgs", "--dock9b_minMethod=adadelta"});

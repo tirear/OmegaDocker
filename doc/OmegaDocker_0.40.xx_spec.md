@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.55 |
+| 文件版本 | 1.56 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -696,10 +696,11 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 **篩選**：最佳化後 `E < E_max` → L2 pool；否則捨棄。
 `E_max` 不再作為停止條件，但仍是 L1 → L2 的篩選條件。
 
-**最佳化方法**：`conf9a.minMethod`，預設 FIRE（第 12 節）；每步每個兩面角變化上限 `confMaxDihedralStep`（預設 10°）。
+**最佳化方法**：`conf9a.minMethod`，預設 L-BFGS（第 12 節；1.56 前為 FIRE）；每步每個兩面角變化上限 `confMaxDihedralStep`（預設 10°）。
 - 最佳化的目標函數為含閉合約束的總能量；篩選用的能量（比較 `E_max`）不含閉合約束（4.5）。
-- FIRE 細節：變數為兩面角（rad），質量 1；`dt₀ = 0.1`、`dt_max = 1.0`；每步先依 FIRE 規則調整速度，再 `v += dt·F`、`Δx = dt·v`；任一兩面角的變化超過 `confMaxDihedralStep` 時，整個 `Δx` 等比例縮小（保持方向）。
-- 每步計算一次能量與梯度；`confMinMaxStep = 0` 時只計算能量。
+- L-BFGS：記憶 7 步、Armijo 回溯式 line search（第 12 節）。
+- FIRE 細節（`conf9a.minMethod = "fire"`）：變數為兩面角（rad），質量 1；`dt₀ = 0.1`、`dt_max = 1.0`；每步先依 FIRE 規則調整速度，再 `v += dt·F`、`Δx = dt·v`；任一兩面角的變化超過 `confMaxDihedralStep` 時，整個 `Δx` 等比例縮小（保持方向）。
+- FIRE 每步計算一次能量與梯度；`confMinMaxStep = 0` 時只計算能量。
 - 回傳最佳化過程中能量最低的構型（不一定是最後一步）。
 - 停止條件：步數達 `confMinMaxStep`，或一步的 |ΔE| < `confMinDeltaE`（即第 12 節的連續步數取 1），或 line search 找不到下降（`sd`、`cg`、`lbfgs`）。
 
@@ -718,7 +719,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - KIC：kinematic closure（Coutsias et al. 2004, *J Comput Chem* 25:510；取樣流程參考 Mandell et al. 2009, *Nat Methods* 6:551）。
   - 不使用 NGK（Stein & Kortemme 2013, *PLoS One* 8:e63090）的名稱：NGK 相對於 KIC 的改進（Taboo sampling、ω 取樣、鄰近殘基相關的 Ramachandran 分布 Rama2b、排斥項與 Ramachandran 項的 ramping）都屬於 Rosetta 的 Monte Carlo 流程或與本規格衝突（ω 為 `fixed`／`cisTrans`；樣本彼此獨立，Taboo 需要依序累積的歷史），本程式只實作 KIC 本體。
   - 不採用 RCD+ 的鍵長鍵角隨機化（只動兩面角，18 F1）、ω 常態取樣、Ting 2010 的 Ramachandran 分布、ICOSA 評分與 Rosetta 精修；也不使用 RCD 的矩形 Ramachandran 篩選（會排除左手螺旋區，且與 ssType 衝突）。
-- 位置：csgm 產生樣本之後、9a FIRE 最佳化之前；`csgmBuild = grow` 時在全部建完之後，`growClose` 時在建構側鏈等之前（7.8）。9a 最佳化仍含閉合約束，`maxBreakDist` 篩選不變（4.8、7.9）。
+- 位置：csgm 產生樣本之後、9a 最佳化之前；`csgmBuild = grow` 時在全部建完之後，`growClose` 時在建構側鏈等之前（7.8）。9a 最佳化仍含閉合約束，`maxBreakDist` 篩選不變（4.8、7.9）。
 - 對象：所有斷鍵（4.8：loop 斷鍵、交聯、使用者指定的斷鍵、金屬配位斷鍵）。
 - 耦合的斷鍵：共用可調整兩面角的斷鍵（例如 2KJJ 的 loop A:8–15 與雙硫鍵 A:6–A:11，Cys 11 在 loop 內）歸為一組（遞移），一起閉合；依各組第一個斷鍵在 `TorsionTree::links` 的順序逐組閉合（多分子的 StaM 群依分子順序）。
   - 遞移例：2KJJ loop A:3–6（斷鍵 A:6:C–A:7:N）與 loop A:8–15 彼此不共用兩面角，但都與雙硫鍵 A:6–A:11 共用，三者為一組。1.41 版的分組有錯（union-find 的根不一定是組內最小的索引，而收集成員時從根開始），此例中 A:6:C–A:7:N 被漏掉、從未閉合；1.42 修正，並加入單元測試。
@@ -1432,7 +1433,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 | 階段 | 參數 | 預設 |
 |---|---|---|
-| 9a | `confMinMethod` | `fire` |
+| 9a | `confMinMethod` | `lbfgs` |
 | 9b | `dockMinMethod` | `lbfgs` |
 
 - 變數尺度：平移（Å）、旋轉（rad）、兩面角（rad）以 `scaleTrans`、`scaleRot`、`scaleTors` 預先縮放（預設 1、1、1）。
@@ -1469,8 +1470,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 | `conf9a.minMethod` | L1 | L2 | 通過率 | 步數／樣本 | 9a 時間 |
 |---|---|---|---|---|---|
-| `fire`（預設） | 9,232 | 45 | 0.49% | 54.6 | 40.4 s |
-| `lbfgs` | 4,882 | 34 | 0.70% | 26.8 | 20.0 s |
+| `fire` | 9,232 | 45 | 0.49% | 54.6 | 40.4 s |
+| `lbfgs`（1.56 起預設） | 4,882 | 34 | 0.70% | 26.8 | 20.0 s |
 | `cg` | 32,800 | 68 | 0.21% | 28.9 | 116 s |
 | `sd` | 67,552 | 37 | 0.055% | 43.9 | 318 s |
 | `adadelta` | 4,000（上限） | 0 | 0% | — | 31 s 後中止 |
@@ -1484,7 +1485,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `fire` | 2,180 | 42 | 1.9% | 300 | 51 s |
 | `lbfgs` | 3,188 | 39 | 1.2% | 62.5 | 50 s |
 
-- 此例 9a 以 `lbfgs` 最快（通過率較高、步數較少）；預設仍為 `fire`，是否更改待決定。
+- 此例 9a 以 `lbfgs` 最快（通過率較高、步數較少）；1.56 起 9a 預設改為 `lbfgs`。
 
 ### 12.1 9b 的數值精度
 
@@ -1590,7 +1591,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `{stam,mobm}.kicMaxTrial` | `--{stam,mobm}_kicMaxTrial` | 100 | 7.11 |
 | `{stam,mobm}.rcdClash` | `--{stam,mobm}_rcdClash` | `none` | 7.11（`none`、`repair`、`full`） |
 | `{stam,mobm}.rcdClashWeight` | `--{stam,mobm}_rcdClashWeight` | 1 | 7.11 |
-| `conf9a.minMethod` | `--conf9a_minMethod` | `fire` | 7.9、12（`sd`、`cg`、`fire`、`lbfgs`、`adadelta`） |
+| `conf9a.minMethod` | `--conf9a_minMethod` | `lbfgs` | 7.9、12（`sd`、`cg`、`fire`、`lbfgs`、`adadelta`） |
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
 | `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
@@ -1965,3 +1966,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.53 | 2026-10-17 | 實作 posm2_fft（CPU 參考版，pocketfft）：StaM 各格點值與上限（靜電 ±`fftClamp`）、FFT 大小（只補到 2、3、5、7 因數，不補 MobM 半徑）、MobM 三線性分配與通道、合法平移與保留順序、頻譜快取、平行化（8.4.3）；新增實測結果；`dock9b.fftClamp`、`dock9b.fftTopPerRot` 改為已實作 |
 | 1.54 | 2026-10-17 | 實作 `conf9a.minMethod`、`dock9b.minMethod`：`sd`、`cg`、`fire`、`lbfgs`、`adadelta` 共用一個實作，補充各方法細節；`adadelta` 使用 AutoDock-GPU 的變數單位；9a 補充停止條件；對接樣本改為「能量最低的被接受點」（`sd`、`cg`、`lbfgs` 即最後被接受的點）（7.9、8.6、12）；新增 9a、9b 各方法實測 |
 | 1.55 | 2026-10-17 | 修正 9a `adadelta` 實測說明：未通過的原因是預設停止條件（`confMinDeltaE`）使其提早停止，非無法推開碰撞；新增 `confMinDeltaE` 0、`confMinMaxStep` 300 的比較；補充 `adadelta` 步長特性（12） |
+| 1.56 | 2026-10-17 | `conf9a.minMethod` 預設由 `fire` 改為 `lbfgs`（7.9、12、參數表） |
