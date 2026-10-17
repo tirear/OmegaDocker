@@ -335,17 +335,18 @@ const std::vector<Param>& params() {
     t.push_back(real("dock9b.sepaChargeThreshold", "<q>", "0.3", "9b, posm3: MobM atoms with |charge| >= this (e)", OD_ACC(sepaChargeThreshold)));
     t.push_back(real("dock9b.sepaDistTolerance", "<dist>", "1", "9b, posm3: pair distances of StaM and MobM may differ by this much (Å)",
                      OD_ACC(sepaDistTolerance)));
-    t.push_back(real("dock9b.sepaPosRange", "<dist>", "1", "9b, posm3: translations within +-this around the anchor (Å, step dock9b.posStep)",
-                     OD_ACC(sepaPosRange)));
-    t.push_back({"dock9b.sepaSampling", Type::Str, "pair|pairSingle|triple", "pairSingle",
-                 "9b, posm3 and posm4: pair alignments only, pair alignments followed by single placements, or triple alignments only",
-                 [](Options& o, const Tokens& v) {
-                   const std::string& s = one(v);
-                   if (s != "pair" && s != "pairSingle" && s != "triple")
-                     fail("expected pair, pairSingle or triple but got '{}'", s);
-                   o.sepaSampling = s;
-                 },
-                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.sepaSampling}; }});
+    t.push_back(real("dock9b.sepaPosStep", "<dist>", "2", "9b, posm3: spacing of the translations around the anchor (Å)",
+                     OD_ACC(sepaPosStep)));
+    t.push_back({"dock9b.sepaPosRange", Type::Real, "<dist>", "dock9b.sepaPosStep",
+                 "9b, posm3: translations within +-this around the anchor (Å, step dock9b.sepaPosStep)",
+                 [](Options& o, const Tokens& v) { o.sepaPosRange = toReal(one(v)); },
+                 [](const Options& o) -> std::optional<Tokens> {
+                   if (!o.sepaPosRange) return std::nullopt;
+                   return Tokens{fmtReal(*o.sepaPosRange)};
+                 }});
+    t.push_back(boolean("dock9b.sepaSamplingTriple", "true", "9b, posm3 and posm4: triple alignments", OD_ACC(sepaSamplingTriple)));
+    t.push_back(boolean("dock9b.sepaSamplingPair", "true", "9b, posm3 and posm4: pair alignments", OD_ACC(sepaSamplingPair)));
+    t.push_back(boolean("dock9b.sepaSamplingSingle", "false", "9b, posm3 and posm4: single placements", OD_ACC(sepaSamplingSingle)));
     t.push_back(real("dock9b.rotStep", "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
                      OD_ACC(rotStep)));
     t.push_back(real("dock9b.maxNearDistance", "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -733,7 +734,10 @@ void validateOptions(const Options& o) {
   check(!o.sepaPotThreshold || *o.sepaPotThreshold > 0, "dock9b.sepaPotThreshold", "> 0");
   check(o.sepaChargeThreshold > 0, "dock9b.sepaChargeThreshold", "> 0");
   check(o.sepaDistTolerance >= 0, "dock9b.sepaDistTolerance", ">= 0");
-  check(o.sepaPosRange >= 0, "dock9b.sepaPosRange", ">= 0");
+  check(o.sepaPosStep > 0, "dock9b.sepaPosStep", "> 0");
+  check(!o.sepaPosRange || *o.sepaPosRange >= o.sepaPosStep, "dock9b.sepaPosRange", ">= dock9b.sepaPosStep");
+  check((o.posm != "posm3" && o.posm != "posm4") || o.sepaSamplingTriple || o.sepaSamplingPair || o.sepaSamplingSingle,
+        "dock9b.sepaSamplingTriple, dock9b.sepaSamplingPair or dock9b.sepaSamplingSingle", "true for posm3 and posm4 (at least one)");
   check(o.maxOverlapAtomNum >= 1, "dock9b.maxOverlapAtomNum", ">= 1");
   check(o.dockMinMaxStep >= 0, "dock9b.minMaxStep", ">= 0");
   check(o.dockMinConvSteps >= 1, "dock9b.minConvSteps", ">= 1");

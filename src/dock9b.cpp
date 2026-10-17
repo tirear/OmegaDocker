@@ -224,7 +224,7 @@ MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Do
   if (p.posm == Posm::Posm3 || p.posm == Posm::Posm4) {
     if (!sepas_) fail("posm3: the StaM regions are missing");
     axisAngles_ = std::max(1, static_cast<int>(std::lround(360.0 / p.rotStep)));
-    transN_ = 2 * static_cast<int>(std::floor(p.sepaPosRange / p.posStep + 1e-9)) + 1;
+    transN_ = 2 * static_cast<int>(std::floor(p.sepaPosRange / p.sepaPosStep + 1e-9)) + 1;
   }
 }
 
@@ -364,7 +364,7 @@ std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
   long long tr = k % nt;
   Vec3 delta;
   for (int d = 0; d < 3; ++d) {
-    delta[d] = p_.posStep * static_cast<double>(tr % transN_ - half);
+    delta[d] = p_.sepaPosStep * static_cast<double>(tr % transN_ - half);
     tr /= transN_;
   }
   const auto& ss = *sepas_;

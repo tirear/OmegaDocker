@@ -399,10 +399,11 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   dp.sepaPotThreshold = opt.sepaPotThreshold;
   dp.sepaChargeThreshold = opt.sepaChargeThreshold;
   dp.sepaDistTolerance = opt.sepaDistTolerance;
-  dp.sepaPosRange = opt.sepaPosRange;
-  dp.sepaPair = opt.sepaSampling == "pair" || opt.sepaSampling == "pairSingle";
-  dp.sepaSingle = opt.sepaSampling == "pairSingle";
-  dp.sepaTriple = opt.sepaSampling == "triple";
+  dp.sepaPosStep = opt.sepaPosStep;
+  dp.sepaPosRange = opt.sepaPosRange.value_or(opt.sepaPosStep);
+  dp.sepaPair = opt.sepaSamplingPair;
+  dp.sepaSingle = opt.sepaSamplingSingle;
+  dp.sepaTriple = opt.sepaSamplingTriple;
   dp.rotStep = opt.rotStep;
   dp.boxCenter = *opt.boxCenter;
   dp.boxSize = *opt.boxSize;

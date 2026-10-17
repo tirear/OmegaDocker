@@ -2714,9 +2714,16 @@ struct DockFixture {
 
 TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   DockFixture f(od::Posm::Posm3);
-  CHECK(f.p.sepaPosRange == 1.0);
-  CHECK(f.p.sepaSingle);
+  CHECK(f.p.sepaPosStep == 2.0);
+  CHECK(f.p.sepaPosRange == 2.0);
+  CHECK(f.p.sepaTriple);
+  CHECK(f.p.sepaPair);
+  CHECK_FALSE(f.p.sepaSingle);
+  od::Dock9bParams pDef = f.p;
+  f.p.sepaPosStep = 1.0;
   f.p.sepaPosRange = 4.0;
+  f.p.sepaSingle = true;
+  f.p.sepaTriple = false;
   od::StamSepaInfo info;
   const auto sepas = od::stamSepas(f.field, f.p, &info);
   const auto sepas26 = od::stamSepas(f.field, f.p, nullptr, 26);
@@ -2841,12 +2848,22 @@ TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   MESSAGE(std::format("posm3 triple: checked {}, max RMSD of the three anchor atoms {:.3f} A", tripleChecked, maxRmsd));
   CHECK(tripleChecked > 0);
   CHECK(maxRmsd <= f.p.sepaDistTolerance);
-  // Default range 1 Å: 27 translations.
-  od::Dock9bParams p1 = f.p;
-  p1.sepaPosRange = 1.0;
-  const od::MobmDocker dkr(*f.x.mobSys, f.field, p1, &sepas);
+  // Defaults: triples + pairs, step 2 Å, range 2 Å (27 translations).
+  const od::MobmDocker dkr(*f.x.mobSys, f.field, pDef, &sepas);
   const auto cr = dkr.conformation(f.x.mobSys->inputAngles());
+  CHECK(cr.pairs.size() == c.pairs.size());
+  CHECK(cr.triples.size() == ct.triples.size());
+  CHECK(cr.singles.empty());
   CHECK(cr.pairPoses == static_cast<long long>(cr.pairs.size()) * 48 * 27);
+  CHECK(dkr.l1Count(cr) == cr.pairPoses + static_cast<long long>(cr.triples.size()) * 27);
+  for (long long r = 0; r < static_cast<long long>(cr.triples.size()); r += 997) {  // zero translations
+    const auto a = dkr.l1Pose(cr, 0, cr.pairPoses + r * 27 + 13), b = dkt.l1Pose(ct, 0, r * 27 + 13);
+    REQUIRE(a.has_value() == b.has_value());
+    if (a) {
+      CHECK(a->q.w == doctest::Approx(b->q.w));
+      CHECK(a->t == b->t);
+    }
+  }
   // posm4 = posm3 followed by posm1.
   od::Dock9bParams p4 = f.p;
   p4.posm = od::Posm::Posm4;

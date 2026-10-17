@@ -88,11 +88,32 @@ TEST_CASE("cli: errors") {
   CHECK(p3.sepaPosRange == 2.0);
   CHECK(p3.sepaShellMax == 6.0);
   CHECK(parse({"--dock9b_posm=posm4"}).posm == "posm4");
-  CHECK(p3.sepaSampling == "pairSingle");
-  CHECK(parse({"--dock9b_posm=posm3"}).sepaPosRange == 1.0);
-  CHECK(parse({"--dock9b_posm=posm3", "--dock9b_sepaSampling=pair"}).sepaSampling == "pair");
-  CHECK(parse({"--dock9b_posm=posm3", "--dock9b_sepaSampling=triple"}).sepaSampling == "triple");
-  CHECK_THROWS_AS(parse({"--dock9b_sepaSampling=single"}), od::Error);
+  CHECK(p3.sepaPosStep == 2.0);
+  CHECK(p3.sepaPosRange == 2.0);
+  CHECK(p3.sepaSamplingTriple);
+  CHECK(p3.sepaSamplingPair);
+  CHECK_FALSE(p3.sepaSamplingSingle);
+  CHECK_FALSE(parse({"--dock9b_posm=posm3"}).sepaPosRange.has_value());
+  auto p3b = parse({"--dock9b_posm=posm3", "--dock9b_sepaPosStep=1.5", "--dock9b_sepaSamplingTriple=false",
+                    "--dock9b_sepaSamplingSingle=true"});
+  CHECK(p3b.sepaPosStep == 1.5);
+  CHECK_FALSE(p3b.sepaSamplingTriple);
+  CHECK(p3b.sepaSamplingSingle);
+  CHECK_THROWS_AS(parse({"--dock9b_sepaSampling=pair"}), od::Error);
+  {
+    auto v = [](std::vector<const char*> a) {
+      a.insert(a.end(), {"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20",
+                         "--outPrefix=out", "--mobm_dockingConfSampleNum=8"});
+      od::validateOptions(parse(a));
+    };
+    CHECK_NOTHROW(v({"--dock9b_posm=posm3"}));
+    CHECK_NOTHROW(v({"--dock9b_posm=posm3", "--dock9b_sepaPosStep=1", "--dock9b_sepaPosRange=4"}));
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm3", "--dock9b_sepaPosRange=1"}), od::Error);
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm3", "--dock9b_sepaPosStep=0"}), od::Error);
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm4", "--dock9b_sepaSamplingTriple=false", "--dock9b_sepaSamplingPair=false"}),
+                    od::Error);
+    CHECK_NOTHROW(v({"--dock9b_posm=posm1", "--dock9b_sepaSamplingTriple=false", "--dock9b_sepaSamplingPair=false"}));
+  }
   CHECK_FALSE(parse({"--dock9b_posm=posm3"}).sepaPotThreshold.has_value());
   CHECK_THROWS_AS(od::validateOptions(parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10",
                                              "--outPrefix=o", "--dock9b_posm=posm3", "--dock9b_sepaShellMax=2"})),
