@@ -71,13 +71,13 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
       localTorsion_.push_back(static_cast<int>(t));
     }
   if (p_.method == ClosureMethod::None) return;
-  std::vector<bool> frozen(partOfTorsion_.size(), false);
+  path_.assign(partOfTorsion_.size(), false);
   for (std::size_t k = 0; k < parts_.size(); ++k) {
     const Molecule& m = *parts_[k].mol;
     const TorsionTree& tree = *parts_[k].tree;
     const int off = sys_.torsionOffset(static_cast<int>(k));
     const int n = tree.atomCount;
-    auto adjustable = [&](int local) { return freeMask[off + local] && !frozen[off + local]; };
+    auto adjustable = [&](int local) { return static_cast<bool>(freeMask[off + local]); };
     // Graph without the broken bonds; node n joins the anchor atoms, which never move.
     std::vector<std::vector<int>> adj(n + 1);
     if (tree.anchors.size() > 1)
@@ -92,29 +92,31 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
       adj[b.a].push_back(b.b);
       adj[b.b].push_back(b.a);
     }
+    // Each link alone: its pairs or restraint, ring path and adjustable torsions.
+    std::vector<Link> single;
     for (const ClosureLink& cl : tree.links) {
       Link l;
       l.part = static_cast<int>(k);
+      l.members.push_back(static_cast<int>(single.size()));
       if (cl.restraint >= 0) {
         const auto& r = tree.restraints[cl.restraint];
-        l.restraint = true;
-        l.ra = r.a;
-        l.rb = r.b;
-        l.r0 = r.r0;
+        l.restraints.push_back({r.a, r.b, r.r0});
+        l.pathAtoms = {r.a, r.b};
         for (std::size_t t = 0; t < tree.torsions.size(); ++t) {
           const auto& tt = tree.torsions[t];
           const auto& mv = tt.moving;
           // An atom on the axis does not move.
           auto moves = [&](int x) { return contains(mv, x) && x != tt.fixedAtom && x != tt.movingAtom; };
           auto still = [&](int x) { return !contains(mv, x) || x == tt.fixedAtom || x == tt.movingAtom; };
-          if (((moves(r.a) && still(r.b)) || (moves(r.b) && still(r.a))) && adjustable(static_cast<int>(t)))
-            l.dof.push_back(off + static_cast<int>(t));
+          if (!((moves(r.a) && still(r.b)) || (moves(r.b) && still(r.a)))) continue;
+          path_[off + t] = true;
+          if (adjustable(static_cast<int>(t))) l.dof.push_back(off + static_cast<int>(t));
         }
-        l.points = {r.a, r.b};
       } else {
         l.pairs.push_back({n + cl.copyB, cl.b});
         if (cl.copyY >= 0) l.pairs.push_back({n + cl.copyY, cl.y});
         l.pairs.push_back({n + cl.copyA, cl.a});
+        l.pairEnd.push_back(static_cast<int>(l.pairs.size()));
         // Ring path a ... b without the broken bond.
         std::vector<int> prev(n + 1, -2);
         std::queue<int> q;
@@ -138,10 +140,11 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
           int g = -1;
           for (std::size_t t = 0; t < tree.torsions.size(); ++t) {
             const auto& tt = tree.torsions[t];
-            if (((tt.fixedAtom == l.ring[j] && tt.movingAtom == l.ring[j + 1]) ||
-                 (tt.fixedAtom == l.ring[j + 1] && tt.movingAtom == l.ring[j])) &&
-                adjustable(static_cast<int>(t)))
-              g = off + static_cast<int>(t);
+            if ((tt.fixedAtom == l.ring[j] && tt.movingAtom == l.ring[j + 1]) ||
+                (tt.fixedAtom == l.ring[j + 1] && tt.movingAtom == l.ring[j])) {
+              path_[off + t] = true;
+              if (adjustable(static_cast<int>(t))) g = off + static_cast<int>(t);
+            }
           }
           l.bondTorsion.push_back(g);
           if (g >= 0) l.dof.push_back(g);
@@ -156,13 +159,50 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
             last = i;
           }
         l.kic = cl.copyY >= 0 && found >= 3;
-        for (const auto& pr : l.pairs) {
-          l.points.push_back(pr.moving);
-          l.points.push_back(pr.target);
+        l.pathAtoms = l.ring;
+      }
+      single.push_back(std::move(l));
+    }
+    // Groups: links sharing an adjustable torsion (union-find), in order of their first link.
+    const int L = static_cast<int>(single.size());
+    std::vector<int> root(L);
+    for (int i = 0; i < L; ++i) root[i] = i;
+    auto find = [&](int i) {
+      while (root[i] != i) i = root[i] = root[root[i]];
+      return i;
+    };
+    for (int i = 0; i < L; ++i)
+      for (int j = i + 1; j < L; ++j) {
+        const bool shared = std::any_of(single[i].dof.begin(), single[i].dof.end(), [&](int g) {
+          return std::find(single[j].dof.begin(), single[j].dof.end(), g) != single[j].dof.end();
+        });
+        if (shared) root[find(j)] = find(i);
+      }
+    for (int i = 0; i < L; ++i) {
+      if (find(i) != i) continue;
+      std::vector<int> mem;
+      for (int j = i; j < L; ++j)
+        if (find(j) == i) mem.push_back(j);
+      Link l;
+      if (mem.size() == 1) {
+        l = std::move(single[i]);
+      } else {
+        l.part = static_cast<int>(k);
+        for (int j : mem) {
+          Link& s = single[j];
+          l.members.push_back(j);
+          if (!s.pairs.empty()) {
+            l.pairs.insert(l.pairs.end(), s.pairs.begin(), s.pairs.end());
+            l.pairEnd.push_back(static_cast<int>(l.pairs.size()));
+          }
+          l.restraints.insert(l.restraints.end(), s.restraints.begin(), s.restraints.end());
+          l.pathAtoms.insert(l.pathAtoms.end(), s.pathAtoms.begin(), s.pathAtoms.end());
+          for (int g : s.dof)
+            if (std::find(l.dof.begin(), l.dof.end(), g) == l.dof.end()) l.dof.push_back(g);
         }
       }
-      l.partial = l.restraint || static_cast<int>(l.dof.size()) < kFullDof;
-      for (int g : l.dof) frozen[g] = true;
+      const int copies = static_cast<int>(l.pairEnd.size());
+      l.partial = copies == 0 || static_cast<int>(l.dof.size()) < kFullDof * copies;
       std::vector<int> sortedDof = l.dof;
       std::sort(sortedDof.begin(), sortedDof.end());
       for (std::size_t s = 0; s < segments.size(); ++s)
@@ -174,6 +214,14 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
         }
       std::sort(l.resampleCovered.begin(), l.resampleCovered.end());
       // RCD tracking: closure points and the axis atoms of the adjustable torsions.
+      for (const auto& pr : l.pairs) {
+        l.points.push_back(pr.moving);
+        l.points.push_back(pr.target);
+      }
+      for (const auto& r : l.restraints) {
+        l.points.push_back(r.a);
+        l.points.push_back(r.b);
+      }
       for (int g : l.dof) {
         const auto& tt = tree.torsions[localTorsion_[g]];
         l.points.push_back(tt.fixedAtom);
@@ -183,13 +231,13 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
       std::sort(pts.begin(), pts.end());
       pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
       auto at = [&](int c) { return static_cast<int>(std::lower_bound(pts.begin(), pts.end(), c) - pts.begin()); };
-      if (l.restraint) {
-        l.pairPoint = {at(l.ra), at(l.rb)};
-      } else {
-        for (const auto& pr : l.pairs) {
-          l.pairPoint.push_back(at(pr.moving));
-          l.pairPoint.push_back(at(pr.target));
-        }
+      for (const auto& pr : l.pairs) {
+        l.pairPoint.push_back(at(pr.moving));
+        l.pairPoint.push_back(at(pr.target));
+      }
+      for (const auto& r : l.restraints) {
+        l.restraintPoint.push_back(at(r.a));
+        l.restraintPoint.push_back(at(r.b));
       }
       for (int g : l.dof) {
         const auto& tt = tree.torsions[localTorsion_[g]];
@@ -201,21 +249,46 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
         l.moves.push_back(std::move(mv));
       }
       l.points = std::move(pts);
-      // Heavy-atom pairs with a ring path atom (metal bond: its two atoms) moved by the adjustable torsions.
-      std::vector<char> moved(n, 0), checked(sys_.coordOffset(static_cast<int>(parts_.size()) - 1) +
-                                                 parts_.back().tree->atomCount +
-                                                 static_cast<int>(parts_.back().tree->virtuals.size()),
-                                             0);
-      for (int g : l.dof)
-        for (int c : tree.torsions[localTorsion_[g]].moving)
-          if (c < n) moved[c] = 1;
-      const std::vector<int> pathAtoms = l.restraint ? std::vector<int>{l.ra, l.rb} : l.ring;
-      for (int c : pathAtoms)
-        if (moved[c]) checked[sys_.coordOffset(l.part) + c] = 1;
-      for (const auto& pr : sys_.pairs())
-        if (pr.heavy && (checked[pr.i] || checked[pr.j])) l.clashPairs.push_back({pr.i, pr.j});
       links_.push_back(std::move(l));
     }
+  }
+  // Clash pairs (heavy atoms). Default: pairs with a ring path atom (metal
+  // distance: its two atoms) moved by the adjustable torsions. growClose:
+  // pairs with any atom moved by them, neither atom built after the closure.
+  const int nc = sys_.coordOffset(static_cast<int>(parts_.size()) - 1) + parts_.back().tree->atomCount +
+                 static_cast<int>(parts_.back().tree->virtuals.size());
+  std::vector<char> later(nc, 0);
+  if (p_.growClose)
+    for (std::size_t k = 0; k < parts_.size(); ++k) {
+      // Deepest torsion moving each atom; the moving bond atom goes with the parent (as GrowBuilder).
+      const auto& tt = parts_[k].tree->torsions;
+      const int off = sys_.torsionOffset(static_cast<int>(k)), co = sys_.coordOffset(static_cast<int>(k));
+      std::vector<int> owner(parts_[k].tree->atomCount, -1);
+      for (std::size_t i = 0; i < tt.size(); ++i) {
+        for (int c : tt[i].moving)
+          if (c < static_cast<int>(owner.size())) owner[c] = static_cast<int>(i);
+        owner[tt[i].movingAtom] = tt[i].parent;
+      }
+      for (std::size_t c = 0; c < owner.size(); ++c)
+        if (owner[c] >= 0 && !path_[off + owner[c]]) later[co + c] = 1;
+    }
+  for (Link& l : links_) {
+    const TorsionTree& tree = *parts_[l.part].tree;
+    const int n = tree.atomCount, co = sys_.coordOffset(l.part);
+    std::vector<char> moved(n, 0), checked(nc, 0);
+    for (int g : l.dof)
+      for (int c : tree.torsions[localTorsion_[g]].moving)
+        if (c < n) moved[c] = 1;
+    if (p_.growClose) {
+      for (int c = 0; c < n; ++c)
+        if (moved[c] && !later[co + c]) checked[co + c] = 1;
+    } else {
+      for (int c : l.pathAtoms)
+        if (moved[c]) checked[co + c] = 1;
+    }
+    for (const auto& pr : sys_.pairs())
+      if (pr.heavy && (checked[pr.i] || checked[pr.j]) && !later[pr.i] && !later[pr.j])
+        l.clashPairs.push_back({pr.i, pr.j});
   }
 }
 
@@ -227,24 +300,39 @@ std::vector<std::string> LoopCloser::describe() const {
   std::vector<std::string> out;
   for (const Link& l : links_) {
     const Molecule& m = *parts_[l.part].mol;
+    const TorsionTree& tree = *parts_[l.part].tree;
     auto name = [&](int a) {
       const Atom& x = m.atoms[a];
       if (x.residue < 0) return std::format("#{}", x.fileSerial);
       const ResidueInfo& r = m.residues[x.residue].info;
       return std::format("{}:{}{}:{}", r.chain, r.seq, r.iCode, x.name);
     };
+    std::string label;
+    for (int j : l.members) {
+      const ClosureLink& cl = tree.links[j];
+      if (!label.empty()) label += " + ";
+      if (cl.restraint >= 0)
+        label += std::format("{} - {}", name(tree.restraints[cl.restraint].a), name(tree.restraints[cl.restraint].b));
+      else
+        label += std::format("{} - {}", name(cl.a), name(cl.b));
+    }
+    const int copies = static_cast<int>(l.pairEnd.size());
+    const bool kicAsked = p_.method == ClosureMethod::Kic;
     std::string method;
     if (l.dof.empty()) method = "none (no adjustable torsion; constraint only)";
-    else if (l.restraint) method = "rcd, best effort (metal distance)";
-    else if (l.partial) method = std::format("rcd, best effort (fewer than {} torsions)", kFullDof);
-    else if (p_.method == ClosureMethod::Kic && l.kic) method = "kic";
-    else if (p_.method == ClosureMethod::Kic) method = "rcd (kic not applicable)";
+    else if (copies == 0) method = "rcd, best effort (metal distance)";
+    else if (l.partial) method = std::format("rcd, best effort (fewer than {} torsions)", kFullDof * copies);
+    else if (l.members.size() > 1) method = kicAsked ? "rcd (kic not applicable to coupled links)" : "rcd";
+    else if (kicAsked && l.kic) method = "kic";
+    else if (kicAsked) method = "rcd (kic not applicable)";
     else method = "rcd";
-    if (l.restraint)
-      out.push_back(std::format("{} - {}: {} torsions, {}", name(l.ra), name(l.rb), l.dof.size(), method));
+    if (l.members.size() > 1)
+      out.push_back(std::format("{}: coupled, {} links, {} torsions, {}", label, l.members.size(), l.dof.size(), method));
+    else if (copies == 0)
+      out.push_back(std::format("{} (metal distance): {} torsions, {}", label, l.dof.size(), method));
     else
-      out.push_back(std::format("{} - {}: ring path {} atoms, {} torsions, {} KIC pivots, {}", name(l.pairs.back().target),
-                                name(l.pairs.front().target), l.ring.size(), l.dof.size(), l.pivots.size(), method));
+      out.push_back(std::format("{}: ring path {} atoms, {} torsions, {} KIC pivots, {}", label, l.ring.size(),
+                                l.dof.size(), l.pivots.size(), method));
   }
   return out;
 }
@@ -255,10 +343,19 @@ std::vector<Vec3> LoopCloser::partCoords(int part, std::span<const double> a) co
 }
 
 double LoopCloser::deviation(const Link& l, const std::vector<Vec3>& x) const {
-  if (l.restraint) return std::abs(norm(x[l.ra] - x[l.rb]) - l.r0);
-  double s = 0;
-  for (const auto& pr : l.pairs) s += dot(x[pr.moving] - x[pr.target], x[pr.moving] - x[pr.target]);
-  return std::sqrt(s / static_cast<double>(l.pairs.size()));
+  // Copy links: the largest RMSD of the pairs of one link; metal distances only: the largest |d - r0|.
+  double d = 0;
+  if (l.pairEnd.empty()) {
+    for (const auto& r : l.restraints) d = std::max(d, std::abs(norm(x[r.a] - x[r.b]) - r.r0));
+    return d;
+  }
+  for (std::size_t c = 0, b = 0; c < l.pairEnd.size(); b = l.pairEnd[c++]) {
+    double s = 0;
+    for (auto q = b; q < static_cast<std::size_t>(l.pairEnd[c]); ++q)
+      s += dot(x[l.pairs[q].moving] - x[l.pairs[q].target], x[l.pairs[q].moving] - x[l.pairs[q].target]);
+    d = std::max(d, std::sqrt(s / static_cast<double>(l.pairEnd[c] - b)));
+  }
+  return d;
 }
 
 bool LoopCloser::clashFree(const Link& l, std::span<const double> a) const {
@@ -282,19 +379,29 @@ void LoopCloser::resampleLink(Rng& rng, const Link& l, std::span<double> a, cons
 bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const SegmentSampler& resample) const {
   // Best effort: one attempt; the deviation never grows, the result is kept.
   const int restarts = l.partial ? 0 : p_.rcdMaxRestart;
+  // A group of coupled links converges more slowly: rcdMaxIter per link.
+  const int maxIter = p_.rcdMaxIter * static_cast<int>(l.members.size());
   const std::vector<double> orig(a.begin(), a.end());
   const int nd = static_cast<int>(l.dof.size());
   const double tol = p_.rcdTolerance;
   std::vector<Vec3> P(l.points.size());
   std::vector<char> mv(l.points.size(), 0);
   auto dev = [&]() {
-    if (l.restraint) return std::abs(norm(P[l.pairPoint[0]] - P[l.pairPoint[1]]) - l.r0);
-    double s = 0;
-    for (std::size_t q = 0; q < l.pairPoint.size(); q += 2) {
-      const Vec3 d = P[l.pairPoint[q]] - P[l.pairPoint[q + 1]];
-      s += dot(d, d);
+    double d = 0;
+    if (l.pairEnd.empty()) {
+      for (std::size_t q = 0; q < l.restraints.size(); ++q)
+        d = std::max(d, std::abs(norm(P[l.restraintPoint[2 * q]] - P[l.restraintPoint[2 * q + 1]]) - l.restraints[q].r0));
+      return d;
     }
-    return std::sqrt(s / static_cast<double>(l.pairPoint.size() / 2));
+    for (std::size_t c = 0, b = 0; c < l.pairEnd.size(); b = l.pairEnd[c++]) {
+      double s = 0;
+      for (auto q = b; q < static_cast<std::size_t>(l.pairEnd[c]); ++q) {
+        const Vec3 v = P[l.pairPoint[2 * q]] - P[l.pairPoint[2 * q + 1]];
+        s += dot(v, v);
+      }
+      d = std::max(d, std::sqrt(s / static_cast<double>(l.pairEnd[c] - b)));
+    }
+    return d;
   };
   for (int att = 0; att <= restarts; ++att) {
     if (att > 0) {
@@ -305,46 +412,81 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
     for (std::size_t i = 0; i < l.points.size(); ++i) P[i] = x[l.points[i]];
     bool conv = dev() <= tol;
     int prev = -1;
-    for (int it = 0; it < p_.rcdMaxIter && !conv; ++it) {
+    for (int it = 0; it < maxIter && !conv; ++it) {
       int d = static_cast<int>(rng.below(nd));
       if (nd > 1 && d == prev) d = (d + 1 + static_cast<int>(rng.below(nd - 1))) % nd;
       prev = d;
       for (int i : l.moves[d]) mv[i] = 1;
       const Vec3 o = P[l.axisFixed[d]];
       const Vec3 k = unit(P[l.axisMoving[d]] - o);
+      // Copy pairs: sum |m - s|^2 = const - 2 (den cos d + num sin d). Metal distance:
+      // |m - s|^2 = A - 2 B cos(d - d0).
+      double num = 0, den = 0;
+      bool copyTerm = false;
+      struct RTerm {
+        double A, B, d0, r0;
+      };
+      std::vector<RTerm> rt;
+      for (std::size_t q = 0; q < l.pairPoint.size(); q += 2) {
+        const int i1 = l.pairPoint[q], i2 = l.pairPoint[q + 1];
+        if (mv[i1] == mv[i2]) continue;
+        const int m = mv[i1] ? i1 : i2, s = mv[i1] ? i2 : i1;
+        const Vec3 rp = perp(P[m] - o, k), tp = perp(P[s] - o, k);
+        num += dot(k, cross(rp, tp));
+        den += dot(rp, tp);
+        copyTerm = true;
+      }
+      for (std::size_t q = 0; q < l.restraints.size(); ++q) {
+        const int im = l.restraintPoint[2 * q], is = l.restraintPoint[2 * q + 1];
+        if (mv[im] == mv[is]) continue;
+        const int m = mv[im] ? im : is, s = mv[im] ? is : im;
+        const Vec3 r = P[m] - o, tv = P[s] - o;
+        const Vec3 rp = perp(r, k), tp = perp(tv, k);
+        const double dn = dot(rp, tp), nm = dot(k, cross(rp, tp));
+        const double B = std::hypot(dn, nm);
+        if (B <= 1e-12) continue;
+        rt.push_back({dot(rp, rp) + dot(tp, tp) + std::pow(dot(r, k) - dot(tv, k), 2), B, std::atan2(nm, dn),
+                      l.restraints[q].r0});
+      }
       double delta = 0;
-      if (l.restraint) {
-        const int im = l.pairPoint[0], is = l.pairPoint[1];
-        if (mv[im] != mv[is]) {
-          const int m = mv[im] ? im : is, s = mv[im] ? is : im;
-          const Vec3 r = P[m] - o, t = P[s] - o;
-          const Vec3 rp = perp(r, k), tp = perp(t, k);
-          const double den = dot(rp, tp), num = dot(k, cross(rp, tp));
-          const double B = std::hypot(den, num);
-          if (B > 1e-12) {
-            const double A = dot(rp, rp) + dot(tp, tp) + std::pow(dot(r, k) - dot(t, k), 2);
-            const double d0 = std::atan2(num, den);
-            const double c = (A - l.r0 * l.r0) / (2 * B);
-            if (c >= 1) delta = d0;
-            else if (c <= -1) delta = d0 + std::numbers::pi;
-            else {
-              const double w = std::acos(c);
-              const double x1 = std::remainder(d0 + w, 2 * std::numbers::pi), x2 = std::remainder(d0 - w, 2 * std::numbers::pi);
-              delta = std::abs(x1) <= std::abs(x2) ? x1 : x2;
-            }
-          }
+      if (rt.empty()) {
+        if (copyTerm && (num != 0 || den != 0)) delta = std::atan2(num, den);
+      } else if (!copyTerm && rt.size() == 1) {
+        const RTerm& r = rt[0];
+        const double c = (r.A - r.r0 * r.r0) / (2 * r.B);
+        if (c >= 1) delta = r.d0;
+        else if (c <= -1) delta = r.d0 + std::numbers::pi;
+        else {
+          const double w = std::acos(c);
+          const double x1 = std::remainder(r.d0 + w, 2 * std::numbers::pi), x2 = std::remainder(r.d0 - w, 2 * std::numbers::pi);
+          delta = std::abs(x1) <= std::abs(x2) ? x1 : x2;
         }
       } else {
-        double num = 0, den = 0;
-        for (std::size_t q = 0; q < l.pairPoint.size(); q += 2) {
-          const int i1 = l.pairPoint[q], i2 = l.pairPoint[q + 1];
-          if (mv[i1] == mv[i2]) continue;
-          const int m = mv[i1] ? i1 : i2, s = mv[i1] ? i2 : i1;
-          const Vec3 rp = perp(P[m] - o, k), tp = perp(P[s] - o, k);
-          num += dot(k, cross(rp, tp));
-          den += dot(rp, tp);
+        // Several terms: 1-degree scan, then golden-section refinement; kept only when lower than at 0.
+        auto f = [&](double x) {
+          double v = -2 * (den * std::cos(x) + num * std::sin(x));
+          for (const RTerm& r : rt) {
+            const double e = std::sqrt(std::max(0.0, r.A - 2 * r.B * std::cos(x - r.d0))) - r.r0;
+            v += e * e;
+          }
+          return v;
+        };
+        const double f0 = f(0), st = std::numbers::pi / 180;
+        double best = 0, fb = f0;
+        for (int s = -179; s <= 180; ++s)
+          if (const double v = f(s * st); v < fb) {
+            fb = v;
+            best = s * st;
+          }
+        double lo = best - st, hi = best + st;
+        constexpr double g = 0.6180339887498949;
+        for (int it = 0; it < 40; ++it) {
+          const double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
+          if (f(x1) < f(x2)) hi = x2;
+          else lo = x1;
         }
-        if (num != 0 || den != 0) delta = std::atan2(num, den);
+        if (const double x = 0.5 * (lo + hi); f(x) < fb) best = x;
+        delta = f(best) < f0 ? best : 0;
       }
       if (delta != 0) {
         const double c = std::cos(delta), s = std::sin(delta);

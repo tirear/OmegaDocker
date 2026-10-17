@@ -1851,28 +1851,50 @@ TEST_CASE("grow: coordinates, clashes and retries (1L2Y)") {
     CHECK(maxCoordDiff(grown, ref) < 1e-9);
   }
 
-  // Default checks: built samples have no clash; retries resample whole segments.
-  const od::GrowBuilder grow(sys, parts, {&x.s().topology}, smp.segments(), {});
-  int ok = 0, retried = 0;
+  // Without backtracking: built samples have no clash; retries resample whole segments.
+  od::GrowParams noBack;
+  noBack.maxBacktrack = 0;
+  const od::GrowBuilder flat(sys, parts, {&x.s().topology}, smp.segments(), noBack);
+  int okFlat = 0, retried = 0;
   for (int k = 0; k < 300; ++k) {
     od::Rng rng(22, 0, k);
     smp.sample(rng, a);
-    const auto r = grow.build(rng, a, resample);
+    const auto r = flat.build(rng, a, resample);
     CHECK(r.reachFails == 0);
+    CHECK(r.backtracks == 0);
     retried += r.retries > 0;
     if (!r.ok) {
       CHECK(r.clashFails == r.retries + 1);
       CHECK(r.retries >= 16);  // the last segment failed its first try and 16 retries
       continue;
     }
-    ++ok;
+    ++okFlat;
     CHECK(r.clashFails == r.retries);
     CHECK(sys.evaluate(a).clashPairs == 0);
   }
-  CHECK(ok > 0);
+  CHECK(okFlat > 0);
   CHECK(retried > 0);
+  // Default (growMaxBacktrack 4): every failed check is followed by a retry, a backtrack or the discard.
+  const od::GrowBuilder grow(sys, parts, {&x.s().topology}, smp.segments(), {});
+  int ok = 0, backtracked = 0;
+  for (int k = 0; k < 300; ++k) {
+    od::Rng rng(22, 0, k);
+    smp.sample(rng, a);
+    const auto r = grow.build(rng, a, resample);
+    backtracked += r.backtracks > 0;
+    CHECK(r.clashFails == r.retries + r.backtracks + (r.ok ? 0 : 1));
+    if (!r.ok) continue;
+    ++ok;
+    CHECK(sys.evaluate(a).clashPairs == 0);
+  }
+  MESSAGE(std::format("grow 1L2Y: built {} of 300 without backtracking, {} with ({} backtracked)", okFlat, ok, backtracked));
+  CHECK(backtracked > 0);
+  CHECK(ok >= okFlat);
   // No retries: a sample is either built at once or discarded.
-  const od::GrowBuilder noRetry(sys, parts, {&x.s().topology}, smp.segments(), {0});
+  od::GrowParams once;
+  once.maxRetry = 0;
+  once.maxBacktrack = 0;
+  const od::GrowBuilder noRetry(sys, parts, {&x.s().topology}, smp.segments(), once);
   for (int k = 0; k < 100; ++k) {
     od::Rng rng(22, 0, k);
     smp.sample(rng, a);
@@ -1915,6 +1937,10 @@ TEST_CASE("grow: reach toward a loop closure (2KJJ)") {
     reachFails += reachOnly.build(r, a, resample).reachFails > 0;
   }
   CHECK(reachFails > 0);
+  // With loop closure the reach checks are off (spec 7.8).
+  od::GrowParams noReach{0, 0.0};
+  noReach.reach = false;
+  CHECK(od::GrowBuilder(sys, parts, {&s.topology}, smp.segments(), noReach).reachCheckCount() == 0);
   const od::GrowBuilder tiny(sys, parts, {&s.topology}, smp.segments(), {0, 0.0, 0.01, 0.01});
   for (int k = 0; k < 20; ++k) {
     od::Rng r(4, 0, k);
@@ -1945,9 +1971,9 @@ double linkDeviation(const od::TorsionTree& tree, const od::ClosureLink& l, cons
 
 }  // namespace
 
-TEST_CASE("closure: RCD and KIC close a loop (2KJJ)") {
+TEST_CASE("closure: RCD and KIC close a loop (2KJJ A:12-17)") {
   StaFixture f;
-  const auto cfg = f.ok(freeResidues(f.text, "A", 8, 15));
+  const auto cfg = f.ok(freeResidues(f.text, "A", 12, 17));
   const od::MolSettings& s = cfg.molecules[0];
   const od::TorsionTree& tree = s.tree;
   const std::vector<od::EnergyPart> parts{{&f.mols[0], &tree}};
@@ -1956,7 +1982,7 @@ TEST_CASE("closure: RCD and KIC close a loop (2KJJ)") {
   const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
   std::vector<bool> freeMask(sys.torsionCount());
   for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
-  // Link 0: the loop break (16 torsions); then two disulfides with 4 torsions each (best effort).
+  // Link 0: the loop break (12 torsions); then two disulfides with 4 torsions each (best effort), not coupled to it.
   REQUIRE(tree.links.size() == 3);
   const auto& loop = tree.links[0];
   CHECK(f.mols[0].atoms[loop.a].name == "C");
@@ -1972,8 +1998,9 @@ TEST_CASE("closure: RCD and KIC close a loop (2KJJ)") {
     const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
     REQUIRE(closer.active());
     const auto lines = closer.describe();
+    for (const auto& l : lines) MESSAGE(l);
     REQUIRE(lines.size() == 3);
-    CHECK(lines[0].find(method == od::ClosureMethod::Kic ? "16 torsions, 8 KIC pivots, kic" : "16 torsions, 8 KIC pivots, rcd") !=
+    CHECK(lines[0].find(method == od::ClosureMethod::Kic ? "12 torsions, 6 KIC pivots, kic" : "12 torsions, 6 KIC pivots, rcd") !=
           std::string::npos);
     CHECK(lines[1].find("best effort") != std::string::npos);
     CHECK(lines[2].find("best effort") != std::string::npos);
@@ -2003,7 +2030,7 @@ TEST_CASE("closure: RCD and KIC close a loop (2KJJ)") {
           ++changed;
           CHECK_FALSE(smp.cisTrans(g));
         }
-      CHECK(changed <= 24);
+      CHECK(changed <= 20);
     }
     MESSAGE(std::format("closed {} of {}", closed, total));
     CHECK(closed >= (clash > 0 ? total / 4 : total * 9 / 10));
@@ -2027,6 +2054,128 @@ TEST_CASE("closure: RCD and KIC close a loop (2KJJ)") {
   // none: no closure.
   cp.method = od::ClosureMethod::None;
   CHECK_FALSE(od::LoopCloser(sys, parts, freeMask, smp.segments(), cp).active());
+}
+
+TEST_CASE("closure: coupled links closed together (2KJJ A:8-15 with the disulfide A:6-A:11)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 8, 15));
+  const od::MolSettings& s = cfg.molecules[0];
+  const od::TorsionTree& tree = s.tree;
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  // The loop break (16 torsions) and the disulfide A:6-A:11 (Cys 11 in the loop) share torsions: one group of
+  // 20 torsions, closed by RCD (KIC is not applicable to a group); the disulfide A:20-B:19 alone is best effort.
+  REQUIRE(tree.links.size() == 3);
+  const auto& loop = tree.links[0];
+  CHECK(f.mols[0].atoms[loop.a].name == "C");
+  CHECK(f.mols[0].atoms[loop.b].name == "N");
+  // The random side chains of csgm1a often clash with the closed loop; without the clash check every sample closes.
+  // growClose: the clash check leaves out the side chains built after the closure.
+  struct Run {
+    od::ClosureMethod method;
+    double clash;
+    bool growClose;
+  };
+  for (const auto& [method, clash, growClose] : {Run{od::ClosureMethod::Rcd, 1.8, false}, Run{od::ClosureMethod::Kic, 1.8, false},
+                                                 Run{od::ClosureMethod::Rcd, 1.8, true}, Run{od::ClosureMethod::Rcd, 0.0, false},
+                                                 Run{od::ClosureMethod::Kic, 0.0, false}}) {
+    CAPTURE(static_cast<int>(method));
+    CAPTURE(clash);
+    CAPTURE(growClose);
+    od::ClosureParams cp;
+    cp.method = method;
+    cp.clashDistance = clash;
+    cp.growClose = growClose;
+    const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
+    REQUIRE(closer.active());
+    const auto lines = closer.describe();
+    for (const auto& l : lines) MESSAGE(l);
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0].find(method == od::ClosureMethod::Kic
+                            ? "A:15:C - A:16:N + A:6:SG - A:11:SG: coupled, 2 links, 20 torsions, rcd (kic not applicable"
+                            : "A:15:C - A:16:N + A:6:SG - A:11:SG: coupled, 2 links, 20 torsions, rcd") != std::string::npos);
+    CHECK(lines[1].find("A:20:SG - B:19:SG") != std::string::npos);
+    CHECK(lines[1].find("best effort") != std::string::npos);
+    int closed = 0;
+    const int total = 40;
+    for (int k = 0; k < total; ++k) {
+      od::Rng r(7, 0, k);
+      std::vector<double> a = sys.inputAngles();
+      smp.sample(r, a);
+      const auto x0 = sys.coordinates(std::span<const double>(a));
+      CHECK(linkDeviation(tree, loop, x0) > 1.0);
+      const std::vector<double> before = a;
+      if (!closer.close(r, a, resample)) {
+        CHECK(a == before);
+        continue;
+      }
+      ++closed;
+      const auto x = sys.coordinates(std::span<const double>(a));
+      // Both links of the group are closed; best effort does not increase the deviation of A:20-B:19.
+      for (int li : {0, 1}) CHECK(linkDeviation(tree, tree.links[li], x) <= cp.rcdTolerance * std::sqrt(3.0) + 1e-9);
+      CHECK(linkDeviation(tree, tree.links[2], x) <= linkDeviation(tree, tree.links[2], x0) + 1e-6);
+      // Torsions off the closure paths are unchanged; cisTrans omegas are never adjusted.
+      int changed = 0;
+      for (int g = 0; g < sys.torsionCount(); ++g)
+        if (a[g] != before[g]) {
+          ++changed;
+          CHECK_FALSE(smp.cisTrans(g));
+        }
+      CHECK(changed <= 24);
+    }
+    MESSAGE(std::format("closed {} of {}", closed, total));
+    // With the clash check most closed groups clash with residues 1-6 (1.4-1.7 Å), packing rather than geometry.
+    CHECK(closed >= (clash == 0 ? total * 3 / 4 : 0));
+  }
+}
+
+TEST_CASE("closure: growClose builds the rest after the closure (2KJJ A:12-17)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 12, 17));
+  const od::MolSettings& s = cfg.molecules[0];
+  const od::TorsionTree& tree = s.tree;
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  od::ClosureParams cp;
+  cp.growClose = true;
+  const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
+  const std::vector<bool>& path = closer.pathTorsions();
+  REQUIRE(static_cast<int>(path.size()) == sys.torsionCount());
+  CHECK(std::count(path.begin(), path.end(), true) >= 12);
+  od::GrowParams gp;
+  gp.reach = false;
+  gp.fixed = path;
+  const od::GrowBuilder grow(sys, parts, {&s.topology}, smp.segments(), gp);
+  CHECK(grow.fixedStepCount() > 0);
+  CHECK(grow.fixedStepCount() < grow.stepCount());
+  CHECK(grow.reachCheckCount() == 0);
+  int closed = 0, built = 0;
+  for (int k = 0; k < 40; ++k) {
+    od::Rng r(11, 0, k);
+    std::vector<double> a = sys.inputAngles();
+    smp.sample(r, a);
+    if (!closer.close(r, a, resample)) continue;
+    ++closed;
+    const std::vector<double> afterClose = a;
+    if (!grow.build(r, a, resample).ok) continue;
+    ++built;
+    // The closure paths keep their closed values; the loop stays closed.
+    for (int g = 0; g < sys.torsionCount(); ++g)
+      if (path[g]) CHECK(a[g] == afterClose[g]);
+    const auto x = sys.coordinates(std::span<const double>(a));
+    CHECK(linkDeviation(tree, tree.links[0], x) <= cp.rcdTolerance * std::sqrt(3.0) + 1e-9);
+  }
+  MESSAGE(std::format("growClose 2KJJ A:12-17: closed {} of 40, built {}", closed, built));
+  CHECK(closed > 0);
+  CHECK(built > 0);
 }
 
 TEST_CASE("closure: metal distance restraints (1ZNF, metalBond = break)") {
@@ -2060,11 +2209,10 @@ TEST_CASE("closure: metal distance restraints (1ZNF, metalBond = break)") {
   cp.clashDistance = 0;
   const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
   const auto lines = closer.describe();
-  REQUIRE(lines.size() == 3);
-  for (const auto& l : lines) {
-    MESSAGE(l);
-    CHECK(l.find("torsions, rcd, best effort (metal distance)") != std::string::npos);
-  }
+  // The three distances share torsions: one best-effort group.
+  REQUIRE(lines.size() == 1);
+  CHECK(lines[0].find("A:6:SG - A:27:ZN + A:19:NE2 - A:27:ZN + A:23:NE2 - A:27:ZN: coupled, 3 links") != std::string::npos);
+  CHECK(lines[0].find("torsions, rcd, best effort (metal distance)") != std::string::npos);
   // Best effort: closure never fails; the deviation does not grow and often reaches the tolerance.
   int reached = 0;
   for (int k = 0; k < 20; ++k) {

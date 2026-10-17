@@ -51,6 +51,10 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
           ++st.closeFailed;
           continue;
         }
+        if (built[i] == GenResult::SideGrowFailed) {
+          ++st.sideGrowFailed;
+          continue;
+        }
         st.minSteps += steps[i];
         if (!(e.filterEnergy() < p.Emax)) {
           ++st.overEmax;
@@ -78,9 +82,9 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
     if (nowL2 >= p.minL2) break;
     if (st.l1 >= p.maxL1Total)
       fail("9a: {} samples generated (stam.maxL1TotalNum / mobm.maxL1TotalNum) but only {} of {} passed the filters "
-           "(discarded while growing: {}, loop closure failed: {}, energy >= energy.Emax: {}, closure deviation > "
-           "topology.maxBreakDist: {})",
-           st.l1, nowL2, p.minL2, st.growFailed, st.closeFailed, st.overEmax, st.notClosed);
+           "(discarded while growing: {}, loop closure failed: {}, discarded while growing after the closure: {}, "
+           "energy >= energy.Emax: {}, closure deviation > topology.maxBreakDist: {})",
+           st.l1, nowL2, p.minL2, st.growFailed, st.closeFailed, st.sideGrowFailed, st.overEmax, st.notClosed);
     l1 = std::min(p.fixedL1 > 0 ? p.fixedL1 : next, p.maxL1Total - st.l1);
   }
   return st;

@@ -25,8 +25,9 @@ struct ConfSampleOpts {
 struct CsgmOpts {
   long long maxL1TotalNum = 1000000000;
   long long maxL1BatchNum = 65536;
-  bool grow = false;  // <set>.csgmBuild = "grow"
+  std::string build = "whole";  // <set>.csgmBuild: whole | grow | growClose
   int growMaxRetry = 16;
+  int growMaxBacktrack = 4;
   double csgm1AngleStep = 1.0;
   double ramaFloor = 1e-4;
   // csgm2 (spec 7.6); rates in percent as AutoDock-GPU.

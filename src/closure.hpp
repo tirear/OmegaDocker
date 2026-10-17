@@ -27,6 +27,9 @@ struct ClosureParams {
   int rcdMaxRestart = 10;
   int kicMaxTrial = 100;
   double clashDistance = 1.8;
+  // csgmBuild = growClose (spec 7.8): the clash check after closing covers every
+  // atom moved by the closure except those built after it (side chains).
+  bool growClose = false;
 };
 
 class LoopCloser {
@@ -38,10 +41,13 @@ class LoopCloser {
 
   // Links with at least one torsion to adjust.
   bool active() const;
-  // One line per link for the log.
+  // One line per group of links for the log.
   std::vector<std::string> describe() const;
+  // Per concatenated torsion: a torsion of a closure path (ring path bonds; for a
+  // metal distance, torsions moving one atom but not the other). Empty for none.
+  const std::vector<bool>& pathTorsions() const { return path_; }
 
-  // Closes every link in turn (spec 7.11); false: a link could not be closed.
+  // Closes every group of links in turn (spec 7.11); false: a group could not be closed.
   // resample: csgm1 segment sampler (empty: uniform angles).
   bool close(Rng& rng, std::span<double> anglesDeg, const SegmentSampler& resample) const;
 
@@ -49,18 +55,24 @@ class LoopCloser {
   struct Pair {
     int moving = -1, target = -1;  // part-local coordinate indices
   };
+  struct Restraint {
+    int a = -1, b = -1;  // part-local atom indices
+    double r0 = 0;
+  };
+  // A group of links sharing adjustable torsions, closed together (spec 7.11).
   struct Link {
     int part = 0;
-    bool restraint = false;
-    std::vector<Pair> pairs;        // copy links
-    int ra = -1, rb = -1;           // restraint atoms
-    double r0 = 0;
-    std::vector<int> ring;          // copy links: path atoms a ... b (part-local)
+    std::vector<int> members;       // indices into TorsionTree::links
+    std::vector<Pair> pairs;        // copy links: B', Y', A' pairs of each, in member order
+    std::vector<int> pairEnd;       // per copy link: end of its pairs
+    std::vector<Restraint> restraints;
+    std::vector<int> pathAtoms;     // ring path atoms of the copy links, the atoms of the metal distances
+    std::vector<int> ring;          // single copy link: path atoms a ... b (part-local)
     std::vector<int> bondTorsion;   // per ring bond (ring[j], ring[j+1]): global torsion index, -1 if not adjustable
     std::vector<int> dof;           // adjustable global torsion indices
     std::vector<int> pivots;        // ring indices usable as KIC pivots
     bool kic = false;
-    bool partial = false;           // best effort: metal distance, or fewer than 6 adjustable torsions
+    bool partial = false;           // best effort: metal distances only, or fewer than 6 adjustable torsions per copy link
     std::vector<int> resampleSegments;  // csgm1 segments made only of adjustable torsions
     std::vector<int> resampleCovered;   // their torsions, sorted
     // Tracked coordinates for RCD: points (part-local indices); per dof, the points it moves.
@@ -68,6 +80,7 @@ class LoopCloser {
     std::vector<std::vector<int>> moves;
     std::vector<int> axisFixed, axisMoving;  // per dof, index into points
     std::vector<int> pairPoint;              // per pair: moving, target as indices into points
+    std::vector<int> restraintPoint;         // per restraint: a, b as indices into points
     std::vector<std::pair<int, int>> clashPairs;  // system coordinate indices
   };
   double deviation(const Link& l, const std::vector<Vec3>& x) const;  // part-local coordinates
@@ -82,6 +95,7 @@ class LoopCloser {
   ClosureParams p_;
   std::vector<int> partOfTorsion_, localTorsion_;
   std::vector<Link> links_;
+  std::vector<bool> path_;
 };
 
 }  // namespace od

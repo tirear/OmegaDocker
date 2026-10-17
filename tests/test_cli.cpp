@@ -211,8 +211,8 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK_THROWS_AS(parse({"--maxL1BatchNum", "10"}), od::Error);
   CHECK(t.mobmCsgm.ramaFloor == 0);
   CHECK(t.stamCsgm.ramaFloor == doctest::Approx(1e-4));
-  CHECK(t.stamCsgm.grow);
-  CHECK_FALSE(t.mobmCsgm.grow);
+  CHECK(t.stamCsgm.build == "grow");
+  CHECK(t.mobmCsgm.build == "whole");
   CHECK(t.mobmCsgm.csgm1AngleStep == 5);
   CHECK(t.stamCsgm.csgm1AngleStep == 1);
   CHECK(t.stamCsgm.growMaxRetry == 3);
@@ -286,7 +286,7 @@ TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
   CHECK(*o.seed == 7);
   CHECK(o.ccd == std::vector<std::string>{"x.cif"});
   CHECK((*o.boxCenter)[2] == 3.5);
-  CHECK(o.stamCsgm.grow);
+  CHECK(o.stamCsgm.build == "grow");
   CHECK(o.stamFixedResMovable);
   CHECK(o.posm == "posm2");
   CHECK(o.posStep == 2);
@@ -300,7 +300,7 @@ TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
   CHECK_FALSE(c.midKeepSkipped);
   CHECK(c.posStep == 1.5);
   CHECK(c.fe.rrtScaling == 6);
-  CHECK(c.stamCsgm.grow);
+  CHECK(c.stamCsgm.build == "grow");
   // params.used.toml reads back to the same values.
   o.fe.tors = 0.2983;
   o.mobm.docking = 8;
@@ -312,7 +312,7 @@ TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
   CHECK(*r.seed == 7);
   CHECK(r.ccd == o.ccd);
   CHECK(*r.boxCenter == *o.boxCenter);
-  CHECK(r.stamCsgm.grow);
+  CHECK(r.stamCsgm.build == "grow");
   CHECK(r.posStep == 2);
   CHECK(r.fe.tors == 0.2983);
   CHECK(r.fe.inter == o.fe.inter);

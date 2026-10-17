@@ -199,14 +199,6 @@ class ConfSet {
     p_.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep};
     p_.seed = seed;
     p_.stream = stream;
-    if (csgm_.grow) {
-      std::vector<const od::Topology*> topos;
-      for (const auto* s : settings_) topos.push_back(&s->topology);
-      grow_.emplace(sys_, parts_, topos, sampler_.segments(),
-                    od::GrowParams{csgm_.growMaxRetry, opt.clashDistance, opt.reachProtein, opt.reachNucleic});
-      od::logInfo(std::format("  {:<40} grow: {} segments, {} reach checks", name_, grow_->stepCount(),
-                              grow_->reachCheckCount()));
-    }
     od::ClosureParams clp;
     clp.method = csgm_.closure == "kic" ? od::ClosureMethod::Kic
                  : csgm_.closure == "rcd" ? od::ClosureMethod::Rcd
@@ -216,11 +208,32 @@ class ConfSet {
     clp.rcdMaxRestart = csgm_.rcdMaxRestart;
     clp.kicMaxTrial = csgm_.kicMaxTrial;
     clp.clashDistance = opt.clashDistance;
+    clp.growClose = csgm_.build == "growClose";
     std::vector<bool> freeMask(cisTrans_.size());
     for (std::size_t g = 0; g < freeMask.size(); ++g) freeMask[g] = !cisTrans_[g];
     closer_.emplace(sys_, parts_, freeMask, sampler_.segments(), clp);
     if (clp.method != od::ClosureMethod::None)
       for (const auto& line : closer_->describe()) od::logInfo(std::format("  {:<40} closure: {}", name_, line));
+    const bool closing = closer_->active();
+    if (csgm_.build != "whole") {
+      // growClose without a loop closure: grow (spec 7.8).
+      growClose_ = csgm_.build == "growClose" && closing;
+      if (csgm_.build == "growClose" && !closing)
+        od::logInfo(std::format("  {:<40} growClose: no loop closure; built as grow", name_));
+      std::vector<const od::Topology*> topos;
+      for (const auto* s : settings_) topos.push_back(&s->topology);
+      od::GrowParams gp{csgm_.growMaxRetry, opt.clashDistance, opt.reachProtein, opt.reachNucleic};
+      gp.maxBacktrack = csgm_.growMaxBacktrack;
+      gp.reach = !closing;
+      if (growClose_) gp.fixed = closer_->pathTorsions();
+      grow_.emplace(sys_, parts_, topos, sampler_.segments(), gp);
+      if (growClose_)
+        od::logInfo(std::format("  {:<40} growClose: {} segments, {} applied before the loop closure", name_,
+                                grow_->stepCount(), grow_->fixedStepCount()));
+      else
+        od::logInfo(std::format("  {:<40} grow: {} segments, {} reach checks", name_, grow_->stepCount(),
+                                grow_->reachCheckCount()));
+    }
   }
   ConfSet(const ConfSet&) = delete;
   ConfSet& operator=(const ConfSet&) = delete;
@@ -311,19 +324,23 @@ class ConfSet {
     const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { sampler_.sampleSegment(r, seg, a); };
     const bool closing = closer_ && closer_->active();
     const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
-      bool grown = true;
       if (pe) {
         const int m = static_cast<int>(idx.local % pe_.perLine);
         od::csgm3Sample(od::Rng(p_.seed, p_.stream, idx.global - m), ends, idx.local / pe_.perLine, m, cisTrans_, pe_, a);
-        grown = !grow_ || grow_->build(r, a, {}).ok;
       } else if (ga) {
         od::csgm2Offspring(r, parents, cisTrans_, ga_, a);
-        grown = !grow_ || grow_->build(r, a, {}).ok;
       } else {
         sampler_.sample(r, a);
-        grown = !grow_ || grow_->build(r, a, resample).ok;
       }
-      if (!grown) return od::GenResult::GrowFailed;
+      // csgm2 / csgm3: the torsions are given; building does not resample.
+      const od::SegmentSampler& growResample = pe || ga ? od::SegmentSampler{} : resample;
+      if (growClose_) {
+        // growClose: closure paths as sampled, closure, then the rest built segment by segment (spec 7.8).
+        if (!closer_->close(r, a, resample)) return od::GenResult::CloseFailed;
+        if (!grow_->build(r, a, growResample).ok) return od::GenResult::SideGrowFailed;
+        return od::GenResult::Built;
+      }
+      if (grow_ && !grow_->build(r, a, growResample).ok) return od::GenResult::GrowFailed;
       if (closing && !closer_->close(r, a, resample)) return od::GenResult::CloseFailed;
       return od::GenResult::Built;
     };
@@ -334,11 +351,11 @@ class ConfSet {
     const auto st = od::fillL2Pool(sys_, gen, l1, p_, counter_, pool_);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     nextL1_ = st.nextL1;
-    const long long minimized = st.l1 - st.growFailed - st.closeFailed;
+    const long long minimized = st.l1 - st.growFailed - st.closeFailed - st.sideGrowFailed;
     od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, closure {}, "
-                            "E >= Emax {}, not closed {})  steps/sample {:.1f}  {:.2f} s",
+                            "grow after closure {}, E >= Emax {}, not closed {})  steps/sample {:.1f}  {:.2f} s",
                             name_, pe ? "csgm3" : ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(),
-                            st.growFailed, st.closeFailed, st.overEmax, st.notClosed,
+                            st.growFailed, st.closeFailed, st.sideGrowFailed, st.overEmax, st.notClosed,
                             minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   }
 
@@ -353,6 +370,7 @@ class ConfSet {
   od::Csgm2Params ga_;
   od::Csgm3Params pe_;
   std::optional<od::GrowBuilder> grow_;
+  bool growClose_ = false;
   std::optional<od::LoopCloser> closer_;
   od::ConfSampleNums n_;
   od::Fill9aParams p_;

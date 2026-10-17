@@ -161,14 +161,15 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                       [csgm](auto& o) -> auto& { return csgm(o).maxL1TotalNum; }));
   t.push_back(integer(set + ".maxL1BatchNum", "<n>", "65536", who + "9a: largest number of samples processed at once",
                       [csgm](auto& o) -> auto& { return csgm(o).maxL1BatchNum; }));
-  t.push_back({set + ".csgmBuild", Type::Str, "whole|grow", "whole",
-               who + "9a: apply all torsions at once, or build segment by segment",
+  t.push_back({set + ".csgmBuild", Type::Str, "whole|grow|growClose", "whole",
+               who + "9a: apply all torsions at once, build segment by segment, or close the loops before building the rest",
                [csgm](Options& o, const Tokens& v) {
                  const std::string& s = one(v);
-                 if (s != "whole" && s != "grow") fail("expected whole or grow but got '{}'", s);
-                 csgm(o).grow = s == "grow";
+                 if (s != "whole" && s != "grow" && s != "growClose")
+                   fail("expected whole, grow or growClose but got '{}'", s);
+                 csgm(o).build = s;
                },
-               [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).grow ? "grow" : "whole"}; }});
+               [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).build}; }});
   t.push_back({set + ".csgmGA", Type::Str, "csgm2", "csgm2",
                who + "9a: method once the dcss has eliteConfSampleNum samples (csgm2 or csgm3)",
                [csgm](Options& o, const Tokens& v) {
@@ -211,6 +212,9 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                       [csgm](auto& o) -> auto& { return csgm(o).kicMaxTrial; }));
   t.push_back(integer(set + ".growMaxRetry", "<n>", "16", who + "csgmBuild = grow, csgm1: resamplings of a failing segment before discarding",
                       [csgm](auto& o) -> auto& { return csgm(o).growMaxRetry; }));
+  t.push_back(integer(set + ".growMaxBacktrack", "<n>", "4",
+                      who + "csgmBuild = grow / growClose, csgm1: resamplings of the parent segment when a segment runs out of retries",
+                      [csgm](auto& o) -> auto& { return csgm(o).growMaxBacktrack; }));
   t.push_back(real(set + ".csgm1AngleStep", "<deg>", "1", who + "csgm1a / R: sampled angles are multiples of this step",
                    [csgm](auto& o) -> auto& { return csgm(o).csgm1AngleStep; }));
   t.push_back(real(set + ".ramaFloor", "<w>", "1e-4", who + "csgm1b: weight added to every Ramachandran cell",
@@ -703,6 +707,7 @@ void validateOptions(const Options& o) {
     check(c->maxL1TotalNum >= 1, set + ".maxL1TotalNum", ">= 1");
     check(c->maxL1BatchNum >= 1, set + ".maxL1BatchNum", ">= 1");
     check(c->growMaxRetry >= 0, set + ".growMaxRetry", ">= 0");
+    check(c->growMaxBacktrack >= 0, set + ".growMaxBacktrack", ">= 0");
     check(c->csgm1AngleStep > 0 && c->csgm1AngleStep <= 180, set + ".csgm1AngleStep", "within (0, 180]");
     check(c->ramaFloor >= 0, set + ".ramaFloor", ">= 0");
     check(c->tournamentRate >= 0 && c->tournamentRate <= 100, set + ".tournamentRate", "within [0, 100]");

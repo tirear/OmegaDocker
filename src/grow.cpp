@@ -49,7 +49,7 @@ double dist2(const Vec3& a, const Vec3& b) {
 GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>& parts,
                          const std::vector<const Topology*>& topologies, const std::vector<std::vector<int>>& segments,
                          const GrowParams& p)
-    : clash2_(p.clashDistance * p.clashDistance), maxRetry_(p.maxRetry) {
+    : clash2_(p.clashDistance * p.clashDistance), maxRetry_(p.maxRetry), maxBacktrack_(p.maxBacktrack) {
   // Input coordinates and global torsions.
   std::vector<int> torOffset;
   for (std::size_t k = 0; k < parts.size(); ++k) {
@@ -74,6 +74,7 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
   }
   const int T = static_cast<int>(tor_.size());
   if (T != sys.torsionCount()) fail("grow: torsion count mismatch");
+  if (!p.fixed.empty() && static_cast<int>(p.fixed.size()) != T) fail("grow: fixed torsion mask size mismatch");
 
   // Deepest torsion moving each coordinate (parents precede children). The
   // moving bond atom lies on the axis and is placed with the parent torsion.
@@ -116,6 +117,11 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
     st.segment = static_cast<int>(s);
     st.torsions = segments[s];
     std::sort(st.torsions.begin(), st.torsions.end());
+    for (int i : st.torsions) {
+      if (!p.fixed.empty() && p.fixed[i]) st.fixed = true;
+      const int par = tor_[i].parent;
+      if (par >= 0 && segOf[par] != static_cast<int>(s)) st.parentStep = std::max(st.parentStep, stepOf[par]);
+    }
     for (int i : st.torsions) stepOf[i] = static_cast<int>(steps_.size());
     steps_.push_back(std::move(st));
   }
@@ -125,14 +131,14 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
   for (const auto& pr : sys.pairs()) {
     if (!pr.heavy) continue;
     const int s = std::max(stepOfCoord(pr.i), stepOfCoord(pr.j));
-    if (s >= 0) steps_[s].pairs.emplace_back(pr.i, pr.j);
+    if (s >= 0 && !steps_[s].fixed) steps_[s].pairs.emplace_back(pr.i, pr.j);
   }
 
   // Reach (spec 4.8): broken backbone links. For each end of the link and
   // each torsion on the tree path to that end, the moving atom of the torsion
   // must be within (residues from its residue to the other end, inclusive) x
   // reachPerRes of the other end, once the other end is built.
-  for (std::size_t k = 0; k < parts.size(); ++k) {
+  for (std::size_t k = 0; k < parts.size() && p.reach; ++k) {
     const Molecule& m = *parts[k].mol;
     const Topology& t = *topologies[k];
     const int co = sys.coordOffset(static_cast<int>(k));
@@ -164,7 +170,7 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
         std::set<int> seen;
         for (int ti = owner[co + end]; ti >= 0; ti = tor_[ti].parent) {
           const int s = stepOf[ti];
-          if (!seen.insert(s).second || targetStep > s) continue;
+          if (!seen.insert(s).second || targetStep > s || steps_[s].fixed) continue;
           const int local = ti - torOffset[k];
           const int moving = parts[k].tree->torsions[local].movingAtom;
           const int r = m.atoms[moving].residue;
@@ -175,6 +181,10 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
       }
     }
   }
+}
+
+int GrowBuilder::fixedStepCount() const {
+  return static_cast<int>(std::count_if(steps_.begin(), steps_.end(), [](const Step& s) { return s.fixed; }));
 }
 
 std::size_t GrowBuilder::reachCheckCount() const {
@@ -190,7 +200,10 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
   std::vector<Vec3> x(input_);
   std::vector<Mat3> R(tor_.size());
   std::vector<Vec3> tr(tor_.size());
-  for (const Step& st : steps_) {
+  std::vector<int> backtracks(steps_.size(), 0);
+  for (std::size_t si = 0; si < steps_.size();) {
+    const Step& st = steps_[si];
+    bool ok = true;
     for (int attempt = 0;; ++attempt) {
       for (int i : st.torsions) {
         const Tor& t = tor_[i];
@@ -211,7 +224,7 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
           x[c] = {v[0] + tr[i][0], v[1] + tr[i][1], v[2] + tr[i][2]};
         }
       }
-      bool ok = true;
+      ok = true;
       for (const auto& [i, j] : st.pairs)
         if (dist2(x[i], x[j]) < clash2_) {
           ok = false;
@@ -225,11 +238,21 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
             ++res.reachFails;
             break;
           }
-      if (ok) break;
-      if (attempt >= maxRetry_ || !resample) return res;
+      if (ok || attempt >= maxRetry_ || !resample) break;
       resample(rng, st.segment, a);
       ++res.retries;
     }
+    if (ok) {
+      ++si;
+      continue;
+    }
+    // Backtrack one level: resample the parent segment and rebuild from it.
+    const int ps = st.parentStep;
+    if (!resample || ps < 0 || steps_[ps].fixed || backtracks[si] >= maxBacktrack_) return res;
+    ++backtracks[si];
+    ++res.backtracks;
+    resample(rng, steps_[ps].segment, a);
+    si = static_cast<std::size_t>(ps);
   }
   res.ok = true;
   if (coords) *coords = std::move(x);
