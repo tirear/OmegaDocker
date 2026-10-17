@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.47 |
+| 文件版本 | 1.48 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -999,8 +999,53 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - 以百分位為預設的原因：不同 StaM 的靜電勢大小差異很大，固定門檻在某些系統會選不到區域、在另一些系統會選到太多。實測後可再改為固定門檻。
 
+**CPU 參考版的做法：**
+- 靜電勢 φ：每單位電荷的靜電能（含 `c_elec`，單位 kcal/mol/e），以 8.1 的能量場在格點上取 `(E(q = +1) − E(q = −1)) / 2`，三種 `grid.mode` 都適用。到最近 StaM 重原子的距離取自距離網格（8.2）；使用 posm3／posm4 時，距離網格的上限加入 `sepaShellMax`。
+- 殼層：距離在 [`sepaShellMin`, `sepaShellMax`] 的格點。百分位：依 |φ| 由大到小取前 `ceil(sepaPotPercentile% × 殼層格點數)` 個（至少 1 個），以第該名的 |φ| 為門檻，|φ| ≥ 門檻者入選（同值者一併入選）。
+- 相連：兩個入選格點在任一軸相差 1 格、其他兩軸相同（共用一個面，每個格點 6 個鄰居）且 φ 同號，即屬同一區域。區域的代表點 = 其格點座標的不加權平均。
+- MobM：所有探針原子（含極性氫）中 |q| ≥ `sepaChargeThreshold` 者；位置與距離取自各 MobM 構型樣本的座標。
+- 配對：StaM 區域 i < j；MobM 原子取有序對 (a, b)，a ≠ b，所以 (m1, m2) 與 (m2, m1) 兩種方向都會檢查。
+- 對齊：先以最小旋轉將 m1→m2 的方向轉到 s1→s2，再繞 s1→s2 軸轉 `k × 360° / n`，`n = round(360 / rotStep)`（預設 48）。
+- 平移：每軸 `2 × floor(sepaPosRange / posStep) + 1` 個值（預設 9，共 729 個），以錨點為中心（配對：兩軸中點；單點：區域代表點）。
+- 單點取樣的定向：Hopf 格點（`rotStep`，預設第 3 層，36,864 個）。
+- 樣本順序：先配對取樣（配對、繞軸角度、平移由外到內），再單點取樣（區域與原子、定向、平移）。
+- 盒子：所有探針原子須在對接範圍內 0.01 Å（同 8.4 的 `m`），否則捨棄（計入 outside box）。
+- posm3 為決定性方法（不用亂數）。
+
+#### 8.4.4.1 posm3 的測試結果（CPU 參考版）
+
+- 條件：2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å、`{stam,mobm}.dockingConfSampleNum` 4（16 個構型配對）、`maxRound` 1、`seed` 3，其餘為預設值；AMD Ryzen 7 9700X，16 執行緒，188 GB 記憶體。
+- 每個 StaM 構型約 86 個區域（約 19 萬個殼層格點中選出約 9,400 個）。單元測試（2KJJ，48 Å 的盒子）中，6 個鄰居得 94 個區域，26 個鄰居（共用面、邊或角都算相連）只有 24 個。
+- 第 1 個構型配對的數量：
+
+| 項目 | 數量 |
+|---|---|
+| 配對（對齊組合） | 771 |
+| 單點（區域 × 原子） | 259 |
+| L1poss：配對取樣 | 2.70×10⁷ |
+| L1poss：單點取樣 | 6.96×10⁹ |
+| 移除：超出盒子／重疊／太遠 | 2.66×10⁹／3.49×10⁹／4.5×10⁶ |
+| L2poss | 8.33×10⁸（配對取樣 3.47×10⁶） |
+
+- 時間與資源：
+  - 8.5 篩選：342 s／構型配對。
+  - 最佳化：約 20,000 個 pose／s，8.33×10⁸ 個約 11.6 小時／構型配對；16 個構型配對的一輪約 7.8 天（未跑完，執行 815 s 後中止）。
+  - 記憶體：最大 RSS 12.5 GB，主要是 L2poss 的索引（每個 8 bytes，約 6.7 GB），以及合併各執行緒結果時的暫存。
+- 第 1 個構型配對的最低能量（9b 樣本能量，kcal/mol）：
+
+| 方法 | 最佳化的 pose 數 | 時間 | 最低能量 |
+|---|---|---|---|
+| posm3：配對取樣全部 | 3.47×10⁶ | 約 175 s | −9.165 |
+| posm3：配對取樣 + 單點取樣的前 7.0×10⁶ 個 | 1.05×10⁷ | 815 s（含篩選） | −9.352 |
+| posm1：`posm1SampleNum` 3.5×10⁷ | 1.03×10⁷ | 446 s | −9.292（3.47×10⁶ 個時已達到） |
+
+- 參考：同條件下 posm1 跑完整輪（16 個構型配對）：`posm1SampleNum` 1000 時 9b 0.25 s，最低 −8.214，`E_top_max` −6.421；1×10⁵ 時 9b 22 s，最低 −9.559，`E_top_max` −6.998。
+- 參考（縮小取樣，非預設）：`sepaPosRange` 0、`rotStep` 30°（繞軸 12 個角度、Hopf 576 個定向、平移 1 個），2 輪共 56 s，`E_top_max` −7.052。
+
 #### 8.4.5 posm4
 - L1poss = posm3 結果 ∪ posm1 結果。
+- CPU 參考版：先列 posm3 的樣本，再列 `posm1SampleNum` 個 posm1 樣本；posm1 部分第 j 個樣本的亂數與 posm1 的第 j 個相同（同一 PRNG 串流）。
+- 後續輪次中已對接過的構型配對只重做 posm1 部分（9），該配對的最低能量取兩者中較低者。
 
 ### 8.5 L1poss → L2poss 快速篩選
 
@@ -1426,18 +1471,18 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
 | `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
-| `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4 |
+| `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4（`posm1`、`posm2`、`posm3`、`posm4`；`posm2_fft` 未實作） |
 | `dock9b.posStep` | `--dock9b_posStep` | 1 Å | 8.4 |
-| `dock9b.posm1SampleNum` | `--dock9b_posm1SampleNum` | 1000 | 8.4.1 |
-| `dock9b.rotStep` | `--dock9b_rotStep` | 7.5° | 8.3 |
+| `dock9b.posm1SampleNum` | `--dock9b_posm1SampleNum` | 1000 | 8.4.1、8.4.5 |
+| `dock9b.rotStep` | `--dock9b_rotStep` | 7.5° | 8.3、8.4.4（繞配對軸的角度間距） |
 | `dock9b.fftClamp`（未實作） | `--dock9b_fftClamp` | 10 kcal/mol | 8.4.3 |
 | `dock9b.fftTopPerRot`（未實作） | `--dock9b_fftTopPerRot` | 1 | 8.4.3 |
-| `dock9b.sepaShellMin`、`dock9b.sepaShellMax`（未實作） | `--dock9b_sepaShellMin` 等 | 2.5 Å、6 Å | 8.4.4 |
-| `dock9b.sepaPotPercentile`（未實作） | `--dock9b_sepaPotPercentile` | 5% | 8.4.4 |
-| `dock9b.sepaPotThreshold`（未實作） | `--dock9b_sepaPotThreshold` | 無（指定時取代百分位） | 8.4.4 |
-| `dock9b.sepaChargeThreshold`（未實作） | `--dock9b_sepaChargeThreshold` | 0.3 e | 8.4.4 |
-| `dock9b.sepaDistTolerance`（未實作） | `--dock9b_sepaDistTolerance` | 1.0 Å | 8.4.4 |
-| `dock9b.sepaPosRange`（未實作） | `--dock9b_sepaPosRange` | 4 Å | 8.4.4 |
+| `dock9b.sepaShellMin`、`dock9b.sepaShellMax` | `--dock9b_sepaShellMin` 等 | 2.5 Å、6 Å | 8.4.4 |
+| `dock9b.sepaPotPercentile` | `--dock9b_sepaPotPercentile` | 5% | 8.4.4 |
+| `dock9b.sepaPotThreshold` | `--dock9b_sepaPotThreshold` | 無（指定時取代百分位） | 8.4.4 |
+| `dock9b.sepaChargeThreshold` | `--dock9b_sepaChargeThreshold` | 0.3 e | 8.4.4 |
+| `dock9b.sepaDistTolerance` | `--dock9b_sepaDistTolerance` | 1.0 Å | 8.4.4 |
+| `dock9b.sepaPosRange` | `--dock9b_sepaPosRange` | 4 Å | 8.4.4 |
 | `dock9b.maxOverlapAtomNum` | `--dock9b_maxOverlapAtomNum` | 1 | 8.5 |
 | `dock9b.maxNearDistance` | `--dock9b_maxNearDistance` | 6 Å | 8.5 |
 | `dock9b.minMethod`（未實作） | `--dock9b_minMethod` | `lbfgs` | 8.6 |
@@ -1521,6 +1566,29 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - Top8000 資料檔隨程式散佈時，附上原 `LICENSE` 與出處說明，並在文件中列出引用文獻：Williams CJ et al. (2018) MolProbity: More and better reference data for improved all-atom structure validation. *Protein Science* 27(1):293–315. https://doi.org/10.1002/pro.3330
 - 未採用 Dunbrack NDRD（同為 CC BY 4.0）：需填表申請下載，且只含 loop 區域（不含 α 螺旋與 β 摺板），不適合作為全部殘基的分佈。
 - CPU FFT 不使用 FFTW：FFTW 為 GPL，與 LGPL 散佈不相容。
+
+#### 15.2.1 CPU FFT 效能比較：pocketfft 與 FFTW
+
+- 目的：了解兩者的效能差異。FFTW（GPL）只在測試時暫時編譯（3.3.10，`--enable-float --enable-openmp --enable-avx2 --enable-fma`），測試後已刪除，不屬於 OmegaDocker 的依賴套件。
+- 內容：posm2_fft 第 1 步（8.4.3）的網格 FFT，即單張網格的三維實數→複數正向 FFT（float），網格間距 0.375 Å。另測試把格點數補到只含 2、3、5、7 因數的大小（FFT 對這類大小較快）。取多次執行的中位數；兩者結果的最大相對差 < 5×10⁻⁷。
+- 環境：AMD Ryzen 7 9700X，GCC 14.3，`-O3 -march=native`。
+
+| 盒子 | 格點數 | 執行緒 | pocketfft | FFTW（ESTIMATE） | FFTW（MEASURE）規劃／執行 |
+|---|---|---|---|---|---|
+| 30 Å | 81³ | 1 | 0.6 ms | 1.6 ms | 58 ms／1.4 ms |
+| 30 Å | 81³ | 16 | 0.2 ms | 15.3 ms | 503 ms／0.2 ms |
+| 60 Å | 161³ | 1 | 10.6 ms | 26.0 ms | 0.63 s／23.9 ms |
+| 60 Å | 161³ | 16 | 1.5 ms | 82.0 ms | 2.95 s／6.5 ms |
+| 60 Å | 162³ | 1 | 6.6 ms | 13.9 ms | 0.14 s／9.1 ms |
+| 60 Å | 162³ | 16 | 1.6 ms | 3.8 ms | 0.57 s／1.2 ms |
+| 120 Å | 321³ | 1 | 153 ms | 603 ms | 10.2 s／476 ms |
+| 120 Å | 321³ | 16 | 31.4 ms | 587 ms | 12.6 s／122 ms |
+| 120 Å | 324³ | 1 | 73.3 ms | 155 ms | 1.0 s／86.2 ms |
+| 120 Å | 324³ | 16 | 27.0 ms | 32.8 ms | 2.2 s／28.2 ms |
+
+- 81 = 3⁴ 本身即為這類大小；161 = 7 × 23、321 = 3 × 107 不是，兩個函式庫都明顯變慢。
+- 結論：此測試中 pocketfft 都不比 FFTW 慢；FFTW 只有在格點數為這類大小、且使用 MEASURE 規劃時與 pocketfft 相近，但規劃需 0.1–12 s。posm2_fft 實作時，網格補到只含 2、3、5、7 因數的大小。
+- 參考：同一盒子建立能量網格（2KJJ，5 種原子類型 + elec + desolv，16 執行緒）需 0.23 s（30 Å）、0.45 s（60 Å）、0.65 s（120 Å）；以 pocketfft 對這 7 張網格做 FFT，120 Å（324³）約 0.19 s。
 
 ### 15.3 RDKit / Boost / Eigen 建置紀錄
 - 版本選擇：RDKit 2026.09.1（2026-10-03 發佈）要求 Boost ≥ 1.81、C++20；選 Boost 1.90.0，與 conda-forge 的 RDKit 2026.09.1 所用版本相同。Eigen 3.4.0 為 RDKit `External/Eigen` 指定版本。
@@ -1762,3 +1830,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.45 | 2026-10-17 | 實作 `grid.mode`（`auto`、`full`、`flexres`、`delta`）與 `grid.deltaThreshold`（CPU 參考版）：補充固定／可動原子、`flexres` 的逐對計算與距離、`delta` 的參考構型與比較範圍（8.1、8.2）；新增 8.1.1 測試結果 |
 | 1.46 | 2026-10-17 | `grid.mode = "auto"`：StaM 主鏈不可動時改選 `delta`（原為 `flexres`），否則 `full`（8.1） |
 | 1.47 | 2026-10-17 | 註記靜電與去溶劑化截斷距離 20.48 Å 的來源（7.9）；`delta` 大盒子的記憶體測試延至 CUDA 版、門檻維持 1×10⁻⁴（8.1.1） |
+| 1.48 | 2026-10-17 | 實作 posm3、posm4（CPU 參考版）：靜電勢的取法、殼層與百分位、6 鄰居相連、配對方向、對齊與平移、樣本順序、盒子檢查（8.4.4）；新增 8.4.4.1 依規格預設值執行的時間、資源與最低能量；posm4 的樣本順序與已對接構型配對只重做 posm1 部分（8.4.5）；新增 15.2.1 pocketfft 與 FFTW 的效能比較；sepa 參數改為已實作 |

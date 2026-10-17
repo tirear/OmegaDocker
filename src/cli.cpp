@@ -305,11 +305,12 @@ const std::vector<Param>& params() {
     t.push_back(real("conf9a.maxDihedralStep", "<deg>", "10", "9a minimization: largest change of one torsion per step",
                      OD_ACC(confMaxDihedralStep)));
 
-    t.push_back({"dock9b.posm", Type::Str, "posm1|posm2", "required", "9b: position and orientation sampling method",
+    t.push_back({"dock9b.posm", Type::Str, "posm1|posm2|posm3|posm4", "required", "9b: position and orientation sampling method",
                  [](Options& o, const Tokens& v) {
                    const std::string& s = one(v);
-                   if (s == "posm2_fft" || s == "posm3" || s == "posm4") fail("{} is not implemented yet", s);
-                   if (s != "posm1" && s != "posm2") fail("expected posm1 or posm2 but got '{}'", s);
+                   if (s == "posm2_fft") fail("{} is not implemented yet", s);
+                   if (s != "posm1" && s != "posm2" && s != "posm3" && s != "posm4")
+                     fail("expected posm1, posm2, posm3 or posm4 but got '{}'", s);
                    o.posm = s;
                  },
                  [](const Options& o) -> std::optional<Tokens> {
@@ -318,7 +319,24 @@ const std::vector<Param>& params() {
                  }});
     t.push_back(real("dock9b.posStep", "<dist>", "1", "9b: spacing of the sampled positions of the MobM heavy-atom centre (Å)",
                      OD_ACC(posStep)));
-    t.push_back(integer("dock9b.posm1SampleNum", "<n>", "1000", "9b, posm1: L1poss per conformation pair", OD_ACC(posm1SampleNum)));
+    t.push_back(integer("dock9b.posm1SampleNum", "<n>", "1000", "9b, posm1 and posm4: random L1poss per conformation pair", OD_ACC(posm1SampleNum)));
+    t.push_back(real("dock9b.sepaShellMin", "<dist>", "2.5", "9b, posm3: StaM regions use grid points at least this far from the nearest StaM heavy atom (Å)",
+                     OD_ACC(sepaShellMin)));
+    t.push_back(real("dock9b.sepaShellMax", "<dist>", "6", "9b, posm3: ... and at most this far (Å)", OD_ACC(sepaShellMax)));
+    t.push_back(real("dock9b.sepaPotPercentile", "<pct>", "5", "9b, posm3: shell points in the top this % of |potential| form the regions",
+                     OD_ACC(sepaPotPercentile)));
+    t.push_back({"dock9b.sepaPotThreshold", Type::Real, "<pot>", "none",
+                 "9b, posm3: when given, shell points with |potential| >= this (kcal/mol/e) replace the percentile",
+                 [](Options& o, const Tokens& v) { o.sepaPotThreshold = toReal(one(v)); },
+                 [](const Options& o) -> std::optional<Tokens> {
+                   if (!o.sepaPotThreshold) return std::nullopt;
+                   return Tokens{fmtReal(*o.sepaPotThreshold)};
+                 }});
+    t.push_back(real("dock9b.sepaChargeThreshold", "<q>", "0.3", "9b, posm3: MobM atoms with |charge| >= this (e)", OD_ACC(sepaChargeThreshold)));
+    t.push_back(real("dock9b.sepaDistTolerance", "<dist>", "1", "9b, posm3: pair distances of StaM and MobM may differ by this much (Å)",
+                     OD_ACC(sepaDistTolerance)));
+    t.push_back(real("dock9b.sepaPosRange", "<dist>", "4", "9b, posm3: translations within +-this around the anchor (Å, step dock9b.posStep)",
+                     OD_ACC(sepaPosRange)));
     t.push_back(real("dock9b.rotStep", "<deg>", "7.5", "9b: spacing of the Hopf orientation grid (the closest level is used)",
                      OD_ACC(rotStep)));
     t.push_back(real("dock9b.maxNearDistance", "<dist>", "6", "9b: poses whose heavy atoms are all farther from the StaM are removed (Å)",
@@ -700,6 +718,13 @@ void validateOptions(const Options& o) {
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");
   check(o.posStep > 0, "dock9b.posStep", "> 0");
   check(o.posm1SampleNum >= 1, "dock9b.posm1SampleNum", ">= 1");
+  check(o.sepaShellMin >= 0, "dock9b.sepaShellMin", ">= 0");
+  check(o.sepaShellMax > o.sepaShellMin, "dock9b.sepaShellMax", "greater than dock9b.sepaShellMin");
+  check(o.sepaPotPercentile > 0 && o.sepaPotPercentile <= 100, "dock9b.sepaPotPercentile", "in (0, 100]");
+  check(!o.sepaPotThreshold || *o.sepaPotThreshold > 0, "dock9b.sepaPotThreshold", "> 0");
+  check(o.sepaChargeThreshold > 0, "dock9b.sepaChargeThreshold", "> 0");
+  check(o.sepaDistTolerance >= 0, "dock9b.sepaDistTolerance", ">= 0");
+  check(o.sepaPosRange >= 0, "dock9b.sepaPosRange", ">= 0");
   check(o.maxOverlapAtomNum >= 1, "dock9b.maxOverlapAtomNum", ">= 1");
   check(o.dockMinMaxStep >= 0, "dock9b.minMaxStep", ">= 0");
   check(o.dockMinConvSteps >= 1, "dock9b.minConvSteps", ">= 1");

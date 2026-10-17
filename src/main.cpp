@@ -386,10 +386,21 @@ class ConfSet {
 
 od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   od::Dock9bParams dp;
-  dp.posm = opt.posm == "posm2" ? od::Posm::Posm2 : od::Posm::Posm1;
+  dp.posm = opt.posm == "posm2"   ? od::Posm::Posm2
+            : opt.posm == "posm3" ? od::Posm::Posm3
+            : opt.posm == "posm4" ? od::Posm::Posm4
+                                  : od::Posm::Posm1;
   dp.posStep = opt.posStep;
   dp.hopfLevel = od::hopfLevelForStep(opt.rotStep);
   dp.posm1SampleNum = opt.posm1SampleNum;
+  dp.sepaShellMin = opt.sepaShellMin;
+  dp.sepaShellMax = opt.sepaShellMax;
+  dp.sepaPotPercentile = opt.sepaPotPercentile;
+  dp.sepaPotThreshold = opt.sepaPotThreshold;
+  dp.sepaChargeThreshold = opt.sepaChargeThreshold;
+  dp.sepaDistTolerance = opt.sepaDistTolerance;
+  dp.sepaPosRange = opt.sepaPosRange;
+  dp.rotStep = opt.rotStep;
   dp.boxCenter = *opt.boxCenter;
   dp.boxSize = *opt.boxSize;
   dp.maxOverlapAtomNum = opt.maxOverlapAtomNum;
@@ -876,7 +887,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             od::hopfSpacingDeg(level), opt.rotStep));
   }
   const od::Dock9bParams dp = dockParams(opt, seed);
-  const bool deterministic = dp.posm == od::Posm::Posm2;
+  const bool deterministic = dp.posm == od::Posm::Posm2 || dp.posm == od::Posm::Posm3;
+  const bool usesSepas = dp.posm == od::Posm::Posm3 || dp.posm == od::Posm::Posm4;
 
   // grid.mode (spec 8.1); auto: delta when no StaM backbone torsion is rotatable.
   od::GridMode gridMode = od::GridMode::Full;
@@ -892,7 +904,9 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   od::logInfo(std::format("9b grid.mode {}{}: StaM grid atoms {}, moved by torsions {}, backbone {}", od::gridModeName(gridMode),
                           opt.gridMode == "auto" ? " (auto)" : "", movedMask.size(), movedNum,
                           backboneMoves ? "movable" : "fixed"));
-  const double distCap = std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing;
+  const double distCap = std::max({opt.maxNearDistance, opt.clashDistance,
+                                   opt.posm == "posm3" || opt.posm == "posm4" ? opt.sepaShellMax : 0.0}) +
+                         2 * opt.gridSpacing;
   // Grids built once and kept across rounds: full without StaM torsions (input conformation),
   // flexres (fixed atoms of the input conformation), delta (reference: input conformation).
   std::shared_ptr<const od::EnergyGrids> fixedGrids;
@@ -966,7 +980,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::sort(stamIds.begin(), stamIds.end());
     stamIds.erase(std::unique(stamIds.begin(), stamIds.end()), stamIds.end());
     std::vector<od::Dock9bStats> st(ms.size());
-    std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0), sampleNum(ms.size(), 0), partial(ms.size(), 0);
+    std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0), sampleNum(ms.size(), 0), partial(ms.size(), 0),
+        posm3Docked(ms.size(), 0);
     std::vector<std::vector<od::RoundSample>> buffer(ms.size());
     std::vector<double> selectSec(ms.size(), 0);
     std::vector<float> droppedMin(ms.size(), std::numeric_limits<float>::infinity());  // --midKeepSkipped
@@ -996,6 +1011,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     bool gridsReused = false;
     const auto d0 = std::chrono::steady_clock::now();
     long long movedSum = 0, blockSum = 0, blockTotal = 0;
+    long long sepaShell = 0, sepaSelected = 0, sepaRegions = 0, sepaPos = 0;
+    double sepaCutSum = 0;
     for (int sid : stamIds) {
       const auto g0 = std::chrono::steady_clock::now();
       auto stamAtoms = [&](bool input) {
@@ -1031,17 +1048,31 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         field = od::StamField::full(g, d);
       }
       if (!firstBuild && (gridMode == od::GridMode::Flexres || !stamSet.movable())) gridsReused = true;
+      std::vector<od::StamSepa> sepas;
+      if (usesSepas) {
+        od::StamSepaInfo si;
+        sepas = od::stamSepas(field, dp, &si);
+        int pos = 0;
+        for (const auto& s : sepas) pos += s.sign > 0;
+        sepaShell += si.shellPoints;
+        sepaSelected += si.selected;
+        sepaRegions += static_cast<long long>(sepas.size());
+        sepaPos += pos;
+        sepaCutSum += si.potCut;
+      }
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
       for (std::size_t i = 0; i < ms.size(); ++i) {
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
         const ConfSet& mob = *mobSets[i];
-        const od::MobmDocker dk(mob.sys(), field, dp);
+        const od::MobmDocker dk(mob.sys(), field, dp, &sepas);
         for (int mid : ms[i].mobDcss) {
           const std::uint64_t key = pairKey(sid, mid);
           if (deterministic && ms[i].pairLowest.contains(key)) {
             ++skipped[i];
             continue;
           }
+          // posm4: the posm3 part of a pair docked before is not redone (spec 9).
+          const bool posm1Only = dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key);
           const auto& ma = mob.sample(mid).angles;
           const std::vector<double> mobAngles =
               mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles();
@@ -1059,9 +1090,11 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                                    select(i, false);
                                    ++partial[i];
                                  }
-                               });
+                               },
+                               posm1Only);
           ++docked[i];
-          ms[i].pairLowest[key] = lowest;
+          if (usesSepas && !posm1Only) ++posm3Docked[i];
+          ms[i].pairLowest[key] = posm1Only ? std::min(lowest, ms[i].pairLowest[key]) : lowest;
         }
       }
     }
@@ -1077,6 +1110,14 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       if (blockTotal > 0)
         what += std::format("; delta blocks stored {} of {} ({:.1f}%)", blockSum, blockTotal, 100.0 * static_cast<double>(blockSum) / static_cast<double>(blockTotal));
       od::logInfo(what);
+      if (usesSepas && !stamIds.empty()) {
+        const double k = static_cast<double>(stamIds.size());
+        od::logInfo(std::format("  9b posm3 StaM regions per conformation: shell points {:.0f}, selected {:.0f} "
+                                "(|potential| >= {:.3f} kcal/mol/e), regions {:.1f} (+ {:.1f}, - {:.1f})",
+                                static_cast<double>(sepaShell) / k, static_cast<double>(sepaSelected) / k, sepaCutSum / k,
+                                static_cast<double>(sepaRegions) / k, static_cast<double>(sepaPos) / k,
+                                static_cast<double>(sepaRegions - sepaPos) / k));
+      }
     }
 
     // 9c (spec 9).
@@ -1088,6 +1129,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                               mobSets[i]->name(), docked[i], skipped[i], s.l1, s.outsideBox, s.overlap, s.far, s.l2,
                               s.leftGrid, sampleNum[i],
                               s.l2 > 0 ? static_cast<double>(s.steps) / static_cast<double>(s.l2) : 0.0));
+      if (posm3Docked[i] > 0)
+        od::logInfo(std::format("  9b {:<37} posm3 pairs {}: per pair matched pair alignments {:.1f}, single placements {:.1f}",
+                                mobSets[i]->name(), posm3Docked[i], static_cast<double>(s.sepaPairs) / posm3Docked[i],
+                                static_cast<double>(s.sepaSingles) / posm3Docked[i]));
       if (s.l1 > 0 && s.l1 == s.outsideBox)
         od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger box.size",
                                 mobSets[i]->name()));

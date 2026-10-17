@@ -2705,11 +2705,110 @@ struct DockFixture {
     p.seed = 3;
     const auto geom = od::boxGrid(p.boxCenter, p.boxSize, 0.375);
     grids = od::buildEnergyGrids(geom, x.stam, x.mobm.type, {});
-    dist = od::buildDistanceGrid(geom, x.stam, std::max(p.maxNearDistance, p.clashDistance) + 0.75);    field = od::StamField::full(std::make_shared<const od::EnergyGrids>(grids), std::make_shared<const od::DistanceGrid>(dist));
+    dist = od::buildDistanceGrid(geom, x.stam, std::max(p.maxNearDistance, p.clashDistance) + 0.75);
+    field = od::StamField::full(std::make_shared<const od::EnergyGrids>(grids), std::make_shared<const od::DistanceGrid>(dist));
   }
 };
 
 }  // namespace
+
+TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
+  DockFixture f(od::Posm::Posm3);
+  od::StamSepaInfo info;
+  const auto sepas = od::stamSepas(f.field, f.p, &info);
+  const auto sepas26 = od::stamSepas(f.field, f.p, nullptr, 26);
+  MESSAGE(std::format("posm3: shell points {}, selected {}, cut {:.3f}; regions {} (6 neighbours), {} (26 neighbours)",
+                      info.shellPoints, info.selected, info.potCut, sepas.size(), sepas26.size()));
+  REQUIRE(!sepas.empty());
+  CHECK(sepas26.size() <= sepas.size());
+  CHECK(info.selected == doctest::Approx(0.05 * static_cast<double>(info.shellPoints)).epsilon(0.02));
+  long long pts = 0;
+  for (const auto& s : sepas) {
+    pts += s.points;
+    CHECK(std::abs(s.sign) == 1);
+    const double phi = 0.5 * (f.field.energy<double>(0, 1.0, s.xyz, nullptr) - f.field.energy<double>(0, -1.0, s.xyz, nullptr));
+    if (s.points >= 8) CHECK(phi * s.sign > 0);  // a compact region keeps its sign at the centroid
+  }
+  CHECK(pts == info.selected);
+  // Threshold replaces the percentile.
+  od::Dock9bParams pt = f.p;
+  pt.sepaPotThreshold = info.potCut;
+  od::StamSepaInfo info2;
+  CHECK(od::stamSepas(f.field, pt, &info2).size() == sepas.size());
+  CHECK(info2.selected == info.selected);
+
+  f.p.hopfLevel = 0;
+  const od::MobmDocker dk(*f.x.mobSys, f.field, f.p, &sepas);
+  const auto c = dk.conformation(f.x.mobSys->inputAngles());
+  MESSAGE(std::format("posm3: matched pairs {}, single placements {}, L1poss {}", c.pairs.size(), c.singles.size(), dk.l1Count(c)));
+  REQUIRE(!c.pairs.empty());
+  REQUIRE(!c.singles.empty());
+  CHECK(dk.l1Count(c) == static_cast<long long>(c.pairs.size()) * 48 * 729 + static_cast<long long>(c.singles.size()) * 72 * 729);
+  const auto& mt = f.x.mobSys->typing(0);
+  std::vector<int> probeOf;  // probe index -> coordinate index
+  for (std::size_t a = 0; a < mt.type.size(); ++a)
+    if (mt.type[a] != od::Ad4Type::Merged) probeOf.push_back(f.x.mobSys->coordOffset(0) + static_cast<int>(a));
+  auto world = [&](const od::Pose& pose, int probe) {
+    const od::Vec3f& y = c.coords[probeOf[probe]];
+    const od::Vec3 r = od::rotate(pose.q, {y[0] - c.center[0], y[1] - c.center[1], y[2] - c.center[2]});
+    return od::Vec3{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
+  };
+  int checkedPairs = 0, checkedSingles = 0;
+  std::vector<long long> ks;
+  for (long long i = 0; i < 2000; ++i) {
+    ks.push_back(i * (c.pairPoses / 2000) + i % 729);
+    ks.push_back(c.pairPoses + i * (c.singlePoses / 2000) + (i * 7) % 729);
+  }
+  for (long long k : ks) {
+    const auto pose = dk.l1Pose(c, 0, k);
+    if (!pose) continue;
+    const long long tr = k % 729;
+    const od::Vec3 delta{static_cast<double>(tr % 9 - 4), static_cast<double>(tr / 9 % 9 - 4), static_cast<double>(tr / 81 - 4)};
+    if (k < c.pairPoses) {
+      const auto& pm = c.pairs[static_cast<std::size_t>(k / 729 / 48)];
+      const auto w1 = world(*pose, pm.m1), w2 = world(*pose, pm.m2);
+      const auto& s1 = sepas[pm.s1].xyz;
+      const auto& s2 = sepas[pm.s2].xyz;
+      od::Vec3 us{s2[0] - s1[0], s2[1] - s1[1], s2[2] - s1[2]}, um{w2[0] - w1[0], w2[1] - w1[1], w2[2] - w1[2]};
+      const double ls = std::sqrt(us[0] * us[0] + us[1] * us[1] + us[2] * us[2]), lm = std::sqrt(um[0] * um[0] + um[1] * um[1] + um[2] * um[2]);
+      CHECK((us[0] * um[0] + us[1] * um[1] + us[2] * um[2]) / (ls * lm) == doctest::Approx(1.0).epsilon(1e-9));
+      CHECK(std::abs(ls - lm) <= f.p.sepaDistTolerance + 1e-6);
+      for (int d = 0; d < 3; ++d) CHECK(0.5 * (w1[d] + w2[d]) == doctest::Approx(0.5 * (s1[d] + s2[d]) + delta[d]).epsilon(1e-9));
+      ++checkedPairs;
+    } else {
+      const auto& sp = c.singles[static_cast<std::size_t>((k - c.pairPoses) / 729 / 72)];
+      const auto w = world(*pose, sp[1]);
+      for (int d = 0; d < 3; ++d) CHECK(w[d] == doctest::Approx(sepas[sp[0]].xyz[d] + delta[d]).epsilon(1e-9));
+      ++checkedSingles;
+    }
+  }
+  CHECK(checkedPairs > 0);
+  CHECK(checkedSingles > 0);
+  // posm4 = posm3 followed by posm1.
+  od::Dock9bParams p4 = f.p;
+  p4.posm = od::Posm::Posm4;
+  const od::MobmDocker dk4(*f.x.mobSys, f.field, p4, &sepas);
+  const auto c4 = dk4.conformation(f.x.mobSys->inputAngles());
+  CHECK(dk4.l1Count(c4) == dk.l1Count(c) + 400);
+  DockFixture f1;
+  const od::MobmDocker dk1(*f1.x.mobSys, f1.field, f1.p);
+  const auto c1 = dk1.conformation(f1.x.mobSys->inputAngles());
+  for (long long k = 0; k < 20; ++k) {
+    const auto a = dk4.l1Pose(c4, 9, dk.l1Count(c) + k), b = dk1.l1Pose(c1, 9, k);
+    REQUIRE(a.has_value() == b.has_value());
+    if (a) CHECK(a->t == b->t);
+  }
+  // posm4, pair docked before: only the posm1 part.
+  std::vector<od::DockSample> s4;
+  const auto st4 = dk4.dockPair(f.x.mobSys->inputAngles(), 9, 1 << 20, [&](std::vector<od::DockSample>& ch) { s4.insert(s4.end(), ch.begin(), ch.end()); }, true);
+  std::vector<od::DockSample> s1;
+  const auto st1 = dk1.dockPair(f1.x.mobSys->inputAngles(), 9, s1);
+  CHECK(st4.l1 == 400);
+  CHECK(st4.sepaPairs == 0);
+  CHECK(st4.l2 == st1.l2);
+  REQUIRE(s4.size() == s1.size());
+  for (std::size_t i = 0; i < s4.size(); ++i) CHECK(s4[i].energy == s1[i].energy);
+}
 
 TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   DockFixture f;

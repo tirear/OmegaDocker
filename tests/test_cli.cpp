@@ -82,6 +82,16 @@ TEST_CASE("cli: errors") {
   CHECK_THROWS_AS(parse({"--help=1"}), od::Error);
   CHECK_THROWS_AS(parse({"--dock9b_posm=posm9"}), od::Error);
   CHECK_THROWS_AS(parse({"--dock9b_posm=posm2_fft"}), od::Error);
+  auto p3 = parse({"--dock9b_posm=posm3", "--dock9b_sepaPotThreshold=2.5", "--dock9b_sepaPosRange=2"});
+  CHECK(p3.posm == "posm3");
+  CHECK(p3.sepaPotThreshold == 2.5);
+  CHECK(p3.sepaPosRange == 2.0);
+  CHECK(p3.sepaShellMax == 6.0);
+  CHECK(parse({"--dock9b_posm=posm4"}).posm == "posm4");
+  CHECK_FALSE(parse({"--dock9b_posm=posm3"}).sepaPotThreshold.has_value());
+  CHECK_THROWS_AS(od::validateOptions(parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10",
+                                             "--outPrefix=o", "--dock9b_posm=posm3", "--dock9b_sepaShellMax=2"})),
+                  od::Error);
   CHECK_THROWS_AS(od::validateOptions(parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=10,10,10", "--outPrefix=o"})),
                   od::Error);  // --posm missing
 

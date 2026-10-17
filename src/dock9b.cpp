@@ -27,6 +27,11 @@ Vec3T<T> castVec(const Vec3& v) {
   return {static_cast<T>(v[0]), static_cast<T>(v[1]), static_cast<T>(v[2])};
 }
 
+double dist2(const Vec3& a, const Vec3& b) {
+  const double x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+  return x * x + y * y + z * z;
+}
+
 std::uint64_t splitmix(std::uint64_t z) {
   z += 0x9e3779b97f4a7c15ULL;
   z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -45,6 +50,8 @@ Dock9bStats& Dock9bStats::operator+=(const Dock9bStats& o) {
   leftGrid += o.leftGrid;
   steps += o.steps;
   evaluations += o.evaluations;
+  sepaPairs += o.sepaPairs;
+  sepaSingles += o.sepaSingles;
   return *this;
 }
 
@@ -55,8 +62,116 @@ std::uint64_t dockStream(std::uint64_t round, std::uint64_t mobm, std::uint64_t 
   return splitmix(s ^ mobmSample);
 }
 
-MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p)
-    : sys_(sys), field_(field), p_(p) {
+std::vector<StamSepa> stamSepas(const StamField& field, const Dock9bParams& p, StamSepaInfo* info, int neighbours) {
+  const GridGeometry& g = field.geom();
+  const std::size_t n = static_cast<std::size_t>(g.n[0]) * g.n[1] * g.n[2];
+  std::vector<float> phi(n, 0.0f);
+  std::vector<char> shell(n, 0);
+  const int m0 = 0;
+#pragma omp parallel for schedule(static)
+  for (int z = 0; z < g.n[2]; ++z)
+    for (int y = 0; y < g.n[1]; ++y)
+      for (int x = 0; x < g.n[0]; ++x) {
+        const Vec3 pt = g.point(x, y, z);
+        const double d = field.distance<double>(pt, nullptr);
+        if (d < p.sepaShellMin || d > p.sepaShellMax) continue;
+        const std::size_t i = g.index(x, y, z);
+        shell[i] = 1;
+        // Potential = energy per unit charge: (E(q = 1) - E(q = -1)) / 2 (spec 8.1).
+        phi[i] = static_cast<float>(0.5 * (field.energy<double>(m0, 1.0, pt, nullptr) - field.energy<double>(m0, -1.0, pt, nullptr)));
+      }
+  std::vector<float> mags;
+  for (std::size_t i = 0; i < n; ++i)
+    if (shell[i]) mags.push_back(std::abs(phi[i]));
+  StamSepaInfo inf;
+  inf.shellPoints = static_cast<long long>(mags.size());
+  double cut;
+  if (p.sepaPotThreshold) {
+    cut = *p.sepaPotThreshold;
+  } else if (mags.empty()) {
+    cut = std::numeric_limits<double>::infinity();
+  } else {
+    // The points ranked in the top sepaPotPercentile % of |potential| (at least one).
+    const std::size_t keep = std::max<std::size_t>(
+        1, static_cast<std::size_t>(std::ceil(p.sepaPotPercentile / 100.0 * static_cast<double>(mags.size()) - 1e-9)));
+    std::nth_element(mags.begin(), mags.begin() + static_cast<std::ptrdiff_t>(keep - 1), mags.end(), std::greater<float>());
+    cut = mags[keep - 1];
+  }
+  inf.potCut = cut;
+  std::vector<char> sel(n, 0);
+  for (std::size_t i = 0; i < n; ++i)
+    if (shell[i] && phi[i] != 0.0f && std::abs(phi[i]) >= cut) {
+      sel[i] = phi[i] > 0 ? 1 : -1;
+      ++inf.selected;
+    }
+  // Connected regions of the same sign.
+  std::vector<std::array<int, 3>> offs;
+  for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+      for (int dx = -1; dx <= 1; ++dx) {
+        const int k = std::abs(dx) + std::abs(dy) + std::abs(dz);
+        if (k == 0 || (neighbours == 6 && k > 1)) continue;
+        offs.push_back({dx, dy, dz});
+      }
+  std::vector<StamSepa> out;
+  std::vector<char> seen(n, 0);
+  std::vector<std::array<int, 3>> stack;
+  for (int z = 0; z < g.n[2]; ++z)
+    for (int y = 0; y < g.n[1]; ++y)
+      for (int x = 0; x < g.n[0]; ++x) {
+        const std::size_t i0 = g.index(x, y, z);
+        if (!sel[i0] || seen[i0]) continue;
+        StamSepa s;
+        s.sign = sel[i0];
+        seen[i0] = 1;
+        stack.assign(1, {x, y, z});
+        while (!stack.empty()) {
+          const auto c = stack.back();
+          stack.pop_back();
+          const Vec3 pt = g.point(c[0], c[1], c[2]);
+          for (int k = 0; k < 3; ++k) s.xyz[k] += pt[k];
+          ++s.points;
+          for (const auto& o : offs) {
+            const int a = c[0] + o[0], b = c[1] + o[1], e = c[2] + o[2];
+            if (a < 0 || b < 0 || e < 0 || a >= g.n[0] || b >= g.n[1] || e >= g.n[2]) continue;
+            const std::size_t j = g.index(a, b, e);
+            if (sel[j] != s.sign || seen[j]) continue;
+            seen[j] = 1;
+            stack.push_back({a, b, e});
+          }
+        }
+        for (double& v : s.xyz) v /= s.points;
+        out.push_back(s);
+      }
+  if (info) *info = inf;
+  return out;
+}
+
+namespace {
+
+// Rotation taking the unit vector a to the unit vector b.
+Quat alignQuat(const Vec3& a, const Vec3& b) {
+  const double d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  if (d < -1 + 1e-12) {
+    // Antiparallel: half turn about any axis perpendicular to a.
+    Vec3 p = std::abs(a[0]) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    Vec3 ax{a[1] * p[2] - a[2] * p[1], a[2] * p[0] - a[0] * p[2], a[0] * p[1] - a[1] * p[0]};
+    const double l = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+    return {0, ax[0] / l, ax[1] / l, ax[2] / l};
+  }
+  return normalized(Quat{1 + d, a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]});
+}
+
+Vec3 unit(const Vec3& v) {
+  const double l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  return {v[0] / l, v[1] / l, v[2] / l};
+}
+
+}  // namespace
+
+MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p,
+                       const std::vector<StamSepa>* sepas)
+    : sys_(sys), field_(field), p_(p), sepas_(sepas) {
   const Ad4Typing& t = sys.typing(0);
   const int off = sys.coordOffset(0);
   for (std::size_t a = 0; a < t.type.size(); ++a) {
@@ -69,7 +184,12 @@ MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Do
     heavy_.push_back(t.type[a] != Ad4Type::H && t.type[a] != Ad4Type::HD && t.type[a] != Ad4Type::HS);
   }
   for (int c = 0; c < 3; ++c) posN_[c] = static_cast<int>(std::floor(p.boxSize[c] / p.posStep + 1e-9)) + 1;
-  if (p.posm == Posm::Posm2) hopf_ = hopfGrid(p.hopfLevel);
+  if (p.posm != Posm::Posm1) hopf_ = hopfGrid(p.hopfLevel);
+  if (p.posm == Posm::Posm3 || p.posm == Posm::Posm4) {
+    if (!sepas_) fail("posm3: the StaM regions are missing");
+    axisAngles_ = std::max(1, static_cast<int>(std::lround(360.0 / p.rotStep)));
+    transN_ = 2 * static_cast<int>(std::floor(p.sepaPosRange / p.posStep + 1e-9)) + 1;
+  }
 }
 
 long long MobmDocker::PosRange::count() const {
@@ -79,8 +199,13 @@ long long MobmDocker::PosRange::count() const {
 }
 
 long long MobmDocker::l1Count(const Conf& c) const {
-  if (p_.posm == Posm::Posm1) return p_.posm1SampleNum;
-  return c.hopfOffset.back();
+  switch (p_.posm) {
+    case Posm::Posm1: return p_.posm1SampleNum;
+    case Posm::Posm2: return c.hopfOffset.back();
+    case Posm::Posm3: return c.pairPoses + c.singlePoses;
+    case Posm::Posm4: return c.pairPoses + c.singlePoses + p_.posm1SampleNum;
+  }
+  return 0;
 }
 
 MobmDocker::PosRange MobmDocker::posRange(const Conf& c, const Quat& q) const {
@@ -124,13 +249,108 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
     for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfRange[j] = posRange(c, hopf_[j]);
     for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfOffset[j + 1] = c.hopfOffset[j] + c.hopfRange[j].count();
   }
+  if (p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4) {
+    // MobM side: probe atoms with |q| >= sepaChargeThreshold (spec 8.4.4).
+    std::vector<int> ms;
+    for (std::size_t k = 0; k < probe_.size(); ++k)
+      if (std::abs(charge_[k]) >= p_.sepaChargeThreshold && charge_[k] != 0) ms.push_back(static_cast<int>(k));
+    auto sgn = [&](int k) { return charge_[k] > 0 ? 1 : -1; };
+    auto yAt = [&](int k) {
+      const Vec3f& y = c.coords[probe_[k]];
+      return Vec3{y[0], y[1], y[2]};
+    };
+    const auto& ss = *sepas_;
+    for (std::size_t i = 0; i < ss.size(); ++i)
+      for (std::size_t j = i + 1; j < ss.size(); ++j) {
+        const double dS = std::sqrt(dist2(ss[i].xyz, ss[j].xyz));
+        for (int a : ms)
+          for (int b : ms) {
+            if (a == b || sgn(a) != -ss[i].sign || sgn(b) != -ss[j].sign) continue;
+            if (std::abs(dS - std::sqrt(dist2(yAt(a), yAt(b)))) > p_.sepaDistTolerance) continue;
+            c.pairs.push_back({static_cast<int>(i), static_cast<int>(j), a, b});
+          }
+      }
+    for (std::size_t i = 0; i < ss.size(); ++i)
+      for (int a : ms)
+        if (sgn(a) == -ss[i].sign) c.singles.push_back({static_cast<int>(i), a});
+    const long long nt = static_cast<long long>(transN_) * transN_ * transN_;
+    c.pairPoses = static_cast<long long>(c.pairs.size()) * axisAngles_ * nt;
+    c.singlePoses = static_cast<long long>(c.singles.size()) * static_cast<long long>(hopf_.size()) * nt;
+  }
   return c;
 }
 
+bool MobmDocker::fitsBox(const Conf& c, const Pose& pose) const {
+  const QuatF qf = toFloat(pose.q);
+  const Vec3f cf = castVec<float>(c.center), tf = castVec<float>(pose.t);
+  const float m = static_cast<float>(kPosMargin);
+  for (int k : probe_) {
+    const Vec3f& y = c.coords[k];
+    const Vec3f r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]});
+    for (int d = 0; d < 3; ++d) {
+      const float w = r[d] + tf[d];
+      if (w < static_cast<float>(p_.boxCenter[d] - 0.5 * p_.boxSize[d]) + m ||
+          w > static_cast<float>(p_.boxCenter[d] + 0.5 * p_.boxSize[d]) - m)
+        return false;
+    }
+  }
+  return true;
+}
+
+std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
+  const long long nt = static_cast<long long>(transN_) * transN_ * transN_;
+  const int half = transN_ / 2;
+  long long tr = k % nt;
+  Vec3 delta;
+  for (int d = 0; d < 3; ++d) {
+    delta[d] = p_.posStep * static_cast<double>(tr % transN_ - half);
+    tr /= transN_;
+  }
+  const auto& ss = *sepas_;
+  auto yAt = [&](int pk) {
+    const Vec3f& y = c.coords[probe_[pk]];
+    return Vec3{y[0], y[1], y[2]};
+  };
+  Pose pose;
+  Vec3 anchorS, anchorM;  // world point and conformation point made to coincide (before delta)
+  if (k < c.pairPoses) {
+    // Pair: match-major, then the rotation about the axis, then the translation.
+    const long long r = k / nt;
+    const auto& pm = c.pairs[static_cast<std::size_t>(r / axisAngles_)];
+    const int a = static_cast<int>(r % axisAngles_);
+    const Vec3 s1 = ss[pm.s1].xyz, s2 = ss[pm.s2].xyz, m1 = yAt(pm.m1), m2 = yAt(pm.m2);
+    const Vec3 us = unit({s2[0] - s1[0], s2[1] - s1[1], s2[2] - s1[2]});
+    const Quat q0 = alignQuat(unit({m2[0] - m1[0], m2[1] - m1[1], m2[2] - m1[2]}), us);
+    const double th = 2 * std::numbers::pi * a / axisAngles_;
+    pose.q = normalized(fromRotationVector({us[0] * th, us[1] * th, us[2] * th}) * q0);
+    for (int d = 0; d < 3; ++d) {
+      anchorS[d] = 0.5 * (s1[d] + s2[d]);
+      anchorM[d] = 0.5 * (m1[d] + m2[d]);
+    }
+  } else {
+    // Single: placement-major, then the Hopf orientation, then the translation.
+    const long long r = (k - c.pairPoses) / nt;
+    const long long nh = static_cast<long long>(hopf_.size());
+    const auto& sp = c.singles[static_cast<std::size_t>(r / nh)];
+    pose.q = hopf_[static_cast<std::size_t>(r % nh)];
+    anchorS = ss[sp[0]].xyz;
+    anchorM = yAt(sp[1]);
+  }
+  const Vec3 rm = rotate(pose.q, {anchorM[0] - c.center[0], anchorM[1] - c.center[1], anchorM[2] - c.center[2]});
+  for (int d = 0; d < 3; ++d) pose.t[d] = anchorS[d] + delta[d] - rm[d];
+  if (!fitsBox(c, pose)) return std::nullopt;
+  return pose;
+}
+
 std::optional<Pose> MobmDocker::l1Pose(const Conf& conf, std::uint64_t stream, long long k) const {
+  if (p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4) {
+    const long long n3 = conf.pairPoses + conf.singlePoses;
+    if (k < n3) return posm3Pose(conf, k);
+    k -= n3;  // posm4: the posm1 samples follow
+  }
   Pose pose;
   std::array<long long, 3> idx{};
-  if (p_.posm == Posm::Posm1) {
+  if (p_.posm != Posm::Posm2) {
     Rng rng(p_.seed, stream, static_cast<std::uint64_t>(k));
     pose.q = randomQuat(rng);
     const PosRange pr = posRange(conf, pose.q);
@@ -349,18 +569,23 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
 }
 
 Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
-                                 const std::function<void(std::vector<DockSample>&)>& sink) const {
+                                 const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only) const {
   const Conf c = conformation(mobAnglesDeg);
   const long long n = l1Count(c);
+  const long long first = posm1Only && p_.posm == Posm::Posm4 ? c.pairPoses + c.singlePoses : 0;
   Dock9bStats total;
-  total.l1 = n;
+  total.l1 = n - first;
+  if (first == 0) {
+    total.sepaPairs = static_cast<long long>(c.pairs.size());
+    total.sepaSingles = static_cast<long long>(c.singles.size());
+  }
   std::vector<long long> l2;
 #pragma omp parallel
   {
     Dock9bStats st;
     std::vector<long long> mine;
 #pragma omp for schedule(static) nowait
-    for (long long k = 0; k < n; ++k) {
+    for (long long k = first; k < n; ++k) {
       const auto pose = l1Pose(c, stream, k);
       if (!pose) ++st.outsideBox;
       else if (quickFilter(c, *pose, st)) mine.push_back(k);

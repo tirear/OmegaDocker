@@ -22,13 +22,21 @@ namespace od {
 // per-pair terms are single precision; sums, L-BFGS and pose updates are double
 // (spec 12.1).
 
-enum class Posm { Posm1, Posm2 };
+enum class Posm { Posm1, Posm2, Posm3, Posm4 };
 
 struct Dock9bParams {
   Posm posm = Posm::Posm1;
   double posStep = 1.0;          // Å
   int hopfLevel = 3;             // posm2 orientations (rotStep)
   long long posm1SampleNum = 1000;
+  // posm3 (spec 8.4.4)
+  double sepaShellMin = 2.5, sepaShellMax = 6.0;  // Å
+  double sepaPotPercentile = 5.0;                 // %
+  std::optional<double> sepaPotThreshold;         // kcal/mol/e; replaces the percentile
+  double sepaChargeThreshold = 0.3;               // e
+  double sepaDistTolerance = 1.0;                 // Å
+  double sepaPosRange = 4.0;                      // Å
+  double rotStep = 7.5;                           // degrees, posm3 rotation about the pair axis
   Vec3 boxCenter{}, boxSize{};
   int maxOverlapAtomNum = 1;
   double maxNearDistance = 6.0;
@@ -51,6 +59,21 @@ struct Pose {
   Quat q{};
 };
 
+// posm3: a StaM region of large |electrostatic potential| (spec 8.4.4).
+struct StamSepa {
+  Vec3 xyz{};     // centroid of the grid points
+  int sign = 0;   // sign of the potential
+  int points = 0;
+};
+struct StamSepaInfo {
+  long long shellPoints = 0;  // grid points in the shell
+  long long selected = 0;     // grid points passing the |potential| cut
+  double potCut = 0;          // |potential| cut (kcal/mol/e)
+};
+// Regions of one StaM conformation; neighbours: 6 (face-sharing grid points) or 26.
+std::vector<StamSepa> stamSepas(const StamField& field, const Dock9bParams& p, StamSepaInfo* info = nullptr,
+                                int neighbours = 6);
+
 struct DockSample {
   Pose pose;                  // float values
   Vec3 center{};              // heavy-atom centre of the starting conformation (the Pose frame)
@@ -72,13 +95,17 @@ struct Dock9bStats {
   long long leftGrid = 0;    // removed during minimization (spec 8.6)
   long long steps = 0;
   long long evaluations = 0;
+  long long sepaPairs = 0;    // posm3: matched (StaM pair, MobM pair) alignments
+  long long sepaSingles = 0;  // posm3: (StaM region, MobM atom) placements
   Dock9bStats& operator+=(const Dock9bStats& o);
 };
 
 class MobmDocker {
  public:
-  // sys: energy system of the single MobM (parts = {mob}); field: the StaM conformation (spec 8.1, 8.2).
-  MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p);
+  // sys: energy system of the single MobM (parts = {mob}); field: the StaM conformation (spec 8.1, 8.2);
+  // sepas: the regions of the StaM conformation (posm3, posm4).
+  MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p,
+             const std::vector<StamSepa>* sepas = nullptr);
 
   // Lattice indices of the positions keeping every probe atom kPosMargin inside
   // the box for one orientation (spec 8.4); empty when lo > hi on an axis.
@@ -96,6 +123,13 @@ class MobmDocker {
     // posm2: position range per Hopf orientation and the prefix sums of their counts.
     std::vector<PosRange> hopfRange;
     std::vector<long long> hopfOffset;
+    // posm3: matched pairs (StaM regions s1, s2; probe atoms m1, m2), single placements (region, probe atom).
+    struct PairMatch {
+      int s1, s2, m1, m2;
+    };
+    std::vector<PairMatch> pairs;
+    std::vector<std::array<int, 2>> singles;
+    long long pairPoses = 0, singlePoses = 0;
   };
   Conf conformation(std::span<const double> anglesDeg) const;
 
@@ -130,9 +164,9 @@ class MobmDocker {
   // Appends the docking samples to out (in L1poss order).
   Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::vector<DockSample>& out) const;
   // Same, minimizing the L2poss in chunks of chunkSize (in L1poss order); after each
-  // chunk, sink receives the docking samples of the chunk.
+  // chunk, sink receives the docking samples of the chunk. posm1Only (posm4): only the posm1 part.
   Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
-                       const std::function<void(std::vector<DockSample>&)>& sink) const;
+                       const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only = false) const;
 
   long long l1Count(const Conf& c) const;  // L1poss per conformation pair
 
@@ -150,6 +184,11 @@ class MobmDocker {
   std::vector<char> heavy_;
   std::array<int, 3> posN_{};  // positions per axis
   std::vector<Quat> hopf_;
+  const std::vector<StamSepa>* sepas_ = nullptr;
+  int axisAngles_ = 0;  // posm3: rotations about the pair axis
+  int transN_ = 0;      // posm3: translations per axis
+  std::optional<Pose> posm3Pose(const Conf& c, long long k) const;
+  bool fitsBox(const Conf& c, const Pose& pose) const;
 };
 
 // PRNG stream of a 9b conformation pair.

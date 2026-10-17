@@ -85,9 +85,15 @@ struct Options {
   double gridDeltaThreshold = 1e-4;
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
-  std::string posm;  // posm1 | posm2
+  std::string posm;  // posm1 | posm2 | posm3 | posm4
   double posStep = 1.0;
   long long posm1SampleNum = 1000;
+  double sepaShellMin = 2.5, sepaShellMax = 6.0;
+  double sepaPotPercentile = 5.0;
+  std::optional<double> sepaPotThreshold;
+  double sepaChargeThreshold = 0.3;
+  double sepaDistTolerance = 1.0;
+  double sepaPosRange = 4.0;
   int maxOverlapAtomNum = 1;
   int dockMinMaxStep = 1000;
   int dockMinConvSteps = 10;
