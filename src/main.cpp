@@ -207,6 +207,8 @@ class ConfSet {
     clp.rcdMaxIter = csgm_.rcdMaxIter;
     clp.rcdMaxRestart = csgm_.rcdMaxRestart;
     clp.kicMaxTrial = csgm_.kicMaxTrial;
+    clp.rcdClash = csgm_.rcdClash == "full" ? od::RcdClash::Full : csgm_.rcdClash == "repair" ? od::RcdClash::Repair : od::RcdClash::None;
+    clp.rcdClashWeight = csgm_.rcdClashWeight;
     clp.clashDistance = opt.clashDistance;
     clp.growClose = csgm_.build == "growClose";
     std::vector<bool> freeMask(cisTrans_.size());

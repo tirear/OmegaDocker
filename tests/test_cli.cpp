@@ -219,6 +219,17 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(t.mobmCsgm.growMaxRetry == 16);
   CHECK_THROWS_AS(parse({"--csgmBuild", "grow"}), od::Error);
   CHECK_THROWS_AS(parse({"--mobm_csgmBuild=partial"}), od::Error);
+  auto rc = parse({"--stam_csgmBuild=growClose", "--stam_rcdClash=repair", "--mobm_rcdClashWeight=10", "--stam_growMaxBacktrack=2"});
+  CHECK(rc.stamCsgm.build == "growClose");
+  CHECK(rc.stamCsgm.rcdClash == "repair");
+  CHECK(rc.mobmCsgm.rcdClash == "none");
+  CHECK(rc.mobmCsgm.rcdClashWeight == 10);
+  CHECK(rc.stamCsgm.rcdClashWeight == 1);
+  CHECK(rc.stamCsgm.growMaxBacktrack == 2);
+  CHECK(rc.mobmCsgm.growMaxBacktrack == 4);
+  CHECK_THROWS_AS(parse({"--stam_rcdClash=always"}), od::Error);
+  rc.stamCsgm.rcdClashWeight = 0;
+  CHECK_THROWS_AS(od::validateOptions(rc), od::Error);
   auto ga = parse({"--stam_tournamentRate=70", "--mobm_crossoverRate=50", "--mobm_mutationRate=5", "--mobm_absMaxDang=45",
                    "--stam_csgmGA=csgm2"});
   CHECK(ga.stamCsgm.tournamentRate == 70);

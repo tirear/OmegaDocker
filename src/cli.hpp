@@ -46,6 +46,8 @@ struct CsgmOpts {
   int rcdMaxIter = 1000;
   int rcdMaxRestart = 10;
   int kicMaxTrial = 100;
+  std::string rcdClash = "none";  // none | repair | full
+  double rcdClashWeight = 1.0;
 };
 
 struct Options {

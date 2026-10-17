@@ -2133,6 +2133,76 @@ TEST_CASE("closure: coupled links closed together (2KJJ A:8-15 with the disulfid
   }
 }
 
+TEST_CASE("closure: coupling is transitive (2KJJ A:3-6 + A:8-15)") {
+  // Loops A:3-6 (break A:6:C-A:7:N) and A:8-15 (break A:15:C-A:16:N) share no torsion, but each shares
+  // torsions with the disulfide A:6-A:11: one group of three links.
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(freeResidues(f.text, "A", 3, 6), "A", 8, 15));
+  const od::MolSettings& s = cfg.molecules[0];
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &s.tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  REQUIRE(s.tree.links.size() == 4);
+  const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), {});
+  const auto lines = closer.describe();
+  for (const auto& l : lines) MESSAGE(l);
+  REQUIRE(lines.size() == 2);
+  CHECK(lines[0].find("A:6:C - A:7:N + A:15:C - A:16:N + A:6:SG - A:11:SG: coupled, 3 links") != std::string::npos);
+  CHECK(lines[1].find("A:20:SG - B:19:SG") != std::string::npos);
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  for (const double clash : {0.0, 1.8}) {
+    od::ClosureParams cp;
+    cp.clashDistance = clash;
+    const od::LoopCloser c(sys, parts, freeMask, smp.segments(), cp);
+    int closed = 0;
+    for (int k = 0; k < 40; ++k) {
+      od::Rng r(7, 0, k);
+      std::vector<double> a = sys.inputAngles();
+      smp.sample(r, a);
+      if (!c.close(r, a, resample)) continue;
+      ++closed;
+      const auto x = sys.coordinates(std::span<const double>(a));
+      for (int li : {0, 1, 2}) CHECK(linkDeviation(s.tree, s.tree.links[li], x) <= cp.rcdTolerance * std::sqrt(3.0) + 1e-9);
+    }
+    MESSAGE(std::format("clashDistance {}: closed {} of 40", clash, closed));
+    if (clash == 0) CHECK(closed > 0);
+  }
+}
+
+TEST_CASE("closure: clash term in the RCD objective (2KJJ A:8-15 with the disulfide A:6-A:11)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 8, 15));
+  const od::MolSettings& s = cfg.molecules[0];
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &s.tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  int closed[3] = {0, 0, 0};
+  for (const od::RcdClash mode : {od::RcdClash::None, od::RcdClash::Repair, od::RcdClash::Full}) {
+    od::ClosureParams cp;
+    cp.growClose = true;
+    cp.rcdClash = mode;
+    cp.rcdClashWeight = 10;
+    const od::LoopCloser c(sys, parts, freeMask, smp.segments(), cp);
+    // full is slow (spec 7.11): fewer samples.
+    for (int k = 0; k < (mode == od::RcdClash::Full ? 4 : 20); ++k) {
+      od::Rng r(7, 0, k);
+      std::vector<double> a = sys.inputAngles();
+      smp.sample(r, a);
+      if (!c.close(r, a, resample)) continue;
+      ++closed[static_cast<int>(mode)];
+      const auto x = sys.coordinates(std::span<const double>(a));
+      for (int li : {0, 1}) CHECK(linkDeviation(s.tree, s.tree.links[li], x) <= cp.rcdTolerance * std::sqrt(3.0) + 1e-9);
+    }
+  }
+  MESSAGE(std::format("closed: none {} of 20, repair {} of 20, full {} of 4", closed[0], closed[1], closed[2]));
+  CHECK(closed[1] >= closed[0]);
+}
+
 TEST_CASE("closure: growClose builds the rest after the closure (2KJJ A:12-17)") {
   StaFixture f;
   const auto cfg = f.ok(freeResidues(f.text, "A", 12, 17));

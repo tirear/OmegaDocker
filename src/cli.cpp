@@ -210,6 +210,16 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                       [csgm](auto& o) -> auto& { return csgm(o).rcdMaxRestart; }));
   t.push_back(integer(set + ".kicMaxTrial", "<n>", "100", who + "KIC: pivot choices before discarding the sample",
                       [csgm](auto& o) -> auto& { return csgm(o).kicMaxTrial; }));
+  t.push_back({set + ".rcdClash", Type::Str, "none|repair|full", "none",
+               who + "RCD: clash term in the objective (repair: once closed but clashing; full: from the start)",
+               [csgm](Options& o, const Tokens& v) {
+                 const std::string& s = one(v);
+                 if (s != "none" && s != "repair" && s != "full") fail("expected none, repair or full but got '{}'", s);
+                 csgm(o).rcdClash = s;
+               },
+               [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).rcdClash}; }});
+  t.push_back(real(set + ".rcdClashWeight", "<w>", "1", who + "RCD: weight of the clash term against the closure term (Å^2)",
+                   [csgm](auto& o) -> auto& { return csgm(o).rcdClashWeight; }));
   t.push_back(integer(set + ".growMaxRetry", "<n>", "16", who + "csgmBuild = grow, csgm1: resamplings of a failing segment before discarding",
                       [csgm](auto& o) -> auto& { return csgm(o).growMaxRetry; }));
   t.push_back(integer(set + ".growMaxBacktrack", "<n>", "4",
@@ -722,6 +732,7 @@ void validateOptions(const Options& o) {
     check(c->rcdMaxIter >= 1, set + ".rcdMaxIter", ">= 1");
     check(c->rcdMaxRestart >= 0, set + ".rcdMaxRestart", ">= 0");
     check(c->kicMaxTrial >= 1, set + ".kicMaxTrial", ">= 1");
+    check(c->rcdClashWeight > 0, set + ".rcdClashWeight", "> 0");
   }
   check(o.confMinMaxStep >= 0, "conf9a.minMaxStep", ">= 0");
   check(o.confMinDeltaE >= 0, "conf9a.minDeltaE", ">= 0");

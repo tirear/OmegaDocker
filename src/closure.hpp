@@ -19,6 +19,9 @@ namespace od {
 // (kinematic closure, Coutsias et al. 2004; Mandell et al. 2009).
 
 enum class ClosureMethod : std::uint8_t { None, Rcd, Kic };
+// Clash term in the RCD objective (spec 7.11): none; repair: from the first converged
+// iterate that fails the clash check; full: from the first update.
+enum class RcdClash : std::uint8_t { None, Repair, Full };
 
 struct ClosureParams {
   ClosureMethod method = ClosureMethod::Rcd;
@@ -27,6 +30,8 @@ struct ClosureParams {
   int rcdMaxRestart = 10;
   int kicMaxTrial = 100;
   double clashDistance = 1.8;
+  RcdClash rcdClash = RcdClash::None;
+  double rcdClashWeight = 1.0;  // weight of sum (clashDistance - d)^2 against the closure sum of squares (Å^2)
   // csgmBuild = growClose (spec 7.8): the clash check after closing covers every
   // atom moved by the closure except those built after it (side chains).
   bool growClose = false;
@@ -82,6 +87,7 @@ class LoopCloser {
     std::vector<int> pairPoint;              // per pair: moving, target as indices into points
     std::vector<int> restraintPoint;         // per restraint: a, b as indices into points
     std::vector<std::pair<int, int>> clashPairs;  // system coordinate indices
+    std::vector<std::vector<int>> movesSys;       // per dof, system coordinates it moves (sorted)
   };
   double deviation(const Link& l, const std::vector<Vec3>& x) const;  // part-local coordinates
   bool clashFree(const Link& l, std::span<const double> anglesDeg) const;

@@ -178,11 +178,15 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
         });
         if (shared) root[find(j)] = find(i);
       }
+    std::vector<char> seen(L, 0);
     for (int i = 0; i < L; ++i) {
-      if (find(i) != i) continue;
+      if (seen[i]) continue;
       std::vector<int> mem;
       for (int j = i; j < L; ++j)
-        if (find(j) == i) mem.push_back(j);
+        if (find(j) == find(i)) {
+          mem.push_back(j);
+          seen[j] = 1;
+        }
       Link l;
       if (mem.size() == 1) {
         l = std::move(single[i]);
@@ -289,6 +293,12 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
     for (const auto& pr : sys_.pairs())
       if (pr.heavy && (checked[pr.i] || checked[pr.j]) && !later[pr.i] && !later[pr.j])
         l.clashPairs.push_back({pr.i, pr.j});
+    for (int g : l.dof) {
+      std::vector<int> mv;
+      for (int c : tree.torsions[localTorsion_[g]].moving) mv.push_back(co + c);
+      std::sort(mv.begin(), mv.end());
+      l.movesSys.push_back(std::move(mv));
+    }
   }
 }
 
@@ -403,6 +413,26 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
     }
     return d;
   };
+  // Clash term: sum over clash pairs of w (c - d)^2 for d < c, on a neighbour list of the pairs
+  // closer than c + 4 Å, rebuilt every 20 updates; the final clash check is exact.
+  const double cd = p_.clashDistance, w = p_.rcdClashWeight;
+  const bool clashTerm = p_.rcdClash != RcdClash::None && cd > 0 && w > 0 && !l.partial && !l.clashPairs.empty();
+  std::vector<Vec3> X;
+  std::vector<std::pair<int, int>> nl;
+  int nlAge = 0;
+  auto buildNl = [&]() {
+    nl.clear();
+    const double r2 = (cd + 4) * (cd + 4);
+    for (const auto& [i, j] : l.clashPairs)
+      if (dot(X[i] - X[j], X[i] - X[j]) < r2) nl.push_back({i, j});
+    nlAge = 0;
+  };
+  auto clashes = [&]() {
+    const double c2 = cd * cd;
+    for (const auto& [i, j] : l.clashPairs)
+      if (dot(X[i] - X[j], X[i] - X[j]) < c2) return true;
+    return false;
+  };
   for (int att = 0; att <= restarts; ++att) {
     if (att > 0) {
       std::copy(orig.begin(), orig.end(), a.begin());
@@ -410,7 +440,23 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
     }
     const auto x = partCoords(l.part, a);
     for (std::size_t i = 0; i < l.points.size(); ++i) P[i] = x[l.points[i]];
-    bool conv = dev() <= tol;
+    bool useClash = clashTerm && p_.rcdClash == RcdClash::Full;
+    if (clashTerm) {
+      X = sys_.coordinates(std::span<const double>(a.data(), a.size()));
+      buildNl();
+    }
+    // Converged: closed, and with the clash term also clash free.
+    auto converged = [&]() {
+      if (dev() > tol) return false;
+      if (!clashTerm) return true;
+      if (!clashes()) return true;
+      if (!useClash) {
+        useClash = true;
+        buildNl();
+      }
+      return false;
+    };
+    bool conv = converged();
     int prev = -1;
     for (int it = 0; it < maxIter && !conv; ++it) {
       int d = static_cast<int>(rng.below(nd));
@@ -448,8 +494,57 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
         rt.push_back({dot(rp, rp) + dot(tp, tp) + std::pow(dot(r, k) - dot(tv, k), 2), B, std::atan2(nm, dn),
                       l.restraints[q].r0});
       }
+      // Clash candidates: pairs with one atom moved whose circle comes closer than c to the other atom.
+      struct CTerm {
+        Vec3 m, s;
+      };
+      std::vector<CTerm> ct;
+      if (useClash) {
+        if (++nlAge >= 20) buildNl();
+        const auto& ms = l.movesSys[d];
+        for (const auto& [i, j] : nl) {
+          const bool mi = std::binary_search(ms.begin(), ms.end(), i), mj = std::binary_search(ms.begin(), ms.end(), j);
+          if (mi == mj) continue;
+          const Vec3& m = X[mi ? i : j];
+          const Vec3& s = X[mi ? j : i];
+          const Vec3 rm = m - o, rs = s - o;
+          const double h = dot(rs - rm, k), rho = norm(perp(rm, k)), rad = norm(perp(rs, k));
+          if (h * h + (rad - rho) * (rad - rho) < cd * cd) ct.push_back({m, s});
+        }
+      }
       double delta = 0;
-      if (rt.empty()) {
+      if (!ct.empty()) {
+        // Closure terms plus w (c - d)^2: 1-degree scan, golden-section refinement; kept only when lower than at 0.
+        auto f = [&](double x) {
+          double v = -2 * (den * std::cos(x) + num * std::sin(x));
+          for (const RTerm& r : rt) {
+            const double e = std::sqrt(std::max(0.0, r.A - 2 * r.B * std::cos(x - r.d0))) - r.r0;
+            v += e * e;
+          }
+          const double c = std::cos(x), sn = std::sin(x);
+          for (const CTerm& q : ct) {
+            const double dd = norm(rotateAbout(q.m, o, k, c, sn) - q.s);
+            if (dd < cd) v += w * (cd - dd) * (cd - dd);
+          }
+          return v;
+        };
+        const double f0 = f(0), st = std::numbers::pi / 180;
+        double best = 0, fb = f0;
+        for (int s = -179; s <= 180; ++s)
+          if (const double v = f(s * st); v < fb) {
+            fb = v;
+            best = s * st;
+          }
+        double lo = best - st, hi = best + st;
+        constexpr double g = 0.6180339887498949;
+        for (int i2 = 0; i2 < 40; ++i2) {
+          const double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
+          if (f(x1) < f(x2)) hi = x2;
+          else lo = x1;
+        }
+        if (const double xx = 0.5 * (lo + hi); f(xx) < fb) best = xx;
+        delta = f(best) < f0 ? best : 0;
+      } else if (rt.empty()) {
         if (copyTerm && (num != 0 || den != 0)) delta = std::atan2(num, den);
       } else if (!copyTerm && rt.size() == 1) {
         const RTerm& r = rt[0];
@@ -491,10 +586,12 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
       if (delta != 0) {
         const double c = std::cos(delta), s = std::sin(delta);
         for (int i : l.moves[d]) P[i] = rotateAbout(P[i], o, k, c, s);
+        if (clashTerm)
+          for (int i : l.movesSys[d]) X[i] = rotateAbout(X[i], o, k, c, s);
         a[l.dof[d]] += delta * kDeg;
       }
       for (int i : l.moves[d]) mv[i] = 0;
-      conv = dev() <= tol;
+      conv = converged();
     }
     for (int g : l.dof) a[g] = wrapDeg(a[g]);
     if (l.partial) return true;
