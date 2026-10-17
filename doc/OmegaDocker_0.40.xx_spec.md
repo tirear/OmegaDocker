@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.46 |
+| 文件版本 | 1.47 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -675,6 +675,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 **原子對能量**（函式形式同 AutoDock-GPU 1.6 的 GPU kernel `calcMergeEneGra.cu`，CPU 與 GPU 共用同一份 `src/ad4_pair.hpp`）：
 - vdW（12-6）／氫鍵（12-10，`HD`／`HS` 與 `NA`、`NS`、`OA`、`OS`、`SA`）：距離 < 8 Å；平滑 0.5 Å（距離在 reqm ± 0.25 Å 內視為 reqm，其外往 reqm 移 0.25 Å）。
 - 靜電（擬合的 Mehler–Solmajer 距離相依介電常數）與去溶劑化（擬合的 σ = 3.6 Å 高斯）：距離 < 20.48 Å；距離 < 0.01 Å 時以 0.01 Å 計算。
+  - 20.48 Å 的來源：沿用 AutoDock-GPU（1.5.2 `cuda/calcenergy.cu` 第 414–415 行；1.6 `cuda/calcenergy.cu` 第 416–417 行、`cuda/calcMergeEneGra.cu` 第 505–506 行：`// Cuttoff2: internuclear-distance at 20.48A only for el and sol.`、`if (atomic_distance < 20.48f)`）。此值來自其查表的範圍：`host/inc/processligand.h`（1.5.2 第 315–320 行、1.6 第 326 行起）的 `r_epsr_table[2048]`、`desolv_table[2048]` 等，註解為 `distances 0.01:0.01:20.48 A`，即 2048 格 × 0.01 Å。是查表大小留下的上限，不是依物理考量決定的距離。
+  - 程式中為 `src/ad4_pair.hpp` 的 `kElecCutoff`，同時用於分子內能量（7.9）、9b 網格與 `flexres` 逐對計算（8.1）、搖動熵的範圍（10）。之後的版本很可能修改此值。
 - 梯度為上述計算式的精確導數。AutoDock-GPU 的去溶劑化梯度使用未擬合高斯的導數，與能量式不一致；新版不沿用。
 - 扭轉自由能項（`N_tors × 0.2983`）為常數，不計入 9a 能量。
 
@@ -906,6 +908,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `flexres` 省下建網格的時間，但每次能量計算要逐對計算 223 個可動原子（20.48 Å 內），9b 慢約 12 倍；此例中每個 StaM 構型約 2,500 個 L2poss，`flexres` 只有在每個 StaM 構型的 pose 數很少時才較快。`flexres` 的結果與 `full` 不同（可動原子為精確值，最佳化路徑因而不同）。
   - `delta` 的結果與 `full` 相同；實際的 StaM 樣本有許多側鏈同時移動，所有區塊都被儲存，沒有節省記憶體。
   - 以上為 CPU 參考版的結果；GPU 版的成本比例不同，須另行評估。
+  - 本例的盒子（30 Å）相對於 20.48 Å 的截斷距離太小，所以區塊幾乎全部被儲存。盒子較大時（例如 120 × 120 × 120 Å），距離移動原子超過 20.48 Å 的區塊比例高得多，預期可節省大量記憶體；CPU 版測試此大小太花時間，**待 CUDA 版完成後再測試** `delta` 在大盒子時節省的記憶體與其他資源。
+  - `grid.deltaThreshold` 維持 1×10⁻⁴（四種圖共用同一門檻）。
 
 ### 8.2 距離網格
 
@@ -1757,3 +1761,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.44 | 2026-10-17 | `{stam,mobm}.rcdMaxIter` 預設由 1000 改為 20000（7.11、7.11.1、14） |
 | 1.45 | 2026-10-17 | 實作 `grid.mode`（`auto`、`full`、`flexres`、`delta`）與 `grid.deltaThreshold`（CPU 參考版）：補充固定／可動原子、`flexres` 的逐對計算與距離、`delta` 的參考構型與比較範圍（8.1、8.2）；新增 8.1.1 測試結果 |
 | 1.46 | 2026-10-17 | `grid.mode = "auto"`：StaM 主鏈不可動時改選 `delta`（原為 `flexres`），否則 `full`（8.1） |
+| 1.47 | 2026-10-17 | 註記靜電與去溶劑化截斷距離 20.48 Å 的來源（7.9）；`delta` 大盒子的記憶體測試延至 CUDA 版、門檻維持 1×10⁻⁴（8.1.1） |

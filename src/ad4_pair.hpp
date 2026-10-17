@@ -20,6 +20,7 @@
 namespace od {
 
 constexpr double kVdwCutoff = 8.0;     // Å, vdW and H-bond
+// From AutoDock-GPU (cuda/calcenergy.cu): the range of its 2048 × 0.01 Å lookup tables (spec 7.9).
 constexpr double kElecCutoff = 20.48;  // Å, electrostatics and desolvation
 
 // 12-6 / 12-10 term with AutoDock smoothing: within ±smooth/2 of reqm the
