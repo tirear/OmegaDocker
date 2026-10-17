@@ -26,7 +26,7 @@ enum class RcdClash : std::uint8_t { None, Repair, Full };
 struct ClosureParams {
   ClosureMethod method = ClosureMethod::Rcd;
   double rcdTolerance = 0.25;  // Å, RMSD of the closure atom pairs
-  int rcdMaxIter = 1000;
+  int rcdMaxIter = 20000;
   int rcdMaxRestart = 10;
   int kicMaxTrial = 100;
   double clashDistance = 1.8;

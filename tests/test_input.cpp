@@ -2185,6 +2185,7 @@ TEST_CASE("closure: clash term in the RCD objective (2KJJ A:8-15 with the disulf
   for (const od::RcdClash mode : {od::RcdClash::None, od::RcdClash::Repair, od::RcdClash::Full}) {
     od::ClosureParams cp;
     cp.growClose = true;
+    cp.rcdMaxIter = 1000;
     cp.rcdClash = mode;
     cp.rcdClashWeight = 10;
     const od::LoopCloser c(sys, parts, freeMask, smp.segments(), cp);

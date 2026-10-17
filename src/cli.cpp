@@ -204,7 +204,7 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                [csgm](const Options& o) -> std::optional<Tokens> { return Tokens{csgm(o).closure}; }});
   t.push_back(real(set + ".rcdTolerance", "<Å>", "0.25", who + "RCD: converged when the RMSD of the closure atom pairs is at most this",
                    [csgm](auto& o) -> auto& { return csgm(o).rcdTolerance; }));
-  t.push_back(integer(set + ".rcdMaxIter", "<n>", "1000", who + "RCD: torsion updates per attempt",
+  t.push_back(integer(set + ".rcdMaxIter", "<n>", "20000", who + "RCD: torsion updates per attempt",
                       [csgm](auto& o) -> auto& { return csgm(o).rcdMaxIter; }));
   t.push_back(integer(set + ".rcdMaxRestart", "<n>", "10", who + "RCD: restarts from resampled torsions before discarding the sample",
                       [csgm](auto& o) -> auto& { return csgm(o).rcdMaxRestart; }));
