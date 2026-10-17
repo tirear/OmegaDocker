@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.54 |
+| 文件版本 | 1.55 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1448,6 +1448,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `fire`：7.9 的參數與規則；每步計算一次能量與梯度，每步都接受。
   - `lbfgs`：如上；9a 的記憶步數固定為 7（`dock9b.lbfgsMemory` 只用於 9b）。
   - `adadelta`：ρ = 0.8、ε = 10⁻²（同 AutoDock-GPU）；E[g²] ← ρE[g²] + (1−ρ)g²，Δx = −g·√((E[Δx²] + ε)/(E[g²] + ε))，縮小後 E[Δx²] ← ρE[Δx²] + (1−ρ)Δx²；每步都接受。變數使用 AutoDock-GPU 的單位：平移以網格間距、旋轉與兩面角以度（再乘上 `scaleTrans` 等）。以 rad 為單位時起始步約 0.22 rad，1L2Y（MobM）測試中 3000 個 pose 全部移出網格。
+    - 步長特性（由公式推得）：g² ≫ ε 時第一步約 ±√(ε/(1−ρ)) ≈ 0.224 單位，與梯度大小無關（每個變數只依梯度正負號）；梯度方向不變時第 k 步約 0.1·√(1 + 0.2k) 單位，逐步變大、沒有上限。步長小，|ΔE| 容易低於 `deltaE` 而提早停止。
 
 **實測（1.54）**：AMD Ryzen 7 9700X，16 執行緒，2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å、`seed` 3，其餘為預設值。
 
@@ -1474,7 +1475,15 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `sd` | 67,552 | 37 | 0.055% | 43.9 | 318 s |
 | `adadelta` | 4,000（上限） | 0 | 0% | — | 31 s 後中止 |
 
-- 捨棄的樣本幾乎都是 E ≥ `Emax`。`adadelta` 以度為單位、最多 100 步，無法推開碰撞；不設上限時 2 小時仍未完成。
+- 捨棄的樣本幾乎都是 E ≥ `Emax`。`adadelta` 在預設停止條件下（1 步 |ΔE| < `confMinDeltaE` = 10 即停止）因步長小而提早停止，未能推開碰撞；不設上限時 2 小時仍未完成。
+- 改為 `confMinDeltaE` 0、`confMinMaxStep` 300（`stam.maxL1TotalNum` 40000）時 `adadelta` 可以通過：
+
+| `conf9a.minMethod` | L1 | L2 | 通過率 | 步數／樣本 | 9a 時間 |
+|---|---|---|---|---|---|
+| `adadelta` | 8,402 | 61 | 0.73% | 300 | 197 s |
+| `fire` | 2,180 | 42 | 1.9% | 300 | 51 s |
+| `lbfgs` | 3,188 | 39 | 1.2% | 62.5 | 50 s |
+
 - 此例 9a 以 `lbfgs` 最快（通過率較高、步數較少）；預設仍為 `fire`，是否更改待決定。
 
 ### 12.1 9b 的數值精度
@@ -1955,3 +1964,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.52 | 2026-10-17 | 新增 `dock9b.sepaPosStep`（預設 2 Å），posm3 平移不再使用 `posStep`；`sepaPosRange` 預設等於 `sepaPosStep`，必須 ≥ `sepaPosStep`；`dock9b.sepaSampling` 改為 `sepaSamplingTriple`／`sepaSamplingPair`／`sepaSamplingSingle`（預設 true／true／false）；8.4.4.1 新增新預設的測試結果 |
 | 1.53 | 2026-10-17 | 實作 posm2_fft（CPU 參考版，pocketfft）：StaM 各格點值與上限（靜電 ±`fftClamp`）、FFT 大小（只補到 2、3、5、7 因數，不補 MobM 半徑）、MobM 三線性分配與通道、合法平移與保留順序、頻譜快取、平行化（8.4.3）；新增實測結果；`dock9b.fftClamp`、`dock9b.fftTopPerRot` 改為已實作 |
 | 1.54 | 2026-10-17 | 實作 `conf9a.minMethod`、`dock9b.minMethod`：`sd`、`cg`、`fire`、`lbfgs`、`adadelta` 共用一個實作，補充各方法細節；`adadelta` 使用 AutoDock-GPU 的變數單位；9a 補充停止條件；對接樣本改為「能量最低的被接受點」（`sd`、`cg`、`lbfgs` 即最後被接受的點）（7.9、8.6、12）；新增 9a、9b 各方法實測 |
+| 1.55 | 2026-10-17 | 修正 9a `adadelta` 實測說明：未通過的原因是預設停止條件（`confMinDeltaE`）使其提早停止，非無法推開碰撞；新增 `confMinDeltaE` 0、`confMinMaxStep` 300 的比較；補充 `adadelta` 步長特性（12） |
