@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.50 |
+| 文件版本 | 1.51 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -997,12 +997,23 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 2. 平移：使 m 落在 s 周圍 ±`sepaPosRange`、間距 `posStep` 的格點上。
 3. 定向：以 m 為中心，Hopf 格點（`rotStep`）。
 
+**三點取樣**（`sepaSampling = "triple"` 時才做）：
+1. StaM 區域 s1 < s2 < s3 與 MobM 原子 (m1, m2, m3)（三者不同，順序有別）符合：
+   - 正負號互補：sign(mi) = −sign(si)。
+   - 三邊距離都符合 `|d_StaM − d_MobM| ≤ sepaDistTolerance`。
+2. 共線排除：任一三角形以最長邊為底的高 < 0.5 Å 者略過（此時繞軸的定向不確定，已由配對取樣涵蓋）。
+3. 對齊：以 Kabsch 法求使 (m1, m2, m3) 疊合到 (s1, s2, s3) 的旋轉（不含鏡像），兩個三角形的重心重合；疊合 RMSD > `sepaDistTolerance` 者略過。定向完全決定，不再繞軸旋轉。
+4. 平移：重心周圍 ±`sepaPosRange`、間距 `posStep`（同配對取樣）。
+- 做法：由配對取樣的符合清單 (s1, s2, m1, m2) 延伸第三點，計算量與配對數成正比。
+- 每組三點只有 1 個定向，配對取樣每組有 `360 / rotStep`（48）個。
+
 **取樣方式 `dock9b.sepaSampling`**（posm3 與 posm4 都適用）：
 
 | 值 | 內容 |
 |---|---|
 | `"pairSingle"`（預設） | 配對取樣 + 單點取樣 |
 | `"pair"` | 只做配對取樣 |
+| `"triple"` | 只做三點取樣 |
 
 - 以百分位為預設的原因：不同 StaM 的靜電勢大小差異很大，固定門檻在某些系統會選不到區域、在另一些系統會選到太多。實測後可再改為固定門檻。
 
@@ -1015,7 +1026,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 對齊：先以最小旋轉將 m1→m2 的方向轉到 s1→s2，再繞 s1→s2 軸轉 `k × 360° / n`，`n = round(360 / rotStep)`（預設 48）。
 - 平移：每軸 `2 × floor(sepaPosRange / posStep) + 1` 個值（預設 3，共 27 個），以錨點為中心（配對：兩軸中點；單點：區域代表點）。
 - 單點取樣的定向：Hopf 格點（`rotStep`，預設第 3 層，36,864 個）。
-- 樣本順序：先配對取樣（配對、繞軸角度、平移由外到內），再單點取樣（區域與原子、定向、平移）；`sepaSampling = "pair"` 時沒有單點取樣的樣本。
+- 樣本順序：配對取樣（配對、繞軸角度、平移由外到內）→ 單點取樣（區域與原子、定向、平移）→ 三點取樣（三點、平移）；未選用的部分沒有樣本。
 - 盒子：所有探針原子須在對接範圍內 0.01 Å（同 8.4 的 `m`），否則捨棄（計入 outside box）。
 - posm3 為決定性方法（不用亂數）。
 
@@ -1062,6 +1073,29 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | posm1 | — （1×10⁵ 個） | 1.6×10⁶ | 4.92×10⁵ | 22 s | 63 s | 0.13 GB | −6.998 | −8.037 |
 
 - 總時間含 9a（約 36 s）與 9d。
+**平移間距（1.51）**：`sepaSampling = "pair"`，`posStep` = `sepaPosRange`，每軸 3 個值、共 27 個平移（1 個為零，26 個有位移）；條件同上。
+
+| `posStep` = `sepaPosRange` | L2poss | 9b 時間 | 總時間 | `E_top_max` | 第 1 名 |
+|---|---|---|---|---|---|
+| 1 Å | 1.01×10⁶ | 52 s | 94 s | −6.736 | −7.160 |
+| 1.5 Å | 1.25×10⁶ | 73 s | 117 s | −6.797 | −7.547 |
+| 2 Å | 1.47×10⁶ | 81 s | 123 s | −7.008 | −8.113 |
+| 4 Å | 1.92×10⁶ | 100 s | 143 s | −7.379 | −8.095 |
+
+- 四者的 L1poss 都是 1.45×10⁷；間距越大，通過 8.5 篩選的越多（錨點附近重疊被移除的比例較高）。
+- 間距 2 Å 的 27 個平移是「`sepaPosRange` 2、`posStep` 1」125 個平移的子集，兩者的 `E_top_max` 與第 1 名相同，時間為 123 s 對 364 s。
+- 間距 4 Å 的 `E_top_max`（−7.379）接近「`sepaPosRange` 4、`posStep` 1」729 個平移（−7.558，2521 s）。
+
+**三點取樣（1.51）**：`sepaSampling = "triple"`，條件同上。每個構型配對平均 232 組三點（配對取樣為 699 組配對 × 48 個角度）。
+
+| `posStep` = `sepaPosRange` | L1poss | L2poss | 9b 時間 | 總時間 | `E_top_max` | 第 1 名 |
+|---|---|---|---|---|---|---|
+| 1 Å | 1.00×10⁵ | 6,248 | 0.42 s | 46 s | −4.901 | −5.982 |
+| 1.5 Å | 1.00×10⁵ | 8,082 | 0.50 s | 46 s | −5.269 | −6.690 |
+| 2 Å | 1.00×10⁵ | 9,706 | 0.65 s | 46 s | −5.615 | −6.820 |
+
+- 單元測試（2KJJ、48 Å 盒子、MobM 1L2Y）：三點 8.1×10⁵ 組、配對 1.3×10⁵ 組；MobM 帶電原子多時，三點的組數可多於配對，但仍少於配對 × 48 個角度。
+
 - `sepaPosRange` 1 Å、`pairSingle` 的單點取樣：每個構型配對約 259 × 36,864 × 27 ≈ 2.6×10⁸ 個 L1poss，依 1.48 的篩選比例估計約 3×10⁷ 個 L2poss，約 26 分鐘／構型配對，16 個構型配對約 7 小時（未實測）。
 
 #### 8.4.5 posm4
@@ -1505,7 +1539,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.sepaChargeThreshold` | `--dock9b_sepaChargeThreshold` | 0.3 e | 8.4.4 |
 | `dock9b.sepaDistTolerance` | `--dock9b_sepaDistTolerance` | 1.0 Å | 8.4.4 |
 | `dock9b.sepaPosRange` | `--dock9b_sepaPosRange` | 1 Å | 8.4.4 |
-| `dock9b.sepaSampling` | `--dock9b_sepaSampling` | `pairSingle` | 8.4.4（`pair`：只做配對取樣；`pairSingle`：配對取樣 + 單點取樣） |
+| `dock9b.sepaSampling` | `--dock9b_sepaSampling` | `pairSingle` | 8.4.4（`pair`：只做配對取樣；`pairSingle`：配對取樣 + 單點取樣；`triple`：只做三點取樣） |
 | `dock9b.maxOverlapAtomNum` | `--dock9b_maxOverlapAtomNum` | 1 | 8.5 |
 | `dock9b.maxNearDistance` | `--dock9b_maxNearDistance` | 6 Å | 8.5 |
 | `dock9b.minMethod`（未實作） | `--dock9b_minMethod` | `lbfgs` | 8.6 |
@@ -1856,3 +1890,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.48 | 2026-10-17 | 實作 posm3、posm4（CPU 參考版）：靜電勢的取法、殼層與百分位、6 鄰居相連、配對方向、對齊與平移、樣本順序、盒子檢查（8.4.4）；新增 8.4.4.1 依規格預設值執行的時間、資源與最低能量；posm4 的樣本順序與已對接構型配對只重做 posm1 部分（8.4.5）；新增 15.2.1 pocketfft 與 FFTW 的效能比較；sepa 參數改為已實作 |
 | 1.49 | 2026-10-17 | 使用者確認 sepas 區域以 6 鄰居判斷相連（8.4.4） |
 | 1.50 | 2026-10-17 | `dock9b.sepaPosRange` 預設改為 1 Å；新增 `dock9b.sepaSampling`（`pair`／`pairSingle`，預設 `pairSingle`），posm3 與 posm4 可選擇只做配對取樣；單點取樣的定向數不縮減；8.4.4.1 新增只做配對取樣與 `sepaPosRange` 0／1／2／4 Å 的測試結果 |
+| 1.51 | 2026-10-17 | 新增 `sepaSampling = "triple"`（三點取樣：三邊距離與正負號、共線排除、Kabsch 對齊與 RMSD 門檻、由配對清單延伸）；8.4.4.1 新增平移間距 1／1.5／2／4 Å（各 27 個平移）與三點取樣的測試結果 |

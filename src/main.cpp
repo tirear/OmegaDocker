@@ -400,7 +400,9 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   dp.sepaChargeThreshold = opt.sepaChargeThreshold;
   dp.sepaDistTolerance = opt.sepaDistTolerance;
   dp.sepaPosRange = opt.sepaPosRange;
+  dp.sepaPair = opt.sepaSampling == "pair" || opt.sepaSampling == "pairSingle";
   dp.sepaSingle = opt.sepaSampling == "pairSingle";
+  dp.sepaTriple = opt.sepaSampling == "triple";
   dp.rotStep = opt.rotStep;
   dp.boxCenter = *opt.boxCenter;
   dp.boxSize = *opt.boxSize;
@@ -1131,9 +1133,11 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                               s.leftGrid, sampleNum[i],
                               s.l2 > 0 ? static_cast<double>(s.steps) / static_cast<double>(s.l2) : 0.0));
       if (posm3Docked[i] > 0)
-        od::logInfo(std::format("  9b {:<37} posm3 pairs {}: per pair matched pair alignments {:.1f}, single placements {:.1f}",
+        od::logInfo(std::format("  9b {:<37} posm3 pairs {}: per pair matched pair alignments {:.1f}, single placements {:.1f}, "
+                                "triple alignments {:.1f}",
                                 mobSets[i]->name(), posm3Docked[i], static_cast<double>(s.sepaPairs) / posm3Docked[i],
-                                static_cast<double>(s.sepaSingles) / posm3Docked[i]));
+                                static_cast<double>(s.sepaSingles) / posm3Docked[i],
+                                static_cast<double>(s.sepaTriples) / posm3Docked[i]));
       if (s.l1 > 0 && s.l1 == s.outsideBox)
         od::logWarn(std::format("  {}: no sampled orientation fits in the docking box; consider a larger box.size",
                                 mobSets[i]->name()));

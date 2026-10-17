@@ -337,11 +337,12 @@ const std::vector<Param>& params() {
                      OD_ACC(sepaDistTolerance)));
     t.push_back(real("dock9b.sepaPosRange", "<dist>", "1", "9b, posm3: translations within +-this around the anchor (Å, step dock9b.posStep)",
                      OD_ACC(sepaPosRange)));
-    t.push_back({"dock9b.sepaSampling", Type::Str, "pair|pairSingle", "pairSingle",
-                 "9b, posm3 and posm4: pair alignments only, or pair alignments followed by single placements",
+    t.push_back({"dock9b.sepaSampling", Type::Str, "pair|pairSingle|triple", "pairSingle",
+                 "9b, posm3 and posm4: pair alignments only, pair alignments followed by single placements, or triple alignments only",
                  [](Options& o, const Tokens& v) {
                    const std::string& s = one(v);
-                   if (s != "pair" && s != "pairSingle") fail("expected pair or pairSingle but got '{}'", s);
+                   if (s != "pair" && s != "pairSingle" && s != "triple")
+                     fail("expected pair, pairSingle or triple but got '{}'", s);
                    o.sepaSampling = s;
                  },
                  [](const Options& o) -> std::optional<Tokens> { return Tokens{o.sepaSampling}; }});

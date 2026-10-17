@@ -2800,6 +2800,47 @@ TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
     REQUIRE(a.has_value() == b.has_value());
     if (a) CHECK(a->t == b->t);
   }
+  // Triple alignments only.
+  od::Dock9bParams p3t = f.p;
+  p3t.sepaPair = false;
+  p3t.sepaSingle = false;
+  p3t.sepaTriple = true;
+  p3t.sepaPosRange = 1.0;
+  const od::MobmDocker dkt(*f.x.mobSys, f.field, p3t, &sepas);
+  const auto ct = dkt.conformation(f.x.mobSys->inputAngles());
+  MESSAGE(std::format("posm3 triple: triples {}, L1poss {}", ct.triples.size(), dkt.l1Count(ct)));
+  REQUIRE(!ct.triples.empty());
+  CHECK(ct.pairs.empty());
+  CHECK(ct.singles.empty());
+  CHECK(dkt.l1Count(ct) == static_cast<long long>(ct.triples.size()) * 27);
+  int tripleChecked = 0;
+  double maxRmsd = 0;
+  for (std::size_t r = 0; r < ct.triples.size(); r += ct.triples.size() / 300 + 1) {
+    const auto& tm = ct.triples[r];
+    CHECK(tm.s[0] < tm.s[1]);
+    CHECK(tm.s[1] < tm.s[2]);
+    const long long k = static_cast<long long>(r) * 27 + 13;  // zero translation
+    const auto pose = dkt.l1Pose(ct, 0, k);
+    if (!pose) continue;
+    od::Vec3 cs{}, cm{};
+    double sq = 0;
+    for (int v = 0; v < 3; ++v) {
+      const auto w = world(*pose, tm.m[v]);
+      const auto& s = sepas[tm.s[v]].xyz;
+      for (int d = 0; d < 3; ++d) {
+        cs[d] += s[d] / 3;
+        cm[d] += w[d] / 3;
+        sq += (w[d] - s[d]) * (w[d] - s[d]);
+      }
+      CHECK(sepas[tm.s[v]].sign * (f.x.mobSys->typing(0).charge[probeOf[tm.m[v]] - f.x.mobSys->coordOffset(0)] > 0 ? 1 : -1) == -1);
+    }
+    for (int d = 0; d < 3; ++d) CHECK(cm[d] == doctest::Approx(cs[d]).epsilon(1e-9));
+    maxRmsd = std::max(maxRmsd, std::sqrt(sq / 3));
+    ++tripleChecked;
+  }
+  MESSAGE(std::format("posm3 triple: checked {}, max RMSD of the three anchor atoms {:.3f} A", tripleChecked, maxRmsd));
+  CHECK(tripleChecked > 0);
+  CHECK(maxRmsd <= f.p.sepaDistTolerance);
   // Default range 1 Å: 27 translations.
   od::Dock9bParams p1 = f.p;
   p1.sepaPosRange = 1.0;

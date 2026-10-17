@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <Eigen/Dense>
 #include <limits>
 #include <numbers>
 #include <type_traits>
@@ -52,6 +53,7 @@ Dock9bStats& Dock9bStats::operator+=(const Dock9bStats& o) {
   evaluations += o.evaluations;
   sepaPairs += o.sepaPairs;
   sepaSingles += o.sepaSingles;
+  sepaTriples += o.sepaTriples;
   return *this;
 }
 
@@ -167,6 +169,40 @@ Vec3 unit(const Vec3& v) {
   return {v[0] / l, v[1] / l, v[2] / l};
 }
 
+// Height of the triangle over its longest side.
+double triangleHeight(const Vec3& a, const Vec3& b, const Vec3& c) {
+  const Vec3 u{b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+  const Vec3 x{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+  const double area2 = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+  const double longest = std::sqrt(std::max({dist2(a, b), dist2(b, c), dist2(a, c)}));
+  return longest > 0 ? area2 / longest : 0.0;
+}
+
+// Proper rotation minimising sum |R (from_i - cf) - (to_i - ct)|^2 (Kabsch), as a quaternion; rmsd receives the
+// superposition RMSD.
+Quat kabschQuat(const std::array<Vec3, 3>& from, const std::array<Vec3, 3>& to, double& rmsd) {
+  Eigen::Vector3d cf = Eigen::Vector3d::Zero(), ct = Eigen::Vector3d::Zero();
+  for (int i = 0; i < 3; ++i) {
+    cf += Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) / 3.0;
+    ct += Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) / 3.0;
+  }
+  Eigen::Matrix3d h = Eigen::Matrix3d::Zero();
+  for (int i = 0; i < 3; ++i)
+    h += (Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) - cf) *
+         (Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) - ct).transpose();
+  const Eigen::JacobiSVD<Eigen::Matrix3d> svd(h, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  Eigen::Matrix3d d = Eigen::Matrix3d::Identity();
+  d(2, 2) = (svd.matrixV() * svd.matrixU().transpose()).determinant() < 0 ? -1.0 : 1.0;
+  const Eigen::Matrix3d r = svd.matrixV() * d * svd.matrixU().transpose();
+  double sq = 0;
+  for (int i = 0; i < 3; ++i)
+    sq += (r * (Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) - cf) -
+           (Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) - ct)).squaredNorm();
+  rmsd = std::sqrt(sq / 3.0);
+  const Eigen::Quaterniond q(r);
+  return normalized(Quat{q.w(), q.x(), q.y(), q.z()});
+}
+
 }  // namespace
 
 MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Dock9bParams& p,
@@ -202,8 +238,8 @@ long long MobmDocker::l1Count(const Conf& c) const {
   switch (p_.posm) {
     case Posm::Posm1: return p_.posm1SampleNum;
     case Posm::Posm2: return c.hopfOffset.back();
-    case Posm::Posm3: return c.pairPoses + c.singlePoses;
-    case Posm::Posm4: return c.pairPoses + c.singlePoses + p_.posm1SampleNum;
+    case Posm::Posm3: return c.sepaPoses();
+    case Posm::Posm4: return c.sepaPoses() + p_.posm1SampleNum;
   }
   return 0;
 }
@@ -260,16 +296,39 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
       return Vec3{y[0], y[1], y[2]};
     };
     const auto& ss = *sepas_;
-    for (std::size_t i = 0; i < ss.size(); ++i)
-      for (std::size_t j = i + 1; j < ss.size(); ++j) {
-        const double dS = std::sqrt(dist2(ss[i].xyz, ss[j].xyz));
-        for (int a : ms)
-          for (int b : ms) {
-            if (a == b || sgn(a) != -ss[i].sign || sgn(b) != -ss[j].sign) continue;
-            if (std::abs(dS - std::sqrt(dist2(yAt(a), yAt(b)))) > p_.sepaDistTolerance) continue;
-            c.pairs.push_back({static_cast<int>(i), static_cast<int>(j), a, b});
+    std::vector<Conf::PairMatch> pm;
+    if (p_.sepaPair || p_.sepaTriple)
+      for (std::size_t i = 0; i < ss.size(); ++i)
+        for (std::size_t j = i + 1; j < ss.size(); ++j) {
+          const double dS = std::sqrt(dist2(ss[i].xyz, ss[j].xyz));
+          for (int a : ms)
+            for (int b : ms) {
+              if (a == b || sgn(a) != -ss[i].sign || sgn(b) != -ss[j].sign) continue;
+              if (std::abs(dS - std::sqrt(dist2(yAt(a), yAt(b)))) > p_.sepaDistTolerance) continue;
+              pm.push_back({static_cast<int>(i), static_cast<int>(j), a, b});
+            }
+        }
+    // Triples extend a matched pair (s1 < s2) by a region s3 > s2 and a third probe atom (spec 8.4.4).
+    if (p_.sepaTriple)
+      for (const auto& q : pm)
+        for (std::size_t k = static_cast<std::size_t>(q.s2) + 1; k < ss.size(); ++k) {
+          const double d13 = std::sqrt(dist2(ss[q.s1].xyz, ss[k].xyz)), d23 = std::sqrt(dist2(ss[q.s2].xyz, ss[k].xyz));
+          for (int e : ms) {
+            if (e == q.m1 || e == q.m2 || sgn(e) != -ss[k].sign) continue;
+            if (std::abs(d13 - std::sqrt(dist2(yAt(q.m1), yAt(e)))) > p_.sepaDistTolerance ||
+                std::abs(d23 - std::sqrt(dist2(yAt(q.m2), yAt(e)))) > p_.sepaDistTolerance)
+              continue;
+            const std::array<Vec3, 3> sv{ss[q.s1].xyz, ss[q.s2].xyz, ss[k].xyz}, mv{yAt(q.m1), yAt(q.m2), yAt(e)};
+            if (triangleHeight(sv[0], sv[1], sv[2]) < kTripleMinHeight ||
+                triangleHeight(mv[0], mv[1], mv[2]) < kTripleMinHeight)
+              continue;
+            double rmsd;
+            const Quat rq = kabschQuat(mv, sv, rmsd);
+            if (rmsd > p_.sepaDistTolerance) continue;
+            c.triples.push_back({{q.s1, q.s2, static_cast<int>(k)}, {q.m1, q.m2, e}, rq});
           }
-      }
+        }
+    if (p_.sepaPair) c.pairs = std::move(pm);
     if (p_.sepaSingle)
       for (std::size_t i = 0; i < ss.size(); ++i)
         for (int a : ms)
@@ -277,6 +336,7 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
     const long long nt = static_cast<long long>(transN_) * transN_ * transN_;
     c.pairPoses = static_cast<long long>(c.pairs.size()) * axisAngles_ * nt;
     c.singlePoses = static_cast<long long>(c.singles.size()) * static_cast<long long>(hopf_.size()) * nt;
+    c.triplePoses = static_cast<long long>(c.triples.size()) * nt;
   }
   return c;
 }
@@ -328,6 +388,18 @@ std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
       anchorS[d] = 0.5 * (s1[d] + s2[d]);
       anchorM[d] = 0.5 * (m1[d] + m2[d]);
     }
+  } else if (k >= c.pairPoses + c.singlePoses) {
+    // Triple: match-major, then the translation; the triangle centroids coincide.
+    const auto& tm = c.triples[static_cast<std::size_t>((k - c.pairPoses - c.singlePoses) / nt)];
+    pose.q = tm.q;
+    anchorS = anchorM = Vec3{0, 0, 0};
+    for (int v = 0; v < 3; ++v) {
+      const Vec3 sv = ss[tm.s[v]].xyz, mv = yAt(tm.m[v]);
+      for (int d = 0; d < 3; ++d) {
+        anchorS[d] += sv[d] / 3.0;
+        anchorM[d] += mv[d] / 3.0;
+      }
+    }
   } else {
     // Single: placement-major, then the Hopf orientation, then the translation.
     const long long r = (k - c.pairPoses) / nt;
@@ -345,7 +417,7 @@ std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
 
 std::optional<Pose> MobmDocker::l1Pose(const Conf& conf, std::uint64_t stream, long long k) const {
   if (p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4) {
-    const long long n3 = conf.pairPoses + conf.singlePoses;
+    const long long n3 = conf.sepaPoses();
     if (k < n3) return posm3Pose(conf, k);
     k -= n3;  // posm4: the posm1 samples follow
   }
@@ -573,12 +645,13 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
                                  const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only) const {
   const Conf c = conformation(mobAnglesDeg);
   const long long n = l1Count(c);
-  const long long first = posm1Only && p_.posm == Posm::Posm4 ? c.pairPoses + c.singlePoses : 0;
+  const long long first = posm1Only && p_.posm == Posm::Posm4 ? c.sepaPoses() : 0;
   Dock9bStats total;
   total.l1 = n - first;
   if (first == 0) {
     total.sepaPairs = static_cast<long long>(c.pairs.size());
     total.sepaSingles = static_cast<long long>(c.singles.size());
+    total.sepaTriples = static_cast<long long>(c.triples.size());
   }
   std::vector<long long> l2;
 #pragma omp parallel

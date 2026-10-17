@@ -36,7 +36,8 @@ struct Dock9bParams {
   double sepaChargeThreshold = 0.3;               // e
   double sepaDistTolerance = 1.0;                 // Å
   double sepaPosRange = 1.0;                      // Å
-  bool sepaSingle = true;                         // posm3: single placements after the pair alignments
+  // posm3 sampling (dock9b.sepaSampling): pair alignments, single placements, triple alignments.
+  bool sepaPair = true, sepaSingle = true, sepaTriple = false;
   double rotStep = 7.5;                           // degrees, posm3 rotation about the pair axis
   Vec3 boxCenter{}, boxSize{};
   int maxOverlapAtomNum = 1;
@@ -98,6 +99,7 @@ struct Dock9bStats {
   long long evaluations = 0;
   long long sepaPairs = 0;    // posm3: matched (StaM pair, MobM pair) alignments
   long long sepaSingles = 0;  // posm3: (StaM region, MobM atom) placements
+  long long sepaTriples = 0;  // posm3: matched (StaM triple, MobM triple) alignments
   Dock9bStats& operator+=(const Dock9bStats& o);
 };
 
@@ -111,6 +113,7 @@ class MobmDocker {
   // Lattice indices of the positions keeping every probe atom kPosMargin inside
   // the box for one orientation (spec 8.4); empty when lo > hi on an axis.
   static constexpr double kPosMargin = 0.01;  // Å, absorbs float rounding
+  static constexpr double kTripleMinHeight = 0.5;  // Å, posm3 triples flatter than this are skipped
   struct PosRange {
     std::array<int, 3> lo{}, hi{};
     long long count() const;
@@ -128,9 +131,16 @@ class MobmDocker {
     struct PairMatch {
       int s1, s2, m1, m2;
     };
+    // Triple: regions s, probe atoms m and the rotation superposing the m triangle on the s triangle.
+    struct TripleMatch {
+      std::array<int, 3> s, m;
+      Quat q;
+    };
     std::vector<PairMatch> pairs;
     std::vector<std::array<int, 2>> singles;
-    long long pairPoses = 0, singlePoses = 0;
+    std::vector<TripleMatch> triples;
+    long long pairPoses = 0, singlePoses = 0, triplePoses = 0;
+    long long sepaPoses() const { return pairPoses + singlePoses + triplePoses; }
   };
   Conf conformation(std::span<const double> anglesDeg) const;
 
