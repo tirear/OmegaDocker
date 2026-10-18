@@ -10,6 +10,7 @@
 #include <span>
 #include <vector>
 
+#include "dock_kernel.hpp"
 #include "energy.hpp"
 #include "fft_dock.hpp"
 #include "grid.hpp"
@@ -24,6 +25,8 @@ namespace od {
 // (spec 12.1).
 
 enum class Posm { Posm1, Posm2, Posm3, Posm4, Posm2Fft };
+
+class PoseEvaluator;
 
 struct Dock9bParams {
   Posm posm = Posm::Posm1;
@@ -54,6 +57,7 @@ struct Dock9bParams {
   double maxTransStep = 0.5;     // Å
   double maxAngleStep = 10.0;    // degrees
   std::uint64_t seed = 0;
+  PoseEvaluator* evaluator = nullptr;  // minimization energies; null: MobmDocker::evaluate on the CPU
 };
 
 // MobM placement: world x = R(q) (y - center) + t, where y are the coordinates
@@ -166,6 +170,8 @@ class MobmDocker {
     double objective() const { return inter + interClash + intra.total(); }
     double ranking() const { return inter + interClash + intra.filterEnergy(); }
   };
+  // Energy of a pose at float(pose) and float(anglesDeg); grad: 6 + torsions, as evaluate.
+  using PoseEval = std::function<PoseEnergy(const Pose&, std::span<const double> anglesDeg, std::vector<double>* grad)>;
   // Single precision at float(pose), float(anglesDeg) (spec 8.6).
   PoseEnergy evaluate(const Conf& c, const Pose& pose, std::span<const double> anglesDeg,
                       std::vector<double>* grad = nullptr) const;
@@ -176,6 +182,8 @@ class MobmDocker {
   // 9b minimization of one pose; false when the pose left the grid.
   // out holds the float pose, angles and energies of the last accepted point.
   bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const;
+  // Same with the energies of ev.
+  bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats, const PoseEval& ev) const;
 
   // All of 9b for one conformation pair: L1poss -> 8.5 -> minimization.
   // Appends the docking samples to out (in L1poss order).
@@ -185,7 +193,26 @@ class MobmDocker {
   Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
                        const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only = false) const;
 
+  // Several conformation pairs: each job as dockPair(mobAnglesDeg, stream, chunkSize, sink,
+  // posm1Only), the sinks receiving the same chunks in job order. With an evaluator the
+  // L2poss of all jobs are minimized together (spec 15.1.4).
+  struct PairJob {
+    std::span<const double> mobAnglesDeg;
+    std::uint64_t stream = 0;
+    bool posm1Only = false;
+    std::function<void(std::vector<DockSample>&)> sink;
+    Dock9bStats stats;  // result
+  };
+  void dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const;
+
   long long l1Count(const Conf& c) const;  // L1poss per conformation pair
+
+  const EnergySystem& sys() const { return sys_; }
+  const StamField& field() const { return field_; }
+  const Dock9bParams& params() const { return p_; }
+  // Probe atoms for the flat pose energy (dock::evaluate, spec 15.1.4).
+  std::vector<DockProbe> probes() const;
+  DockView dockView(const std::vector<DockProbe>& probes, const FieldView& field) const;
 
  private:
   template <class T>
@@ -208,6 +235,40 @@ class MobmDocker {
   int transN_ = 0;      // posm3: translations per axis
   std::optional<Pose> posm3Pose(const Conf& c, long long k) const;
   bool fitsBox(const Conf& c, const Pose& pose) const;
+  // Conformation, L1pos and quick-filter statistics of a pair.
+  struct Prepared {
+    Conf c;
+    std::vector<long long> l2;
+    Dock9bStats stats;
+  };
+  Prepared prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream, bool posm1Only) const;
+  struct BatchItem {
+    const Conf* conf;
+    std::uint64_t stream;
+    long long k;  // L1pos
+  };
+  void minimizeBatched(std::span<const BatchItem> items, std::vector<DockSample>& res, std::vector<char>& ok,
+                       std::vector<Dock9bStats>& stats) const;
+};
+
+// A pose energy request of the batched 9b minimization (spec 15.1.4).
+struct PoseRequest {
+  Pose pose;                 // float values
+  Vec3 center{};             // the Pose frame
+  const double* anglesDeg;   // torsion angles (float values)
+};
+
+// Batched 9b pose energies, e.g. on a GPU (spec 15.1.4).
+class PoseEvaluator {
+ public:
+  virtual ~PoseEvaluator() = default;
+  virtual int maxBatch() const = 0;  // most poses per call
+  // Selects the StaM conformation and probe atoms of dk for the following calls.
+  virtual void bind(const MobmDocker& dk) = 0;
+  // grad: n × (6 + torsions), as MobmDocker::evaluate.
+  virtual void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) = 0;
+  // Called when 9b of a round ends (e.g. to free work memory).
+  virtual void idle() {}
 };
 
 // PRNG stream of a 9b conformation pair.

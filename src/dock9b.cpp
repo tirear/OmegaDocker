@@ -11,6 +11,7 @@
 #include <numbers>
 #include <type_traits>
 
+#include "fiber_batch.hpp"
 #include "log.hpp"
 #include "rng.hpp"
 
@@ -55,6 +56,112 @@ Dock9bStats& Dock9bStats::operator+=(const Dock9bStats& o) {
   sepaSingles += o.sepaSingles;
   sepaTriples += o.sepaTriples;
   return *this;
+}
+
+void MobmDocker::minimizeBatched(std::span<const BatchItem> items, std::vector<DockSample>& res, std::vector<char>& ok,
+                                 std::vector<Dock9bStats>& stats) const {
+  PoseEvaluator& pev = *p_.evaluator;
+  pev.bind(*this);
+  const int m = static_cast<int>(items.size());
+  const int nf = std::max(1, std::min(pev.maxBatch(), m));
+  const std::size_t ng = 6 + static_cast<std::size_t>(sys_.torsionCount());
+  std::vector<PoseRequest> req(nf);
+  std::vector<PoseEnergy> pe(nf);
+  std::vector<double> grad(nf * ng);
+  const auto task = [&](int i, int slot) {
+    const Conf& c = *items[i].conf;
+    const PoseEval ev = [&, slot](const Pose& pose, std::span<const double> a, std::vector<double>* g) {
+      req[slot] = {pose, c.center, a.data()};
+      batchWait();
+      if (g) {
+        const auto b = grad.begin() + static_cast<std::ptrdiff_t>(slot * ng);
+        g->assign(b, b + static_cast<std::ptrdiff_t>(ng));
+      }
+      return pe[slot];
+    };
+    ok[i] = minimize(c, *l1Pose(c, items[i].stream, items[i].k), res[i], stats[i], ev);
+  };
+  std::vector<PoseRequest> breq;
+  std::vector<PoseEnergy> bout;
+  std::vector<double> bgrad;
+  const auto flush = [&](std::span<const int> slots) {
+    const std::size_t n = slots.size();
+    breq.resize(n);
+    bout.resize(n);
+    bgrad.resize(n * ng);
+    for (std::size_t i = 0; i < n; ++i) breq[i] = req[slots[i]];
+    pev.evaluate(static_cast<int>(n), breq.data(), bout.data(), bgrad.data());
+    for (std::size_t i = 0; i < n; ++i) {
+      pe[slots[i]] = bout[i];
+      std::copy_n(bgrad.begin() + static_cast<std::ptrdiff_t>(i * ng), ng,
+                  grad.begin() + static_cast<std::ptrdiff_t>(slots[i] * ng));
+    }
+  };
+  runBatched(m, nf, task, flush);
+}
+
+void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const {
+  chunkSize = std::max<std::size_t>(chunkSize, 1);
+  if (!p_.evaluator) {
+    for (PairJob& j : jobs) j.stats = dockPair(j.mobAnglesDeg, j.stream, chunkSize, j.sink, j.posm1Only);
+    return;
+  }
+  // The L2poss of all jobs in job order, minimized in global chunks; each job's sink receives
+  // the same chunks as from dockPair, in job order.
+  struct State {
+    Prepared pr;
+    std::vector<DockSample> res;
+    std::vector<char> ok;
+    std::size_t done = 0, delivered = 0;
+  };
+  std::vector<State> st(jobs.size());
+  std::vector<std::pair<std::size_t, std::size_t>> order;  // (job, L2pos)
+  for (std::size_t j = 0; j < jobs.size(); ++j) {
+    st[j].pr = prepare(jobs[j].mobAnglesDeg, jobs[j].stream, jobs[j].posm1Only);
+    jobs[j].stats = st[j].pr.stats;
+    const std::size_t n = st[j].pr.l2.size();
+    st[j].res.resize(n);
+    st[j].ok.assign(n, 0);
+    for (std::size_t k = 0; k < n; ++k) order.emplace_back(j, k);
+  }
+  const std::size_t global = std::max<std::size_t>(chunkSize, static_cast<std::size_t>(std::max(1, p_.evaluator->maxBatch())));
+  std::size_t next = 0;  // first job not fully delivered
+  for (std::size_t begin = 0; begin < order.size(); begin += global) {
+    const std::size_t m = std::min(global, order.size() - begin);
+    std::vector<BatchItem> items(m);
+    for (std::size_t i = 0; i < m; ++i) {
+      const auto [j, k] = order[begin + i];
+      items[i] = {&st[j].pr.c, jobs[j].stream, st[j].pr.l2[k]};
+    }
+    std::vector<DockSample> res(m);
+    std::vector<char> ok(m, 0);
+    std::vector<Dock9bStats> ist(m);
+    minimizeBatched(items, res, ok, ist);
+    for (std::size_t i = 0; i < m; ++i) {
+      const auto [j, k] = order[begin + i];
+      st[j].res[k] = std::move(res[i]);
+      st[j].ok[k] = ok[i];
+      ++st[j].done;
+      jobs[j].stats.leftGrid += ist[i].leftGrid;
+      jobs[j].stats.steps += ist[i].steps;
+      jobs[j].stats.evaluations += ist[i].evaluations;
+    }
+    for (; next < jobs.size(); ++next) {
+      State& s = st[next];
+      const std::size_t n = s.pr.l2.size();
+      while (s.delivered < n && (s.done == n || s.done - s.delivered >= chunkSize)) {
+        const std::size_t e = std::min(n, s.delivered + chunkSize);
+        std::vector<DockSample> chunk;
+        for (std::size_t k = s.delivered; k < e; ++k)
+          if (s.ok[k]) chunk.push_back(std::move(s.res[k]));
+        jobs[next].sink(chunk);
+        s.delivered = e;
+      }
+      if (s.delivered < n) break;
+      s.res = {};
+      s.ok = {};
+    }
+  }
 }
 
 std::uint64_t dockStream(std::uint64_t round, std::uint64_t mobm, std::uint64_t stamSample, std::uint64_t mobmSample) {
@@ -624,7 +731,24 @@ MobmDocker::PoseEnergy MobmDocker::evaluateDouble(const Conf& c, const Pose& pos
   return evaluateT<double>(c, pose, anglesDeg, grad);
 }
 
+std::vector<DockProbe> MobmDocker::probes() const {
+  std::vector<DockProbe> v(probe_.size());
+  for (std::size_t k = 0; k < probe_.size(); ++k) v[k] = {probe_[k], map_[k], charge_[k], heavy_[k] ? 1 : 0};
+  return v;
+}
+
+DockView MobmDocker::dockView(const std::vector<DockProbe>& probes, const FieldView& field) const {
+  return {static_cast<int>(probes.size()), probes.data(), p_.clashDistance, p_.clashBase, p_.clashK, field};
+}
+
 bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const {
+  return minimize(c, start, out, stats, [&](const Pose& pose, std::span<const double> a, std::vector<double>* g) {
+    return evaluate(c, pose, a, g);
+  });
+}
+
+bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats,
+                          const PoseEval& ev) const {
   const std::size_t nt = c.anglesDeg.size();
   // adadelta: AutoDock-GPU units (translation in grid spacings, angles in degrees).
   const bool ada = p_.minimizer.method == MinMethod::Adadelta;
@@ -654,7 +778,7 @@ bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Doc
   };
   const VecObjective f = [&](std::span<const double> v, double& e, std::vector<double>& grad) {
     unpack(v, trial);
-    trial.pe = evaluate(c, trial.pose, trial.angles, &g);
+    trial.pe = ev(trial.pose, trial.angles, &g);
     if (trial.pe.outside > 0) return false;
     if (!started) {
       best = trial;
@@ -710,19 +834,21 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
   });
 }
 
-Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
-                                 const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only) const {
-  const Conf c = conformation(mobAnglesDeg);
+MobmDocker::Prepared MobmDocker::prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream,
+                                         bool posm1Only) const {
+  Prepared pr;
+  pr.c = conformation(mobAnglesDeg);
+  const Conf& c = pr.c;
   const long long n = l1Count(c);
   const long long first = posm1Only && p_.posm == Posm::Posm4 ? c.sepaPoses() : 0;
-  Dock9bStats total;
+  Dock9bStats& total = pr.stats;
+  std::vector<long long>& l2 = pr.l2;
   total.l1 = n - first;
   if (first == 0) {
     total.sepaPairs = static_cast<long long>(c.pairs.size());
     total.sepaSingles = static_cast<long long>(c.singles.size());
     total.sepaTriples = static_cast<long long>(c.triples.size());
   }
-  std::vector<long long> l2;
 #pragma omp parallel
   {
     Dock9bStats st;
@@ -741,21 +867,42 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
   }
   std::sort(l2.begin(), l2.end());
   total.l2 = static_cast<long long>(l2.size());
+  return pr;
+}
+
+Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
+                                 const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only) const {
+  Prepared pr = prepare(mobAnglesDeg, stream, posm1Only);
+  const Conf& c = pr.c;
+  const std::vector<long long>& l2 = pr.l2;
+  Dock9bStats& total = pr.stats;
   chunkSize = std::max<std::size_t>(chunkSize, 1);
   for (std::size_t begin = 0; begin < l2.size(); begin += chunkSize) {
     const std::size_t m = std::min(chunkSize, l2.size() - begin);
     std::vector<DockSample> res(m);
     std::vector<char> ok(m, 0);
+    if (p_.evaluator) {
+      std::vector<BatchItem> items(m);
+      for (std::size_t i = 0; i < m; ++i) items[i] = {&c, stream, l2[begin + i]};
+      std::vector<Dock9bStats> st(m);
+      minimizeBatched(items, res, ok, st);
+      for (const auto& s : st) {
+        total.leftGrid += s.leftGrid;
+        total.steps += s.steps;
+        total.evaluations += s.evaluations;
+      }
+    } else {
 #pragma omp parallel
-    {
-      Dock9bStats st;
-#pragma omp for schedule(dynamic, 1) nowait
-      for (std::size_t i = 0; i < m; ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[begin + i]), res[i], st);
-#pragma omp critical
       {
-        total.leftGrid += st.leftGrid;
-        total.steps += st.steps;
-        total.evaluations += st.evaluations;
+        Dock9bStats st;
+#pragma omp for schedule(dynamic, 1) nowait
+        for (std::size_t i = 0; i < m; ++i) ok[i] = minimize(c, *l1Pose(c, stream, l2[begin + i]), res[i], st);
+#pragma omp critical
+        {
+          total.leftGrid += st.leftGrid;
+          total.steps += st.steps;
+          total.evaluations += st.evaluations;
+        }
       }
     }
     std::vector<DockSample> chunk;

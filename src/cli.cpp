@@ -280,6 +280,8 @@ const std::vector<Param>& params() {
     t.push_back(integer("gpu.device", "<n>", "0", "CUDA device number", OD_ACC(gpuDevice)));
     t.push_back(integer("gpu.conf9aBatchNum", "<n>", "8192",
                         "9a: samples minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuConf9aBatchNum)));
+    t.push_back(integer("gpu.dock9bBatchNum", "<n>", "8192",
+                        "9b: poses minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuDock9bBatchNum)));
 
     t.push_back(boolean("output.pdb", "true", "Write PDB output", OD_ACC(outPdb)));
     t.push_back(boolean("output.cif", "false", "Write mmCIF output", OD_ACC(outCif)));
@@ -748,6 +750,7 @@ void validateOptions(const Options& o) {
   check(o.gridDeltaThreshold >= 0, "grid.deltaThreshold", ">= 0");
   check(o.gpuDevice >= 0, "gpu.device", ">= 0");
   check(o.gpuConf9aBatchNum >= 1, "gpu.conf9aBatchNum", ">= 1");
+  check(o.gpuDock9bBatchNum >= 1, "gpu.dock9bBatchNum", ">= 1");
   check(o.maxNearDistance > 0, "dock9b.maxNearDistance", "> 0");
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");
   check(o.posStep > 0, "dock9b.posStep", "> 0");

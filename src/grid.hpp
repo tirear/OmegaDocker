@@ -14,6 +14,7 @@
 
 #include "ad4.hpp"
 #include "energy.hpp"
+#include "field_kernel.hpp"
 #include "molecule.hpp"
 
 namespace od {
@@ -120,6 +121,10 @@ class CellList {
         for (int k = start_[row + a[0]]; k < start_[row + b[0] + 1]; ++k) f(atoms_[k]);
       }
   }
+  // Flat form (field::forNear); the arrays point into this list.
+  FieldCells flat() const;
+  const std::vector<int>& start() const { return start_; }
+  const std::vector<int>& atoms() const { return atoms_; }
 
  private:
   double cell_ = 1;
@@ -155,6 +160,10 @@ class StamField {
                          const EnergyGrids& grids, const DistanceGrid& dist, double threshold);
 
   GridMode mode() const { return mode_; }
+  // Unique per StamField created by full, flexres or delta (copies share it).
+  std::uint64_t id() const { return id_; }
+  // Flat form for field::energy / field::distance and the GPU (spec 15.1.4).
+  FieldModel model() const;
   const GridGeometry& geom() const { return grids_->geom; }
   int mapOf(Ad4Type t) const { return grids_->mapOf(t); }
   double distanceCap() const { return dist_->cap; }
@@ -182,6 +191,7 @@ class StamField {
   T map(int m, const Vec3T<T>& p, Vec3T<T>* grad) const;  // m: type maps, then elec, desolv, distance
 
   GridMode mode_ = GridMode::Full;
+  std::uint64_t id_ = 0;
   std::shared_ptr<const EnergyGrids> grids_;
   std::shared_ptr<const DistanceGrid> dist_;
   // flexres

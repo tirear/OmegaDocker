@@ -15,8 +15,7 @@
 namespace od {
 namespace {
 
-constexpr int kThreads = 256;
-constexpr int kWarps = kThreads / 32;
+constexpr int kMaxThreads = 256;
 
 void check(cudaError_t e, const char* what) {
   if (e != cudaSuccess) throw Error(std::string("CUDA: ") + what + ": " + cudaGetErrorString(e));
@@ -60,9 +59,12 @@ __device__ inline double warpMax(double v) {
   return v;
 }
 
-template <class T>
-__global__ void __launch_bounds__(kThreads) evaluateKernel(EnergyModelView m, const T* angles, T* xs, double* gs,
-                                                           FlatTerms* terms, double* grad) {
+// One block of NT threads per sample.
+template <class T, bool Dock, int NT>
+__global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T* angles, T* xs, double* gs,
+                                                           FlatTerms* terms, double* grad, DockView dv,
+                                                           const DockPose* poses, DockTerms* dterms, double* grad6) {
+  constexpr int kThreads = NT, kWarps = NT / 32;
   const int s = blockIdx.x;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const std::size_t nc = 3 * static_cast<std::size_t>(m.coordCount);
@@ -125,16 +127,32 @@ __global__ void __launch_bounds__(kThreads) evaluateKernel(EnergyModelView m, co
     }
   }
 
-  __shared__ double red[kWarps][8];
-  double v[8] = {e[0], e[1], e[2], e[3], e[4], closure, maxDev, static_cast<double>(clashPairs)};
-  for (int k = 0; k < 8; ++k) {
+  constexpr int kVals = Dock ? 17 : 8;
+  double v[kVals] = {e[0], e[1], e[2], e[3], e[4], closure, maxDev, static_cast<double>(clashPairs)};
+  if constexpr (Dock) {
+    // 8: inter, 9: interClash, 10: outside, 11–13: translation, 14–16: rotation gradient.
+    const DockPose ps = poses[s];
+    for (int k = tid; k < dv.probeCount; k += kThreads) {
+      float gw[3], r[3], gy[3];
+      if (!dock::probeTerm(dv, k, x, ps, v[8], v[9], g ? gw : nullptr, r)) {
+        v[10] += 1;
+        continue;
+      }
+      if (!g) continue;
+      dock::probeGrad(ps, gw, r, v + 11, v + 14, gy);
+      const int c = dv.probes[k].coord;
+      for (int i = 0; i < 3; ++i) atomicAdd(g + 3 * c + i, static_cast<double>(gy[i]));
+    }
+  }
+  __shared__ double red[kWarps][kVals];
+  for (int k = 0; k < kVals; ++k) {
     v[k] = k == 6 ? warpMax(v[k]) : warpSum(v[k]);
     if (lane == 0) red[warp][k] = v[k];
   }
   __syncthreads();
   if (tid == 0) {
-    double r[8];
-    for (int k = 0; k < 8; ++k) {
+    double r[kVals];
+    for (int k = 0; k < kVals; ++k) {
       r[k] = red[0][k];
       for (int w = 1; w < kWarps; ++w) r[k] = k == 6 ? fmax(r[k], red[w][k]) : r[k] + red[w][k];
     }
@@ -148,6 +166,11 @@ __global__ void __launch_bounds__(kThreads) evaluateKernel(EnergyModelView m, co
     out.closureMaxDeviation = r[6];
     out.clashPairs = static_cast<int>(r[7]);
     terms[s] = out;
+    if constexpr (Dock) {
+      dterms[s] = {r[8], r[9], static_cast<int>(r[10])};
+      if (grad6)
+        for (int i = 0; i < 6; ++i) grad6[static_cast<std::size_t>(s) * 6 + i] = r[11 + i];
+    }
   }
   if (!g) return;
 
@@ -189,6 +212,137 @@ GpuDeviceInfo gpuDeviceInfo(int device) {
   return info;
 }
 
+std::size_t gpuFreeMem(int device) {
+  int old = 0;
+  check(cudaGetDevice(&old), "cudaGetDevice");
+  check(cudaSetDevice(device), "cudaSetDevice");
+  std::size_t freeMem = 0, total = 0;
+  check(cudaMemGetInfo(&freeMem, &total), "cudaMemGetInfo");
+  check(cudaSetDevice(old), "cudaSetDevice");
+  return freeMem;
+}
+
+struct GpuField::Impl {
+  int device = 0;
+  std::uint64_t id = 0;
+  std::shared_ptr<const void> base, baseDist;  // grids of the uploaded reference maps
+  DevBuf<float> maps, data;
+  DevBuf<int> block, movedHeavy, cellStart, cellAtoms, heavyStart, heavyAtoms, pairM, pairN;
+  DevBuf<FieldMoved> moved;
+  DevBuf<double> solT, volT, pairAC, pairBD, pairReqm;
+  FieldView view{};
+};
+
+GpuField::GpuField(int device) : impl_(std::make_unique<Impl>()) { impl_->device = device; }
+GpuField::~GpuField() = default;
+std::uint64_t GpuField::id() const { return impl_->id; }
+
+std::size_t GpuField::deviceBytes() const {
+  const Impl& d = *impl_;
+  return d.maps.n * sizeof(float) + d.data.n * sizeof(float) + d.block.n * sizeof(int) + d.moved.n * sizeof(FieldMoved);
+}
+
+void GpuField::set(const FieldModel& fm) {
+  Impl& d = *impl_;
+  if (fm.id != 0 && fm.id == d.id) return;
+  check(cudaSetDevice(d.device), "cudaSetDevice");
+  const int nm = fm.view.typeMapCount + 3;
+  if (fm.base != d.base || fm.baseDist != d.baseDist) {
+    d.base.reset();
+    d.baseDist.reset();
+    d.maps.release();
+    d.maps.reserve(static_cast<std::size_t>(nm) * fm.points);
+    for (int m = 0; m < nm; ++m)
+      check(cudaMemcpy(d.maps.p + static_cast<std::size_t>(m) * fm.points, fm.view.maps[m], fm.points * sizeof(float),
+                       cudaMemcpyHostToDevice),
+            "upload map");
+    d.base = fm.base;
+    d.baseDist = fm.baseDist;
+  }
+  d.data.release();
+  d.data.upload(fm.data);
+  d.block.upload(fm.block);
+  d.moved.upload(fm.moved);
+  d.movedHeavy.upload(fm.movedHeavy);
+  d.cellStart.upload(fm.cellStart);
+  d.cellAtoms.upload(fm.cellAtoms);
+  d.heavyStart.upload(fm.heavyStart);
+  d.heavyAtoms.upload(fm.heavyAtoms);
+  d.solT.upload(fm.solT);
+  d.volT.upload(fm.volT);
+  d.pairAC.upload(fm.pairAC);
+  d.pairBD.upload(fm.pairBD);
+  d.pairReqm.upload(fm.pairReqm);
+  d.pairM.upload(fm.pairM);
+  d.pairN.upload(fm.pairN);
+  FieldView v = fm.view;
+  for (int m = 0; m < nm; ++m) v.maps[m] = d.maps.p + static_cast<std::size_t>(m) * fm.points;
+  v.data = d.data.p;
+  v.block = d.block.p;
+  v.moved = d.moved.p;
+  v.movedHeavy = d.movedHeavy.p;
+  v.cells.start = d.cellStart.p;
+  v.cells.atoms = d.cellAtoms.p;
+  v.heavyCells.start = d.heavyStart.p;
+  v.heavyCells.atoms = d.heavyAtoms.p;
+  v.solT = d.solT.p;
+  v.volT = d.volT.p;
+  v.pairAC = d.pairAC.p;
+  v.pairBD = d.pairBD.p;
+  v.pairReqm = d.pairReqm.p;
+  v.pairM = d.pairM.p;
+  v.pairN = d.pairN.p;
+  d.view = v;
+  d.id = fm.id;
+}
+
+namespace {
+
+// Smallest block (32 to kMaxThreads threads) with about 8 pairs per thread.
+int blockThreads(const EnergyModelView& m, int probes) {
+  int nt = 32;
+  while (nt < kMaxThreads && (nt * 8 < m.pairCount || nt < probes)) nt *= 2;
+  return nt;
+}
+
+template <class T, bool Dock>
+void launch(int threads, int n, const EnergyModelView& m, const T* angles, T* xs, double* gs, FlatTerms* terms,
+            double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms, double* grad6) {
+  switch (threads) {
+    case 32: evaluateKernel<T, Dock, 32><<<n, 32>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 64: evaluateKernel<T, Dock, 64><<<n, 64>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 128: evaluateKernel<T, Dock, 128><<<n, 128>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    default: evaluateKernel<T, Dock, 256><<<n, 256>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+  }
+}
+
+// Page-locked host memory.
+struct PinnedBuf {
+  char* p = nullptr;
+  std::size_t n = 0;
+  PinnedBuf() = default;
+  PinnedBuf(const PinnedBuf&) = delete;
+  PinnedBuf& operator=(const PinnedBuf&) = delete;
+  ~PinnedBuf() {
+    if (p) cudaFreeHost(p);
+  }
+  void reserve(std::size_t bytes) {
+    if (bytes <= n) return;
+    release();
+    check(cudaMallocHost(&p, bytes), "cudaMallocHost");
+    n = bytes;
+  }
+  void release() {
+    if (p) cudaFreeHost(p);
+    p = nullptr;
+    n = 0;
+  }
+};
+
+constexpr std::size_t align8(std::size_t b) { return (b + 7) & ~std::size_t(7); }
+
+}  // namespace
+
 struct GpuEnergy::Impl {
   int device = 0;
   EnergyModelView view{};
@@ -198,9 +352,12 @@ struct GpuEnergy::Impl {
   DevBuf<FlatPairParams> pairParams;
   DevBuf<FlatPair> pairs;
   DevBuf<FlatClosure> closures;
-  DevBuf<char> angles, xs;
-  DevBuf<double> gs, grad;
-  DevBuf<FlatTerms> terms;
+  // Work memory: inputs and outputs are each one contiguous block (one copy per call).
+  DevBuf<char> in, out, xs;
+  DevBuf<double> gs;
+  PinnedBuf hIn, hOut;
+  DevBuf<DockProbe> probes;
+  DockView dock{};
 
   template <class T>
   void run(const T* hAngles, int n, FlatTerms* hTerms, double* hGrad, T* hCoords) {
@@ -208,21 +365,68 @@ struct GpuEnergy::Impl {
     check(cudaSetDevice(device), "cudaSetDevice");
     const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
     const std::size_t nn = static_cast<std::size_t>(n);
-    angles.reserve(std::max<std::size_t>(1, nn * nt) * sizeof(T));
+    const std::size_t inBytes = align8(nn * nt * sizeof(T));
+    const std::size_t oTerms = 0, oGrad = align8(nn * sizeof(FlatTerms));
+    const std::size_t outBytes = oGrad + (hGrad ? nn * nt * sizeof(double) : 0);
+    in.reserve(std::max<std::size_t>(8, inBytes));
+    out.reserve(outBytes);
     xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(T));
-    terms.reserve(nn);
-    if (hGrad) {
-      gs.reserve(std::max<std::size_t>(1, nn * nc));
-      grad.reserve(std::max<std::size_t>(1, nn * nt));
+    if (hGrad) gs.reserve(std::max<std::size_t>(1, nn * nc));
+    hIn.reserve(std::max<std::size_t>(8, inBytes));
+    hOut.reserve(outBytes);
+    if (nt) {
+      std::copy_n(hAngles, nn * nt, reinterpret_cast<T*>(hIn.p));
+      check(cudaMemcpy(in.p, hIn.p, inBytes, cudaMemcpyHostToDevice), "upload");
     }
-    if (nt) check(cudaMemcpy(angles.p, hAngles, nn * nt * sizeof(T), cudaMemcpyHostToDevice), "upload angles");
-    evaluateKernel<T><<<n, kThreads>>>(view, reinterpret_cast<const T*>(angles.p), reinterpret_cast<T*>(xs.p),
-                                       hGrad ? gs.p : nullptr, terms.p, hGrad ? grad.p : nullptr);
+    launch<T, false>(blockThreads(view, 0), n, view, reinterpret_cast<const T*>(in.p), reinterpret_cast<T*>(xs.p),
+                     hGrad ? gs.p : nullptr, reinterpret_cast<FlatTerms*>(out.p + oTerms),
+                     hGrad ? reinterpret_cast<double*>(out.p + oGrad) : nullptr, DockView{}, nullptr, nullptr, nullptr);
     check(cudaGetLastError(), "evaluateKernel launch");
-    check(cudaDeviceSynchronize(), "evaluateKernel");
-    check(cudaMemcpy(hTerms, terms.p, nn * sizeof(FlatTerms), cudaMemcpyDeviceToHost), "download terms");
-    if (hGrad && nt) check(cudaMemcpy(hGrad, grad.p, nn * nt * sizeof(double), cudaMemcpyDeviceToHost), "download gradient");
+    check(cudaMemcpy(hOut.p, out.p, outBytes, cudaMemcpyDeviceToHost), "download");
+    std::copy_n(reinterpret_cast<const FlatTerms*>(hOut.p + oTerms), nn, hTerms);
+    if (hGrad) std::copy_n(reinterpret_cast<const double*>(hOut.p + oGrad), nn * nt, hGrad);
     if (hCoords) check(cudaMemcpy(hCoords, xs.p, nn * nc * sizeof(T), cudaMemcpyDeviceToHost), "download coordinates");
+  }
+
+  void runDock(const GpuField::Impl& f, const float* hAngles, const DockPose* hPoses, int n, FlatTerms* hTerms,
+               DockTerms* hDterms, double* hGrad) {
+    if (n <= 0) return;
+    if (f.id == 0) throw Error("evaluateDock: no field");
+    check(cudaSetDevice(device), "cudaSetDevice");
+    const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
+    const std::size_t nn = static_cast<std::size_t>(n);
+    const std::size_t iPoses = align8(nn * nt * sizeof(float)), inBytes = iPoses + nn * sizeof(DockPose);
+    const std::size_t oTerms = 0, oDterms = align8(nn * sizeof(FlatTerms)), oGrad6 = oDterms + align8(nn * sizeof(DockTerms)),
+                      oGrad = oGrad6 + nn * 6 * sizeof(double);
+    const std::size_t outBytes = hGrad ? oGrad + nn * nt * sizeof(double) : oGrad6;
+    in.reserve(inBytes);
+    out.reserve(outBytes);
+    xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(float));
+    if (hGrad) gs.reserve(std::max<std::size_t>(1, nn * nc));
+    hIn.reserve(inBytes);
+    hOut.reserve(outBytes);
+    std::copy_n(hAngles, nn * nt, reinterpret_cast<float*>(hIn.p));
+    std::copy_n(hPoses, nn, reinterpret_cast<DockPose*>(hIn.p + iPoses));
+    check(cudaMemcpy(in.p, hIn.p, inBytes, cudaMemcpyHostToDevice), "upload");
+    DockView dv = dock;
+    dv.field = f.view;
+    launch<float, true>(blockThreads(view, dv.probeCount), n, view, reinterpret_cast<const float*>(in.p),
+                        reinterpret_cast<float*>(xs.p), hGrad ? gs.p : nullptr, reinterpret_cast<FlatTerms*>(out.p + oTerms),
+                        hGrad ? reinterpret_cast<double*>(out.p + oGrad) : nullptr, dv,
+                        reinterpret_cast<const DockPose*>(in.p + iPoses), reinterpret_cast<DockTerms*>(out.p + oDterms),
+                        hGrad ? reinterpret_cast<double*>(out.p + oGrad6) : nullptr);
+    check(cudaGetLastError(), "evaluateKernel (dock) launch");
+    check(cudaMemcpy(hOut.p, out.p, outBytes, cudaMemcpyDeviceToHost), "download");
+    std::copy_n(reinterpret_cast<const FlatTerms*>(hOut.p + oTerms), nn, hTerms);
+    std::copy_n(reinterpret_cast<const DockTerms*>(hOut.p + oDterms), nn, hDterms);
+    if (!hGrad) return;
+    const double* g6 = reinterpret_cast<const double*>(hOut.p + oGrad6);
+    const double* gt = reinterpret_cast<const double*>(hOut.p + oGrad);
+    const std::size_t ng = 6 + nt;
+    for (std::size_t s = 0; s < nn; ++s) {
+      std::copy_n(g6 + s * 6, 6, hGrad + s * ng);
+      std::copy_n(gt + s * nt, nt, hGrad + s * ng + 6);
+    }
   }
 };
 
@@ -259,12 +463,29 @@ std::size_t GpuEnergy::bytesPerSample(bool fp64, bool grad) const {
   return (nt + nc) * r + sizeof(FlatTerms) + (grad ? (nc + nt) * sizeof(double) : 0);
 }
 
+void GpuEnergy::setProbes(const std::vector<DockProbe>& probes, double clashDistance, double clashBase, double clashK) {
+  Impl& d = *impl_;
+  check(cudaSetDevice(d.device), "cudaSetDevice");
+  d.probes.upload(probes);
+  d.dock = {static_cast<int>(probes.size()), d.probes.p, clashDistance, clashBase, clashK, FieldView{}};
+}
+
+void GpuEnergy::evaluateDock(const GpuField& field, const float* angles, const DockPose* poses, int n, FlatTerms* terms,
+                             DockTerms* dterms, double* grad) {
+  impl_->runDock(*field.impl_, angles, poses, n, terms, dterms, grad);
+}
+
+std::size_t GpuEnergy::bytesPerSampleDock() const {
+  return bytesPerSample(false, true) + sizeof(DockPose) + sizeof(DockTerms) + 6 * sizeof(double);
+}
+
 void GpuEnergy::releaseScratch() {
-  impl_->angles.release();
+  impl_->in.release();
+  impl_->out.release();
   impl_->xs.release();
   impl_->gs.release();
-  impl_->grad.release();
-  impl_->terms.release();
+  impl_->hIn.release();
+  impl_->hOut.release();
 }
 
 void GpuEnergy::evaluate(const double* angles, int n, FlatTerms* terms, double* grad, double* coords) {

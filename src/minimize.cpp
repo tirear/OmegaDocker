@@ -4,17 +4,11 @@
 
 #include "minimize.hpp"
 
-#include <sys/mman.h>
-#include <ucontext.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
-#include <exception>
-#include <memory>
 #include <numbers>
 
+#include "fiber_batch.hpp"
 #include "log.hpp"
 #include "rng.hpp"
 
@@ -362,54 +356,6 @@ MinResult minimizeTorsions(const TorsionObjective& f, std::span<double> anglesDe
   return {r.energy, r.steps, r.evaluations};
 }
 
-namespace {
-
-constexpr std::size_t kFiberStack = 256 * 1024;
-
-// One sample being minimized by minimizeTorsions on its own stack.
-struct Fiber {
-  ucontext_t ctx{};
-  ucontext_t* sched = nullptr;
-  char* mem = nullptr;  // guard page + stack
-  std::size_t memSize = 0;
-  const TorsionObjective* objective = nullptr;
-  std::span<double> angles;
-  const MinParams* params = nullptr;
-  int sample = -1;
-  bool running = false, waiting = false;
-  std::vector<double> req, grad;
-  double energy = 0;
-  MinResult result;
-  std::exception_ptr error;
-
-  Fiber() = default;
-  Fiber(const Fiber&) = delete;
-  Fiber& operator=(const Fiber&) = delete;
-  ~Fiber() {
-    if (mem) munmap(mem, memSize);
-  }
-  void allocate() {
-    const std::size_t page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-    memSize = kFiberStack + page;
-    void* m = mmap(nullptr, memSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (m == MAP_FAILED) fail("9a: cannot allocate a minimization stack");
-    mem = static_cast<char*>(m);
-    mprotect(mem, page, PROT_NONE);
-  }
-};
-
-void fiberMain(unsigned lo, unsigned hi) {
-  Fiber& fb = *reinterpret_cast<Fiber*>((static_cast<std::uintptr_t>(hi) << 32) | lo);
-  try {
-    fb.result = minimizeTorsions(*fb.objective, fb.angles, *fb.params);
-  } catch (...) {
-    fb.error = std::current_exception();
-  }
-  fb.running = false;
-}  // returns to fb.sched through uc_link
-
-}  // namespace
-
 std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionObjective& f, std::span<double> anglesDeg, int d,
                                              const MinParams& p, int maxActive) {
   const int count = d > 0 ? static_cast<int>(anglesDeg.size() / d) : 0;
@@ -417,75 +363,32 @@ std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionObjective& f, std
   if (count == 0) return out;
   const std::size_t nd = static_cast<std::size_t>(d);
   const int nf = std::max(1, std::min(maxActive, count));
-  ucontext_t sched;
-  std::vector<std::unique_ptr<Fiber>> fibers;
-  std::vector<TorsionObjective> objectives(nf);
-  for (int k = 0; k < nf; ++k) {
-    fibers.push_back(std::make_unique<Fiber>());
-    Fiber& fb = *fibers.back();
-    fb.allocate();
-    fb.sched = &sched;
-    fb.req.resize(nd);
-    fb.grad.resize(nd);
-    fb.params = &p;
-    objectives[k] = [&fb, nd](std::span<const double> x, std::vector<double>& g) {
-      std::copy(x.begin(), x.end(), fb.req.begin());
-      fb.waiting = true;
-      swapcontext(&fb.ctx, fb.sched);
-      g.assign(fb.grad.begin(), fb.grad.begin() + static_cast<std::ptrdiff_t>(nd));
-      return fb.energy;
+  std::vector<double> req(nf * nd), grad(nf * nd), energy(nf);
+  const auto task = [&](int index, int slot) {
+    const TorsionObjective obj = [&, slot](std::span<const double> x, std::vector<double>& g) {
+      std::copy(x.begin(), x.end(), req.begin() + static_cast<std::ptrdiff_t>(slot * nd));
+      batchWait();
+      const auto b = grad.begin() + static_cast<std::ptrdiff_t>(slot * nd);
+      g.assign(b, b + static_cast<std::ptrdiff_t>(nd));
+      return energy[slot];
     };
-    fb.objective = &objectives[k];
-  }
-  int next = 0;
-  // Starts samples on fb until one waits for an evaluation or none are left.
-  auto launch = [&](Fiber& fb) {
-    while (!fb.running && next < count) {
-      if (fb.error) std::rethrow_exception(fb.error);
-      if (fb.sample >= 0) out[fb.sample] = fb.result;
-      fb.sample = next++;
-      fb.angles = anglesDeg.subspan(static_cast<std::size_t>(fb.sample) * nd, nd);
-      fb.running = true;
-      fb.waiting = false;
-      getcontext(&fb.ctx);
-      const std::size_t page = fb.memSize - kFiberStack;
-      fb.ctx.uc_stack.ss_sp = fb.mem + page;
-      fb.ctx.uc_stack.ss_size = kFiberStack;
-      fb.ctx.uc_link = &sched;
-      const auto ptr = reinterpret_cast<std::uintptr_t>(&fb);
-      makecontext(&fb.ctx, reinterpret_cast<void (*)()>(fiberMain), 2, static_cast<unsigned>(ptr & 0xffffffffu),
-                  static_cast<unsigned>(ptr >> 32));
-      swapcontext(&sched, &fb.ctx);
-    }
-    if (!fb.running && fb.sample >= 0) {
-      if (fb.error) std::rethrow_exception(fb.error);
-      out[fb.sample] = fb.result;
-      fb.sample = -1;
+    out[index] = minimizeTorsions(obj, anglesDeg.subspan(static_cast<std::size_t>(index) * nd, nd), p);
+  };
+  std::vector<double> a, e, g;
+  const auto flush = [&](std::span<const int> slots) {
+    const std::size_t m = slots.size();
+    a.resize(m * nd);
+    e.resize(m);
+    g.resize(m * nd);
+    for (std::size_t i = 0; i < m; ++i)
+      std::copy_n(req.begin() + static_cast<std::ptrdiff_t>(slots[i] * nd), nd, a.begin() + static_cast<std::ptrdiff_t>(i * nd));
+    f(a.data(), static_cast<int>(m), e.data(), g.data());
+    for (std::size_t i = 0; i < m; ++i) {
+      energy[slots[i]] = e[i];
+      std::copy_n(g.begin() + static_cast<std::ptrdiff_t>(i * nd), nd, grad.begin() + static_cast<std::ptrdiff_t>(slots[i] * nd));
     }
   };
-  for (auto& fb : fibers) launch(*fb);
-  std::vector<int> wait;
-  std::vector<double> angles, energy, grad;
-  for (;;) {
-    wait.clear();
-    for (int k = 0; k < nf; ++k)
-      if (fibers[k]->running && fibers[k]->waiting) wait.push_back(k);
-    if (wait.empty()) break;
-    const std::size_t m = wait.size();
-    angles.resize(m * nd);
-    energy.resize(m);
-    grad.resize(m * nd);
-    for (std::size_t i = 0; i < m; ++i) std::copy(fibers[wait[i]]->req.begin(), fibers[wait[i]]->req.end(), angles.begin() + i * nd);
-    f(angles.data(), static_cast<int>(m), energy.data(), grad.data());
-    for (std::size_t i = 0; i < m; ++i) {
-      Fiber& fb = *fibers[wait[i]];
-      fb.energy = energy[i];
-      std::copy(grad.begin() + i * nd, grad.begin() + (i + 1) * nd, fb.grad.begin());
-      fb.waiting = false;
-      swapcontext(&sched, &fb.ctx);
-      launch(fb);
-    }
-  }
+  runBatched(count, nf, task, flush);
   return out;
 }
 

@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "dock_kernel.hpp"
 #include "energy_kernel.hpp"
 
 namespace od {
@@ -23,6 +24,25 @@ struct GpuDeviceInfo {
 // Number of CUDA devices; 0 when there is no device or no driver.
 int gpuDeviceCount();
 GpuDeviceInfo gpuDeviceInfo(int device);
+// Free device memory (bytes).
+std::size_t gpuFreeMem(int device);
+
+// A StaM field (spec 8.1, 8.2) on the device. The reference maps are kept while the
+// next field uses the same grids (FieldModel::base).
+class GpuField {
+ public:
+  explicit GpuField(int device = 0);
+  ~GpuField();
+  GpuField(const GpuField&) = delete;
+  std::uint64_t id() const;  // FieldModel::id of the current field; 0: none
+  void set(const FieldModel& fm);
+  std::size_t deviceBytes() const;
+
+ private:
+  friend class GpuEnergy;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 class GpuEnergy {
  public:
@@ -38,6 +58,12 @@ class GpuEnergy {
   void evaluate(const double* angles, int n, FlatTerms* terms, double* grad, double* coords);
   // Single precision (spec 12.1): coordinates and per-item terms in float, sums in double.
   void evaluate(const float* angles, int n, FlatTerms* terms, double* grad, float* coords);
+  // 9b pose energies (dock::evaluate, spec 15.1.4) against field with the probe atoms of
+  // setProbes; angles: n × torsionCount; grad (optional): n × (6 + torsionCount).
+  void setProbes(const std::vector<DockProbe>& probes, double clashDistance, double clashBase, double clashK);
+  void evaluateDock(const GpuField& field, const float* angles, const DockPose* poses, int n, FlatTerms* terms,
+                    DockTerms* dterms, double* grad);
+  std::size_t bytesPerSampleDock() const;
   // Device work memory per sample of evaluate (bytes).
   std::size_t bytesPerSample(bool fp64, bool grad) const;
   // Frees the work memory (it is allocated again by the next evaluate).

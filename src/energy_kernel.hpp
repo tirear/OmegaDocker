@@ -206,10 +206,16 @@ OD_HD inline bool torsionUnit(const EnergyModelView& m, int t, const T* x, T a[3
   return true;
 }
 
+struct NoExternal {
+  template <class T>
+  void operator()(const T*, double*) const {}
+};
+
 // Serial evaluation (CPU check of the flat form). x: 3 × coordCount scratch;
 // g: 3 × coordCount scratch when grad is requested; grad: torsionCount.
-template <class T>
-inline FlatTerms evaluate(const EnergyModelView& m, const T* angles, T* x, double* g, double* grad) {
+// ext(x, g or nullptr): external term after the closure terms (EnergySystem::evaluate).
+template <class T, class Ext = NoExternal>
+inline FlatTerms evaluate(const EnergyModelView& m, const T* angles, T* x, double* g, double* grad, Ext&& ext = {}) {
   for (int i = 0; i < 3 * m.coordCount; ++i) x[i] = static_cast<T>(m.ref[i]);
   for (int t = m.torsionCount; t-- > 0;) {
     T o[3], k[3], c, s;
@@ -241,6 +247,7 @@ inline FlatTerms evaluate(const EnergyModelView& m, const T* angles, T* x, doubl
       g[3 * cl.j + a] -= f * d[a];
     }
   }
+  ext(static_cast<const T*>(x), grad ? g : nullptr);
   out.vdw = e[0];
   out.hbond = e[1];
   out.elec = e[2];

@@ -37,12 +37,14 @@
 #include "checkpoint.hpp"
 #include "dock9b.hpp"
 #include "dock9c.hpp"
+#include "fiber_batch.hpp"
 #include "log.hpp"
 #include "minimize.hpp"
 #include "dssp.hpp"
 #include "energy_kernel.hpp"
 #ifdef OD_HAVE_CUDA
 #include "conf9a_gpu.hpp"
+#include "dock9b_gpu.hpp"
 #include "energy_gpu.hpp"
 #endif
 #include "symrmsd.hpp"
@@ -2924,6 +2926,210 @@ struct DockFixture {
 
 }  // namespace
 
+namespace {
+
+// full, flexres and delta fields of 2KJJ in a 48 Å box, with 1L2Y as MobM (spec 15.1.4 tests).
+struct FieldSet {
+  GridFixture x;
+  od::Dock9bParams p;
+  std::vector<std::pair<std::string, od::StamField>> fields;
+  FieldSet() {
+    p.boxCenter = x.stamCenter();
+    p.boxSize = {48, 48, 48};
+    p.hopfLevel = 0;
+    p.posm1SampleNum = 2000;
+    p.seed = 3;
+    const auto geom = od::boxGrid(p.boxCenter, p.boxSize, 0.375);
+    const double cap = std::max(p.maxNearDistance, p.clashDistance) + 0.75;
+    auto shared = [&](const od::GridAtoms& a) {
+      return std::pair{std::make_shared<const od::EnergyGrids>(od::buildEnergyGrids(geom, a, x.mobm.type, {})),
+                       std::make_shared<const od::DistanceGrid>(od::buildDistanceGrid(geom, a, cap))};
+    };
+    std::vector<char> mask(x.stam.size());
+    for (std::size_t a = 0; a < mask.size(); ++a) mask[a] = a % 3 == 0;
+    const auto [g, d] = shared(x.stam);
+    fields.emplace_back("full", od::StamField::full(g, d));
+    const auto [gf, df] = shared(od::subset(x.stam, mask, false));
+    fields.emplace_back("flexres", od::StamField::flexres(gf, df, od::subset(x.stam, mask, true), {}));
+    od::GridAtoms sample = x.stam;
+    const od::Vec3 c = x.stamCenter();
+    for (std::size_t a = 0; a < sample.size(); ++a)
+      if (mask[a] && sample.xyz[a][0] > c[0] + 4) sample.xyz[a][0] += 0.7;
+    const auto [gs, ds] = shared(sample);
+    fields.emplace_back("delta", od::StamField::delta(g, d, *gs, *ds, 1e-2));
+  }
+};
+
+// PoseEvaluator on the CPU (MobmDocker::evaluate), recording the batch sizes.
+struct CpuPoseEvaluator : od::PoseEvaluator {
+  const od::MobmDocker* dk = nullptr;
+  const od::MobmDocker::Conf* conf = nullptr;
+  int batch, largest = 0, binds = 0;
+  explicit CpuPoseEvaluator(int b) : batch(b) {}
+  int maxBatch() const override { return batch; }
+  void bind(const od::MobmDocker& d) override {
+    dk = &d;
+    ++binds;
+  }
+  void evaluate(int n, const od::PoseRequest* req, od::MobmDocker::PoseEnergy* out, double* grad) override {
+    largest = std::max(largest, n);
+    const std::size_t ng = 6 + dk->sys().torsionCount();
+    std::vector<double> g;
+    for (int i = 0; i < n; ++i) {
+      od::MobmDocker::Conf c;
+      c.center = req[i].center;
+      const std::span<const double> a(req[i].anglesDeg, dk->sys().torsionCount());
+      out[i] = dk->evaluate(c, req[i].pose, a, &g);
+      std::copy(g.begin(), g.end(), grad + i * ng);
+    }
+  }
+};
+
+// Poses near the StaM surface: quick-filtered L1poss of the input conformation.
+std::vector<od::Pose> filteredPoses(const od::MobmDocker& dk, const od::MobmDocker::Conf& c, std::size_t want) {
+  std::vector<od::Pose> v;
+  od::Dock9bStats st;
+  for (long long k = 0; k < dk.l1Count(c) && v.size() < want; ++k) {
+    const auto pose = dk.l1Pose(c, 7, k);
+    if (pose && dk.quickFilter(c, *pose, st)) v.push_back(*pose);
+  }
+  return v;
+}
+
+}  // namespace
+
+TEST_CASE("dock9b: flat field and pose energy equal StamField and MobmDocker::evaluate") {
+  FieldSet fs;
+  std::mt19937 rng(17);
+  const auto geom = od::boxGrid(fs.p.boxCenter, fs.p.boxSize, 0.375);
+  std::uniform_real_distribution<double> ux(geom.origin[0] + 0.1, geom.max()[0] - 0.1), uy(geom.origin[1] + 0.1, geom.max()[1] - 0.1),
+      uz(geom.origin[2] + 0.1, geom.max()[2] - 0.1);
+  const od::EnergyModel mob = fs.x.mobSys->model();
+  for (const auto& [name, field] : fs.fields) {
+    INFO(name);
+    const od::FieldModel fm = field.model();
+    const od::FieldView& v = fm.view;
+    int diff = 0;
+    for (int k = 0; k < 400; ++k) {
+      const od::Vec3 pd{ux(rng), uy(rng), uz(rng)};
+      const od::Vec3f pf{static_cast<float>(pd[0]), static_cast<float>(pd[1]), static_cast<float>(pd[2])};
+      const int m = k % field.typeMapCount();
+      const float q = k % 3 == 0 ? -0.35f : 0.42f;
+      od::Vec3f ga, gb;
+      od::Vec3 da, db;
+      diff += field.energy<float>(m, q, pf, &ga) != od::field::energy<float>(v, m, q, pf.data(), gb.data()) || ga != gb;
+      diff += field.distance<float>(pf, &ga) != od::field::distance<float>(v, pf.data(), gb.data()) || ga != gb;
+      diff += field.energy<double>(m, q, pd, &da) != od::field::energy<double>(v, m, q, pd.data(), db.data()) || da != db;
+      diff += field.distance<double>(pd, &da) != od::field::distance<double>(v, pd.data(), db.data()) || da != db;
+    }
+    CHECK(diff == 0);
+    const od::MobmDocker dk(*fs.x.mobSys, field, fs.p);
+    const auto probes = dk.probes();
+    const od::DockView dv = dk.dockView(probes, v);
+    const auto start = perturbed(fs.x.mobSys->inputAngles(), 20, 3);
+    std::vector<double> angles(start.size());
+    for (std::size_t i = 0; i < start.size(); ++i) angles[i] = static_cast<float>(start[i]);
+    const auto c = dk.conformation(fs.x.mobSys->inputAngles());
+    const auto poses = filteredPoses(dk, c, 40);
+    REQUIRE(poses.size() == 40);
+    std::vector<float> af(angles.begin(), angles.end()), x(3 * mob.coordCount);
+    std::vector<double> g(3 * mob.coordCount), grad(6 + angles.size()), ref;
+    int bad = 0, outside = 0;
+    for (const auto& pose : poses) {
+      const auto pe = dk.evaluate(c, pose, angles, &ref);
+      od::DockPose ps{};
+      for (int i = 0; i < 3; ++i) {
+        ps.t[i] = static_cast<float>(pose.t[i]);
+        ps.center[i] = static_cast<float>(c.center[i]);
+      }
+      ps.q[0] = static_cast<float>(pose.q.w);
+      ps.q[1] = static_cast<float>(pose.q.x);
+      ps.q[2] = static_cast<float>(pose.q.y);
+      ps.q[3] = static_cast<float>(pose.q.z);
+      od::DockTerms dt;
+      const od::FlatTerms ft = od::dock::evaluate(mob.view(), dv, af.data(), ps, x.data(), g.data(), grad.data(), dt);
+      outside += pe.outside;
+      bad += dt.inter != pe.inter || dt.interClash != pe.interClash || dt.outside != pe.outside || ft.vdw != pe.intra.vdw ||
+             ft.elec != pe.intra.elec || ft.desolv != pe.intra.desolv || ft.clash != pe.intra.clash || grad != ref;
+    }
+    CHECK(bad == 0);
+    CHECK(outside < 40 * static_cast<int>(probes.size()));  // probe atoms outside the grid are compared too
+  }
+}
+
+TEST_CASE("dock9b: batched minimization with a PoseEvaluator equals the CPU path") {
+  FieldSet fs;
+  fs.p.posm1SampleNum = 200;
+  for (const auto& [name, field] : fs.fields) {
+    INFO(name);
+    std::vector<od::DockSample> a, b;
+    const od::MobmDocker dk(*fs.x.mobSys, field, fs.p);
+    const auto sa = dk.dockPair(fs.x.mobSys->inputAngles(), 5, 16, [&](std::vector<od::DockSample>& ch) {
+      a.insert(a.end(), ch.begin(), ch.end());
+    });
+    CpuPoseEvaluator ev(7);
+    od::Dock9bParams pe = fs.p;
+    pe.evaluator = &ev;
+    const od::MobmDocker dke(*fs.x.mobSys, field, pe);
+    const auto sb = dke.dockPair(fs.x.mobSys->inputAngles(), 5, 16, [&](std::vector<od::DockSample>& ch) {
+      b.insert(b.end(), ch.begin(), ch.end());
+    });
+    CHECK(sa.l2 > 0);
+    CHECK(sa.l2 == sb.l2);
+    CHECK(sa.steps == sb.steps);
+    CHECK(sa.evaluations == sb.evaluations);
+    CHECK(sa.leftGrid == sb.leftGrid);
+    CHECK(ev.largest == 7);
+    CHECK(ev.binds == static_cast<int>((sa.l2 + 15) / 16));
+    REQUIRE(a.size() == b.size());
+    int diff = 0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      diff += a[i].energy != b[i].energy || a[i].angles != b[i].angles || a[i].pose.t != b[i].pose.t || a[i].steps != b[i].steps;
+    CHECK(diff == 0);
+  }
+}
+
+TEST_CASE("dock9b: dockPairs delivers the chunks of sequential dockPair calls") {
+  FieldSet fs;
+  fs.p.posm1SampleNum = 120;
+  const od::StamField& field = fs.fields[0].second;
+  std::vector<std::vector<double>> angles;
+  for (unsigned j = 0; j < 4; ++j) angles.push_back(perturbed(fs.x.mobSys->inputAngles(), j == 2 ? 0 : 10, 60 + j));
+  // (job, chunk) sequence: sizes and energies.
+  using Seq = std::vector<std::pair<int, std::vector<float>>>;
+  auto record = [](Seq& s, int j) {
+    return [&s, j](std::vector<od::DockSample>& ch) {
+      std::vector<float> e;
+      for (const auto& d : ch) e.push_back(d.energy);
+      s.emplace_back(j, std::move(e));
+    };
+  };
+  Seq ref, got;
+  std::vector<od::Dock9bStats> refStats;
+  const od::MobmDocker dk(*fs.x.mobSys, field, fs.p);
+  for (int j = 0; j < 4; ++j) refStats.push_back(dk.dockPair(angles[j], 11 + j, 5, record(ref, j)));
+  CpuPoseEvaluator ev(9);
+  od::Dock9bParams pe = fs.p;
+  pe.evaluator = &ev;
+  const od::MobmDocker dke(*fs.x.mobSys, field, pe);
+  std::vector<od::MobmDocker::PairJob> jobs(4);
+  for (int j = 0; j < 4; ++j) {
+    jobs[j].mobAnglesDeg = angles[j];
+    jobs[j].stream = 11 + j;
+    jobs[j].sink = record(got, j);
+  }
+  dke.dockPairs(jobs, 5);
+  CHECK(ref.size() > 4);
+  CHECK(got == ref);
+  for (int j = 0; j < 4; ++j) {
+    CHECK(jobs[j].stats.l2 == refStats[j].l2);
+    CHECK(jobs[j].stats.steps == refStats[j].steps);
+    CHECK(jobs[j].stats.leftGrid == refStats[j].leftGrid);
+    CHECK(jobs[j].stats.overlap == refStats[j].overlap);
+  }
+  CHECK(ev.largest == 9);
+}
+
 TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   DockFixture f(od::Posm::Posm3);
   CHECK(f.p.sepaPosStep == 2.0);
@@ -4211,5 +4417,106 @@ TEST_CASE("gpu: 9a minimization matches the CPU path") {
     INFO(c.name);
     CHECK(close >= ctlClose - count / 20);
   }
+}
+#endif
+
+#ifdef OD_HAVE_CUDA
+// 9b pose energies on the GPU against the CPU float evaluation (spec 15.1.4).
+TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FieldSet fs;
+  auto gfield = std::make_shared<od::GpuField>(0);
+  od::GpuPoseEvaluator ev(fs.x.mobSys->model(), gfield, 0, 4096);
+  const int nt = fs.x.mobSys->torsionCount();
+  for (const auto& [name, field] : fs.fields) {
+    INFO(name);
+    const od::MobmDocker dk(*fs.x.mobSys, field, fs.p);
+    ev.bind(dk);
+    const auto c = dk.conformation(fs.x.mobSys->inputAngles());
+    const auto poses = filteredPoses(dk, c, 128);
+    REQUIRE(poses.size() == 128);
+    // Single evaluations.
+    std::vector<std::vector<double>> angles;
+    std::vector<od::PoseRequest> req;
+    for (std::size_t i = 0; i < poses.size(); ++i) {
+      auto a = perturbed(fs.x.mobSys->inputAngles(), 20, 40 + static_cast<unsigned>(i));
+      for (double& v : a) v = static_cast<float>(v);
+      angles.push_back(std::move(a));
+    }
+    for (std::size_t i = 0; i < poses.size(); ++i) req.push_back({poses[i], c.center, angles[i].data()});
+    std::vector<od::MobmDocker::PoseEnergy> out(req.size());
+    std::vector<double> grad(req.size() * (6 + nt)), ref;
+    ev.evaluate(static_cast<int>(req.size()), req.data(), out.data(), grad.data());
+    double worstE = 0, worstG = 0;
+    for (std::size_t i = 0; i < req.size(); ++i) {
+      const auto pe = dk.evaluate(c, poses[i], angles[i], &ref);
+      CHECK(out[i].outside == pe.outside);
+      worstE = std::max(worstE, std::abs(out[i].objective() - pe.objective()) / std::max(1.0, std::abs(pe.objective())));
+      double gmax = 1;
+      for (double v : ref) gmax = std::max(gmax, std::abs(v));
+      for (std::size_t k = 0; k < ref.size(); ++k) worstG = std::max(worstG, std::abs(grad[i * (6 + nt) + k] - ref[k]) / gmax);
+    }
+    MESSAGE(std::format("{}: worst relative difference: energy {:.2e}, gradient {:.2e}", name, worstE, worstG));
+    CHECK(worstE < 1e-4);
+    CHECK(worstG < 1e-3);
+    // Minimization: GPU energies against the CPU, with the CPU from starts shifted by 1e-5 Å as control.
+    const int n = static_cast<int>(poses.size());
+    std::vector<od::DockSample> gpuOut(n), cpuOut(n), ctlOut(n);
+    std::vector<char> gpuOk(n), cpuOk(n), ctlOk(n);
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < n; ++i) {
+      od::Dock9bStats s;
+      cpuOk[i] = dk.minimize(c, poses[i], cpuOut[i], s);
+      od::Pose shifted = poses[i];
+      shifted.t[0] += 1e-5;
+      ctlOk[i] = dk.minimize(c, shifted, ctlOut[i], s);
+    }
+    const std::size_t ng = 6 + nt;
+    std::vector<od::PoseRequest> slotReq(n);
+    std::vector<od::MobmDocker::PoseEnergy> slotPe(n);
+    std::vector<double> slotGrad(n * ng);
+    od::runBatched(
+        n, n,
+        [&](int i, int slot) {
+          od::Dock9bStats st;
+          gpuOk[i] = dk.minimize(c, poses[i], gpuOut[i], st, [&, slot](const od::Pose& p, std::span<const double> a, std::vector<double>* g) {
+            slotReq[slot] = {p, c.center, a.data()};
+            od::batchWait();
+            g->assign(slotGrad.begin() + slot * ng, slotGrad.begin() + (slot + 1) * ng);
+            return slotPe[slot];
+          });
+        },
+        [&](std::span<const int> slots) {
+          std::vector<od::PoseRequest> r;
+          for (int s : slots) r.push_back(slotReq[s]);
+          std::vector<od::MobmDocker::PoseEnergy> o(r.size());
+          std::vector<double> gg(r.size() * ng);
+          ev.evaluate(static_cast<int>(r.size()), r.data(), o.data(), gg.data());
+          for (std::size_t k = 0; k < slots.size(); ++k) {
+            slotPe[slots[k]] = o[k];
+            std::copy_n(gg.begin() + k * ng, ng, slotGrad.begin() + slots[k] * ng);
+          }
+        });
+    int agree = 0, ctlAgree = 0;
+    double gpuMin = 1e300, cpuMin = 1e300;
+    auto same = [](bool okA, const od::DockSample& x, bool okB, const od::DockSample& y) {
+      if (okA != okB) return false;
+      return !okA || std::abs(x.energy - y.energy) <= 1e-4 * std::max(1.0f, std::abs(y.energy));
+    };
+    for (int i = 0; i < n; ++i) {
+      agree += same(gpuOk[i], gpuOut[i], cpuOk[i], cpuOut[i]);
+      ctlAgree += same(ctlOk[i], ctlOut[i], cpuOk[i], cpuOut[i]);
+      if (gpuOk[i]) gpuMin = std::min(gpuMin, static_cast<double>(gpuOut[i].energy));
+      if (cpuOk[i]) cpuMin = std::min(cpuMin, static_cast<double>(cpuOut[i].energy));
+    }
+    MESSAGE(std::format("{}: {} poses minimized; same result as the CPU (1e-4 relative): GPU {}, CPU control {}; "
+                        "lowest energy GPU {:.3f}, CPU {:.3f}",
+                        name, n, agree, ctlAgree, gpuMin, cpuMin));
+    CHECK(agree >= ctlAgree - n / 10);
+  }
+  ev.idle();
 }
 #endif

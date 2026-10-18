@@ -5,6 +5,7 @@
 #include "grid.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 #include "ad4_pair.hpp"
@@ -320,9 +321,24 @@ const char* gridModeName(GridMode m) {
   return "";
 }
 
+FieldCells detail::CellList::flat() const {
+  FieldCells c{};
+  c.cell = cell_;
+  for (int k = 0; k < 3; ++k) {
+    c.lo[k] = lo_[k];
+    c.n[k] = n_[k];
+  }
+  c.start = start_.data();
+  c.atoms = atoms_.data();
+  c.atomCount = static_cast<int>(atoms_.size());
+  return c;
+}
+
 StamField StamField::full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist) {
+  static std::atomic<std::uint64_t> counter{0};
   StamField f;
   f.mode_ = GridMode::Full;
+  f.id_ = ++counter;
   f.grids_ = std::move(grids);
   f.dist_ = std::move(dist);
   f.mapCount_ = static_cast<int>(f.grids_->types.size()) + 3;
@@ -427,6 +443,66 @@ StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_p
         }
       }
   return f;
+}
+
+FieldModel StamField::model() const {
+  FieldModel fm;
+  fm.id = id_;
+  fm.base = grids_;
+  fm.baseDist = dist_;
+  const GridGeometry& g = grids_->geom;
+  fm.points = g.size();
+  FieldView& v = fm.view;
+  v.mode = mode_ == GridMode::Full ? 0 : mode_ == GridMode::Flexres ? 1 : 2;
+  for (int c = 0; c < 3; ++c) {
+    v.origin[c] = g.origin[c];
+    v.n[c] = g.n[c];
+    v.nb[c] = nb_[c];
+  }
+  v.spacing = g.spacing;
+  v.typeMapCount = static_cast<int>(grids_->types.size());
+  if (v.typeMapCount + 3 > kFieldMaxMaps) fail("StamField::model: too many maps");
+  for (int m = 0; m < v.typeMapCount; ++m) v.maps[m] = grids_->typeMaps[m].data();
+  v.maps[v.typeMapCount] = grids_->elecMap.data();
+  v.maps[v.typeMapCount + 1] = grids_->desolvMap.data();
+  v.maps[v.typeMapCount + 2] = dist_->d.data();
+  v.mapCount = mapCount_;
+  fm.block = block_;
+  fm.data = data_;
+  for (const Moved& m : moved_) {
+    FieldMoved x{};
+    for (int c = 0; c < 3; ++c) x.xyz[c] = m.xyz[c];
+    x.type = m.type;
+    x.elecQ = m.elecQ;
+    x.S = m.S;
+    x.V = m.V;
+    x.heavy = m.heavy;
+    fm.moved.push_back(x);
+  }
+  fm.movedHeavy = movedHeavy_;
+  v.movedCount = static_cast<int>(moved_.size());
+  v.movedHeavyCount = static_cast<int>(movedHeavy_.size());
+  v.nTypes = static_cast<int>(Ad4Type::Count);
+  v.cells = cells_.flat();
+  v.heavyCells = heavyCells_.flat();
+  fm.cellStart = cells_.start();
+  fm.cellAtoms = cells_.atoms();
+  fm.heavyStart = heavyCells_.start();
+  fm.heavyAtoms = heavyCells_.atoms();
+  fm.solT = solT_;
+  fm.volT = volT_;
+  fm.pairAC = pairAC_;
+  fm.pairBD = pairBD_;
+  fm.pairReqm = pairReqm_;
+  fm.pairM = pairM_;
+  fm.pairN = pairN_;
+  v.cDesolv = cDesolv_;
+  v.qasp = qasp_;
+  v.halfSmooth = halfSmooth_;
+  v.rMin = rMin_;
+  v.cap = dist_->cap;
+  fm.bind();
+  return fm;
 }
 
 std::size_t StamField::deltaBlockCount() const {

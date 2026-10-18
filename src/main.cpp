@@ -46,6 +46,7 @@
 #include "version.hpp"
 #ifdef OD_HAVE_CUDA
 #include "conf9a_gpu.hpp"
+#include "dock9b_gpu.hpp"
 #endif
 
 namespace {
@@ -173,26 +174,26 @@ void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>
                           e.filterEnergy(), e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.clashPairs, e.closure));
 }
 
-// Whether 9a minimization runs on the GPU (spec 15.1.3); logs the choice.
+// Whether 9a and 9b minimization run on the GPU (spec 15.1.3, 15.1.4); logs the choice.
 bool selectGpu(const od::Options& opt) {
 #ifdef OD_HAVE_CUDA
   if (!opt.gpuEnable) {
-    od::logInfo("9a energies: CPU (gpu.enable = false)");
+    od::logInfo("9a/9b minimization energies: CPU (gpu.enable = false)");
     return false;
   }
   const int n = od::gpuDeviceCount();
   if (n == 0) {
-    od::logInfo("9a energies: CPU (no CUDA device)");
+    od::logInfo("9a/9b minimization energies: CPU (no CUDA device)");
     return false;
   }
   if (opt.gpuDevice >= n) od::fail("gpu.device {}: only {} CUDA device(s)", opt.gpuDevice, n);
   const auto info = od::gpuDeviceInfo(opt.gpuDevice);
-  od::logInfo(std::format("9a energies: GPU {} {} (sm_{}{}, {} MiB free of {} MiB)", opt.gpuDevice, info.name, info.major,
+  od::logInfo(std::format("9a/9b minimization energies: GPU {} {} (sm_{}{}, {} MiB free of {} MiB)", opt.gpuDevice, info.name, info.major,
                           info.minor, info.freeMem >> 20, info.totalMem >> 20));
   return true;
 #else
   (void)opt;
-  od::logInfo("9a energies: CPU (built without CUDA)");
+  od::logInfo("9a/9b minimization energies: CPU (built without CUDA)");
   return false;
 #endif
 }
@@ -919,7 +920,7 @@ void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::u
 
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
 void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const od::Options& opt,
-               const od::FeParams& fp, std::uint64_t seed, const Checkpointing& ck) {
+               const od::FeParams& fp, std::uint64_t seed, const Checkpointing& ck, bool gpu) {
   std::vector<od::Ad4Type> probe;
   for (const auto& m : mobSets)
     for (od::Ad4Type t : m->sys().typing(0).type)
@@ -933,6 +934,18 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             od::hopfSpacingDeg(level), opt.rotStep));
   }
   const od::Dock9bParams dp = dockParams(opt, seed);
+  // 9b minimization on the GPU (spec 15.1.4): one evaluator per MobM, one field shared by them.
+  std::vector<std::unique_ptr<od::PoseEvaluator>> poseEval(mobSets.size());
+#ifdef OD_HAVE_CUDA
+  if (gpu) {
+    auto gpuField = std::make_shared<od::GpuField>(opt.gpuDevice);
+    for (std::size_t i = 0; i < mobSets.size(); ++i)
+      poseEval[i] = std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuField, opt.gpuDevice,
+                                                           opt.gpuDock9bBatchNum);
+  }
+#else
+  (void)gpu;
+#endif
   const bool deterministic = dp.posm == od::Posm::Posm2 || dp.posm == od::Posm::Posm2Fft || dp.posm == od::Posm::Posm3;
   const bool usesFft = dp.posm == od::Posm::Posm2Fft;
   const bool usesSepas = dp.posm == od::Posm::Posm3 || dp.posm == od::Posm::Posm4;
@@ -1123,7 +1136,13 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       for (std::size_t i = 0; i < ms.size(); ++i) {
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
         const ConfSet& mob = *mobSets[i];
-        const od::MobmDocker dk(mob.sys(), field, dp, &sepas, fft.get());
+        od::Dock9bParams dpi = dp;
+        dpi.evaluator = poseEval[i].get();
+        const od::MobmDocker dk(mob.sys(), field, dpi, &sepas, fft.get());
+        // The pairs of this StaM conformation, docked together (spec 15.1.4); sinks run in pair order.
+        std::vector<int> mids;
+        std::vector<std::vector<double>> mobAngles;
+        std::vector<char> posm1Only;
         for (int mid : ms[i].mobDcss) {
           const std::uint64_t key = pairKey(sid, mid);
           if (deterministic && ms[i].pairLowest.contains(key)) {
@@ -1131,29 +1150,38 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
             continue;
           }
           // posm4: the posm3 part of a pair docked before is not redone (spec 9).
-          const bool posm1Only = dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key);
+          posm1Only.push_back(dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key));
           const auto& ma = mob.sample(mid).angles;
-          const std::vector<double> mobAngles =
-              mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles();
-          const float stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
-          float lowest = std::numeric_limits<float>::infinity();
-          st[i] += dk.dockPair(mobAngles, od::dockStream(round, i, sid, mid), ms[i].bufferNum,
-                               [&](std::vector<od::DockSample>& chunk) {
-                                 sampleNum[i] += static_cast<long long>(chunk.size());
-                                 for (auto& s : chunk) {
-                                   od::RoundSample r{sid, mid, std::move(s), stamRel};
-                                   lowest = std::min(lowest, r.rank());
-                                   buffer[i].push_back(std::move(r));
-                                 }
-                                 if (buffer[i].size() >= ms[i].bufferNum) {
-                                   select(i, false);
-                                   ++partial[i];
-                                 }
-                               },
-                               posm1Only);
+          mobAngles.push_back(mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles());
+          mids.push_back(mid);
+        }
+        const float stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
+        std::vector<float> lowest(mids.size(), std::numeric_limits<float>::infinity());
+        std::vector<od::MobmDocker::PairJob> jobs(mids.size());
+        for (std::size_t j = 0; j < mids.size(); ++j) {
+          jobs[j].mobAnglesDeg = mobAngles[j];
+          jobs[j].stream = od::dockStream(round, i, sid, mids[j]);
+          jobs[j].posm1Only = posm1Only[j];
+          jobs[j].sink = [&, j](std::vector<od::DockSample>& chunk) {
+            sampleNum[i] += static_cast<long long>(chunk.size());
+            for (auto& s : chunk) {
+              od::RoundSample r{sid, mids[j], std::move(s), stamRel};
+              lowest[j] = std::min(lowest[j], r.rank());
+              buffer[i].push_back(std::move(r));
+            }
+            if (buffer[i].size() >= ms[i].bufferNum) {
+              select(i, false);
+              ++partial[i];
+            }
+          };
+        }
+        dk.dockPairs(jobs, ms[i].bufferNum);
+        for (std::size_t j = 0; j < mids.size(); ++j) {
+          const std::uint64_t key = pairKey(sid, mids[j]);
+          st[i] += jobs[j].stats;
           ++docked[i];
-          if (usesSepas && !posm1Only) ++posm3Docked[i];
-          ms[i].pairLowest[key] = posm1Only ? std::min(lowest, ms[i].pairLowest[key]) : lowest;
+          if (usesSepas && !posm1Only[j]) ++posm3Docked[i];
+          ms[i].pairLowest[key] = posm1Only[j] ? std::min(lowest[j], ms[i].pairLowest[key]) : lowest[j];
         }
       }
     }
@@ -1228,6 +1256,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       }
       if (!m.top.empty()) od::logInfo("    lowest energies:" + energyList(m.top, 5, shift));
     }
+    for (auto& e : poseEval)
+      if (e) e->idle();
     od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));
     writeCheckpoint(round, stamSet, mobSets, ms, stamRef, opt, ck, shift);
   }
@@ -1313,6 +1343,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuEnable = stored.gpuEnable;
   cmp.gpuDevice = stored.gpuDevice;
   cmp.gpuConf9aBatchNum = stored.gpuConf9aBatchNum;
+  cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {
     auto lines = [](const std::string& s) {
@@ -1486,7 +1517,7 @@ int run(int argc, char** argv) {
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
   for (const auto& c : mobSets)
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
-  runRounds(*stamSet, mobSets, opt, opt.fe, seed, ck);
+  runRounds(*stamSet, mobSets, opt, opt.fe, seed, ck, gpu);
   return 0;
 }
 

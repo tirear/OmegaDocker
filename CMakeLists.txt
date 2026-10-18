@@ -90,6 +90,7 @@ add_library(od_core STATIC
   src/csgm2.cpp
   src/csgm3.cpp
   src/minimize.cpp
+  src/fiber_batch.cpp
   src/conf9a.cpp
   src/grow.cpp
   src/grid.cpp
