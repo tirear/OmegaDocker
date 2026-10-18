@@ -6,7 +6,9 @@
 #include <array>
 #include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "grid.hpp"
@@ -21,6 +23,7 @@ int fftSize(int n);
 
 // Spectra of the clamped maps of one StaM conformation: type maps, then elec, desolv.
 struct FftStam {
+  std::uint64_t id = 0;  // unique per buildFftStam call
   GridGeometry geom;
   std::array<int, 3> pad{};  // FFT points per axis (x, y, z), each >= geom.n
   double clamp = 10;
@@ -46,5 +49,9 @@ struct FftWork {
 // with all T + f[a] inside the grid; other entries are not meaningful.
 void fftCorrelate(const FftStam& s, std::span<const Vec3> f, std::span<const int> map, std::span<const double> q,
                   FftWork& w);
+
+// The top lowest (energy, index) of energy (index layout) over the translations lo..hi, ascending.
+void fftSelect(const FftStam& s, const float* energy, const std::array<int, 3>& lo, const std::array<int, 3>& hi,
+               std::size_t top, std::vector<std::pair<float, std::size_t>>& best);
 
 }  // namespace od

@@ -37,6 +37,7 @@ class GpuField {
   std::uint64_t id() const;  // FieldModel::id of the current field; 0: none
   void set(const FieldModel& fm);
   std::size_t deviceBytes() const;
+  const FieldView& deviceView() const;  // arrays in device memory
 
  private:
   friend class GpuEnergy;

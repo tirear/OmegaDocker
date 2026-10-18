@@ -210,6 +210,8 @@ class MobmDocker {
   const EnergySystem& sys() const { return sys_; }
   const StamField& field() const { return field_; }
   const Dock9bParams& params() const { return p_; }
+  const FftStam* fft() const { return fft_; }
+  const std::vector<Quat>& hopf() const { return hopf_; }
   // Probe atoms for the flat pose energy (dock::evaluate, spec 15.1.4).
   std::vector<DockProbe> probes() const;
   DockView dockView(const std::vector<DockProbe>& probes, const FieldView& field) const;
@@ -269,6 +271,24 @@ class PoseEvaluator {
   virtual void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) = 0;
   // Called when 9b of a round ends (e.g. to free work memory).
   virtual void idle() {}
+
+  // Optional device versions of L1poss preparation (spec 15.1.5); the defaults leave it to the CPU.
+  // 8.5 quick filter of the L1pos [k0, k1) of c: appends the passing ones to l2 (any order) and
+  // adds to the outsideBox, overlap and far counters of stats. false: not supported.
+  virtual bool quickFilter(const MobmDocker&, const MobmDocker::Conf&, std::uint64_t /*stream*/, long long /*k0*/,
+                           long long /*k1*/, std::vector<long long>& /*l2*/, Dock9bStats& /*stats*/) {
+    return false;
+  }
+  // posm2_fft: orientations per fftTop call; 0: not supported. Binds dk.
+  virtual int fftBatch(const MobmDocker&) { return 0; }
+  // n orientations: f (n × probes × 3, grid units, as fftCorrelate), map and q (per probe atom),
+  // translation ranges lo, hi; out (n × top): fftSelect of each, entries beyond the range
+  // count with index SIZE_MAX.
+  virtual void fftTop(int /*n*/, int /*probes*/, const double* /*f*/, const int* /*map*/, const double* /*q*/,
+                      const std::array<int, 3>* /*lo*/, const std::array<int, 3>* /*hi*/, int /*top*/,
+                      std::pair<float, std::size_t>* /*out*/) {}
+  // Called when the L1poss of a pair are prepared (e.g. to free the work memory of the above).
+  virtual void prepared() {}
 };
 
 // PRNG stream of a 9b conformation pair.

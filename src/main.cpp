@@ -934,14 +934,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             od::hopfSpacingDeg(level), opt.rotStep));
   }
   const od::Dock9bParams dp = dockParams(opt, seed);
-  // 9b minimization on the GPU (spec 15.1.4): one evaluator per MobM, one field shared by them.
+  // 9b on the GPU (spec 15.1.4, 15.1.5): one evaluator per MobM; field, quick filter and posm2_fft shared by them.
   std::vector<std::unique_ptr<od::PoseEvaluator>> poseEval(mobSets.size());
 #ifdef OD_HAVE_CUDA
   if (gpu) {
     auto gpuField = std::make_shared<od::GpuField>(opt.gpuDevice);
+    auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevice);
     for (std::size_t i = 0; i < mobSets.size(); ++i)
       poseEval[i] = std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuField, opt.gpuDevice,
-                                                           opt.gpuDock9bBatchNum);
+                                                           opt.gpuDock9bBatchNum, gpuPrep);
   }
 #else
   (void)gpu;

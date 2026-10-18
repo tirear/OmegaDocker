@@ -456,52 +456,70 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
 void MobmDocker::fftPoses(Conf& c) const {
   const FftStam& s = *fft_;
   const GridGeometry& g = s.geom;
-  const std::size_t no = hopf_.size(), top = static_cast<std::size_t>(std::max(1, p_.fftTopPerRot));
+  const std::size_t no = hopf_.size(), np = probe_.size(), top = static_cast<std::size_t>(std::max(1, p_.fftTopPerRot));
   std::vector<std::vector<std::pair<float, std::size_t>>> kept(no);
   const Vec3f cf = castVec<float>(c.center);
-#pragma omp parallel
-  {
-    FftWork w;
-    std::vector<Vec3> f(probe_.size());
-#pragma omp for schedule(dynamic, 1)
-    for (std::size_t o = 0; o < no; ++o) {
-      const QuatF qf = toFloat(hopf_[o]);
-      std::array<int, 3> lo{}, hi{};
-      bool empty = false;
-      for (int d = 0; d < 3; ++d) {
-        float rlo = 1e30f, rhi = -1e30f;
-        for (std::size_t a = 0; a < probe_.size(); ++a) {
-          const Vec3f& y = c.coords[probe_[a]];
-          const float r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]})[d];
-          f[a][d] = r / g.spacing;
-          rlo = std::min(rlo, r);
-          rhi = std::max(rhi, r);
-        }
-        // Centre t = origin + T spacing with boxMin + margin <= t + rlo and t + rhi <= boxMax - margin.
-        const double bmin = p_.boxCenter[d] - 0.5 * p_.boxSize[d] + kPosMargin - g.origin[d];
-        const double bmax = p_.boxCenter[d] + 0.5 * p_.boxSize[d] - kPosMargin - g.origin[d];
-        lo[d] = std::max(0, static_cast<int>(std::ceil((bmin - rlo) / g.spacing - 1e-9)));
-        hi[d] = std::min(g.n[d] - 1, static_cast<int>(std::floor((bmax - rhi) / g.spacing + 1e-9)));
-        if (lo[d] > hi[d]) empty = true;
+  // Grid coordinates f (np × 3) of the probe atoms in orientation o and its translation range; false when empty.
+  auto geometry = [&](std::size_t o, Vec3* f, std::array<int, 3>& lo, std::array<int, 3>& hi) {
+    const QuatF qf = toFloat(hopf_[o]);
+    bool empty = false;
+    for (int d = 0; d < 3; ++d) {
+      float rlo = 1e30f, rhi = -1e30f;
+      for (std::size_t a = 0; a < np; ++a) {
+        const Vec3f& y = c.coords[probe_[a]];
+        const float r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]})[d];
+        f[a][d] = r / g.spacing;
+        rlo = std::min(rlo, r);
+        rhi = std::max(rhi, r);
       }
-      if (empty) continue;
-      fftCorrelate(s, f, map_, charge_, w);
-      auto& best = kept[o];  // max-heap on (energy, index)
-      for (int k = lo[2]; k <= hi[2]; ++k)
-        for (int j = lo[1]; j <= hi[1]; ++j)
-          for (int i = lo[0]; i <= hi[0]; ++i) {
-            const std::size_t idx = s.index(i, j, k);
-            const std::pair<float, std::size_t> e{w.energy[idx], idx};
-            if (best.size() < top) {
-              best.push_back(e);
-              std::push_heap(best.begin(), best.end());
-            } else if (e < best.front()) {
-              std::pop_heap(best.begin(), best.end());
-              best.back() = e;
-              std::push_heap(best.begin(), best.end());
-            }
-          }
-      std::sort_heap(best.begin(), best.end());
+      // Centre t = origin + T spacing with boxMin + margin <= t + rlo and t + rhi <= boxMax - margin.
+      const double bmin = p_.boxCenter[d] - 0.5 * p_.boxSize[d] + kPosMargin - g.origin[d];
+      const double bmax = p_.boxCenter[d] + 0.5 * p_.boxSize[d] - kPosMargin - g.origin[d];
+      lo[d] = std::max(0, static_cast<int>(std::ceil((bmin - rlo) / g.spacing - 1e-9)));
+      hi[d] = std::min(g.n[d] - 1, static_cast<int>(std::floor((bmax - rhi) / g.spacing + 1e-9)));
+      if (lo[d] > hi[d]) empty = true;
+    }
+    return !empty;
+  };
+  const int batch = p_.evaluator ? p_.evaluator->fftBatch(*this) : 0;
+  if (batch > 0) {
+    // Device correlation (spec 15.1.5): the non-empty orientations in batches.
+    std::vector<std::array<int, 3>> lo(no), hi(no);
+    std::vector<char> use(no);
+    {
+      std::vector<Vec3> f(np);
+#pragma omp parallel for schedule(static) firstprivate(f)
+      for (std::size_t o = 0; o < no; ++o) use[o] = geometry(o, f.data(), lo[o], hi[o]);
+    }
+    std::vector<std::size_t> which;
+    for (std::size_t o = 0; o < no; ++o)
+      if (use[o]) which.push_back(o);
+    const std::size_t nb = static_cast<std::size_t>(batch);
+    std::vector<Vec3> f(nb * np);
+    std::vector<std::array<int, 3>> blo(nb), bhi(nb);
+    std::vector<std::pair<float, std::size_t>> out(nb * top);
+    for (std::size_t b0 = 0; b0 < which.size(); b0 += nb) {
+      const std::size_t m = std::min(nb, which.size() - b0);
+#pragma omp parallel for schedule(static)
+      for (std::size_t b = 0; b < m; ++b) geometry(which[b0 + b], f.data() + b * np, blo[b], bhi[b]);
+      p_.evaluator->fftTop(static_cast<int>(m), static_cast<int>(np), f[0].data(), map_.data(), charge_.data(), blo.data(),
+                           bhi.data(), static_cast<int>(top), out.data());
+      for (std::size_t b = 0; b < m; ++b)
+        for (std::size_t r = 0; r < top; ++r)
+          if (out[b * top + r].second != SIZE_MAX) kept[which[b0 + b]].push_back(out[b * top + r]);
+    }
+  } else {
+#pragma omp parallel
+    {
+      FftWork w;
+      std::vector<Vec3> f(np);
+#pragma omp for schedule(dynamic, 1)
+      for (std::size_t o = 0; o < no; ++o) {
+        std::array<int, 3> lo{}, hi{};
+        if (!geometry(o, f.data(), lo, hi)) continue;
+        fftCorrelate(s, f, map_, charge_, w);
+        fftSelect(s, w.energy.data(), lo, hi, top, kept[o]);
+      }
     }
   }
   for (std::size_t o = 0; o < no; ++o)
@@ -849,22 +867,25 @@ MobmDocker::Prepared MobmDocker::prepare(std::span<const double> mobAnglesDeg, s
     total.sepaSingles = static_cast<long long>(c.singles.size());
     total.sepaTriples = static_cast<long long>(c.triples.size());
   }
+  if (!p_.evaluator || !p_.evaluator->quickFilter(*this, c, stream, first, n, l2, total)) {
 #pragma omp parallel
-  {
-    Dock9bStats st;
-    std::vector<long long> mine;
-#pragma omp for schedule(static) nowait
-    for (long long k = first; k < n; ++k) {
-      const auto pose = l1Pose(c, stream, k);
-      if (!pose) ++st.outsideBox;
-      else if (quickFilter(c, *pose, st)) mine.push_back(k);
-    }
-#pragma omp critical
     {
-      total += st;
-      l2.insert(l2.end(), mine.begin(), mine.end());
+      Dock9bStats st;
+      std::vector<long long> mine;
+#pragma omp for schedule(static) nowait
+      for (long long k = first; k < n; ++k) {
+        const auto pose = l1Pose(c, stream, k);
+        if (!pose) ++st.outsideBox;
+        else if (quickFilter(c, *pose, st)) mine.push_back(k);
+      }
+#pragma omp critical
+      {
+        total += st;
+        l2.insert(l2.end(), mine.begin(), mine.end());
+      }
     }
   }
+  if (p_.evaluator) p_.evaluator->prepared();
   std::sort(l2.begin(), l2.end());
   total.l2 = static_cast<long long>(l2.size());
   return pr;

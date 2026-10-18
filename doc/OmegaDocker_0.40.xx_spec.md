@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.59 |
+| 文件版本 | 1.60 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -996,7 +996,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 7.5°（預設） | 36,864 | 16 | 5.90×10⁵ | 2019 s | 2061 s | 0.32 GB | −7.327 | −7.823 |
 
 - 所有 L1poss 都通過 8.5 篩選（FFT 能量最低的平移不會有重疊或離 StaM 太遠）；最佳化中約 7.6% 移出網格。
-- 9b 時間幾乎都花在 FFT：每個定向 8 個 81³ FFT（5 個類型通道 + 靜電 + 去溶劑化 + 1 次 IFFT），單執行緒約 9 ms。每個執行緒的工作記憶體約 6 MB，16 個執行緒超過 L3 快取（32 MB），受記憶體頻寬限制，比 8 個執行緒慢。CPU 版建議 `OMP_NUM_THREADS` 設為實體核心數；GPU 版（cuFFT）另行測試。
+- 9b 時間幾乎都花在 FFT：每個定向 8 個 81³ FFT（5 個類型通道 + 靜電 + 去溶劑化 + 1 次 IFFT），單執行緒約 9 ms。每個執行緒的工作記憶體約 6 MB，16 個執行緒超過 L3 快取（32 MB），受記憶體頻寬限制，比 8 個執行緒慢。CPU 版建議 `OMP_NUM_THREADS` 設為實體核心數；GPU 版見 15.1.5。
 - 對照（同條件，8.4.4.1）：posm3 預設（三點 + 配對，2 Å）9b 78 s、`E_top_max` −7.008、第 1 名 −8.113；posm1 1×10⁵ 個 9b 22 s、`E_top_max` −6.998、第 1 名 −8.037。
 
 #### 8.4.4 posm3：最低靜電位能配對法
@@ -1677,7 +1677,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ### 15.1.2 CUDA 版：建置與正確性基準（1.57）
 
-- **建置**：CMake 選項 `OD_CUDA`（預設 `OFF`）；`CMAKE_CUDA_ARCHITECTURES` 未指定時為 70；C++20；`OD_STATIC_DEPS=ON` 時連結 `cudart_static`。CUDA 程式碼在 `src/gpu/`，啟用時定義 `OD_HAVE_CUDA`。不啟用時程式與 CPU 版完全相同。
+- **建置**：CMake 選項 `OD_CUDA`（預設 `OFF`）；`CMAKE_CUDA_ARCHITECTURES` 未指定時為 70；C++20；`OD_STATIC_DEPS=ON` 時連結 `cudart_static` 與 `cufft_static_nocallback`（不需 device link），否則 `cudart` 與 `cufft`。CUDA 程式碼在 `src/gpu/`，啟用時定義 `OD_HAVE_CUDA`。不啟用時程式與 CPU 版完全相同。
 - **共用的計算函式**（`src/energy_kernel.hpp`）：`EnergySystem::model()` 把 9a 能量系統（7.9）轉成扁平的資料（`EnergyModel`：參考座標、兩面角與移動原子、原子對、閉合項、各原子的電荷與溶劑化參數）。座標建構、單一原子對、單一閉合項、單一兩面角梯度項寫成 `__host__ __device__` 函式，CPU 與 GPU 共用；運算順序與 `EnergySystem::evaluate` 相同，CPU 以這些函式逐一計算的結果與 `evaluate` 逐位元相同（double 與 float，測試）。
 - **GPU 計算**（`GpuEnergy`）：一個樣本一個 thread block（256 執行緒）；座標與每原子梯度放在 global memory；兩面角依序處理（每個兩面角由多個執行緒旋轉其移動原子）；原子對與閉合項分給各執行緒，每原子梯度以 double `atomicAdd` 累加；能量各項以 warp 內加總後再加總各 warp；每個兩面角的梯度由一個 warp 加總。精度分工同 12.1（float 版：座標與逐項計算為 float，加總為 double）。原子數與兩面角數不設上限。
 - **與 CPU 版的差異來源**：加總順序（`atomicAdd` 的順序每次執行可能不同，因此 GPU 結果不保證每次逐位元相同）、FMA（nvcc 預設合併乘加）、CUDA 的 `sinf`／`cosf` 與 glibc 的捨入不同。關閉 FMA（`--fmad=false`）時差異大小不變，主要來源為 float 三角函數與加總順序。
@@ -1720,7 +1720,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ### 15.1.4 CUDA 版：9b 最小化（1.59）
 
-- **分工**：與 15.1.3 相同：最小化方法（`dock9b.minMethod`）的控制邏輯、L1poss 產生與 8.5 快速篩選留在 CPU；GPU 計算姿勢能量與梯度（8.6：每項 float、加總 double）。
+- **分工**：與 15.1.3 相同：最小化方法（`dock9b.minMethod`）的控制邏輯留在 CPU；GPU 計算姿勢能量與梯度（8.6：每項 float、加總 double）。L1poss 的產生、8.5 快速篩選與 posm2_fft 見 15.1.5。
 - **共用計算函式**：
   - `field_kernel.hpp`：StaM 場（`StamField`，8.1、8.2）的平面形式 `FieldView`（`StamField::model()`），涵蓋 `full`、`flexres`（移動原子以 cell list 逐對加總）、`delta`（區塊表）三種模式；`field::energy`、`field::distance` 與 `StamField::energy`、`StamField::distance` 逐運算相同（CPU 上 float、double 都逐位元相同，測試）。
   - `dock_kernel.hpp`：探針原子的格點能量、StaM–MobM 碰撞懲罰、平移與旋轉梯度（`dock::probeTerm`、`dock::probeGrad`）；CPU 的 `dock::evaluate` 與 `MobmDocker::evaluate` 逐位元相同（測試）。MobM 分子內能量沿用 15.1.2 的核心，外部項在閉合項之後、扭轉角梯度之前加入（與 `EnergySystem::evaluate` 相同）。
@@ -1742,6 +1742,32 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
   - 小分子受主機端（最小化方法的控制、協程切換）限制；大分子由 GPU 核心主導（1L2Y 約 83% 為核心時間），核心尚未最佳化。
 - **可重現性**：與 15.1.3 相同，GPU 版不保證每次執行逐位元相同。
+
+### 15.1.5 CUDA 版：8.5 快速篩選與 posm2_fft（1.60）
+
+- **分工**：`PoseEvaluator` 新增可選的 `quickFilter`、`fftBatch`／`fftTop` 與 `prepared`；GPU 版由 `GpuDockPrep`（`src/gpu/prep_gpu.hpp`，所有 MobM 共用）實作。未以 CUDA 建置或 `gpu.enable = false` 時一律走 CPU，輸出與 1.59 逐位元相同（posm1、posm2_fft、posm3 已比對所有輸出檔與檢查點）。
+- **8.5 快速篩選**：
+  - posm2：L1poss 直接在 GPU 產生（與 `MobmDocker::l1Pose` 相同的定向與平移，每次 2²² 個）；posm1、posm3、posm4、posm2_fft：L1poss 在 CPU 以 OpenMP 產生（posm1 的 `randomQuat` 用到 double 的 sin／cos，GPU 與 glibc 的捨入可能不同），每次 2²⁰ 個上傳。
+  - GPU 每個執行緒一個姿勢，運算順序與 `MobmDocker::quickFilter` 相同；`prep_gpu.cu` 以 `-fmad=false` 編譯（CPU 版不使用 FMA），因此篩選結果與 CPU **完全相同**（通過的 L1pos 依序排序；三種 `grid.mode`、posm1／posm2 測試，各計數也相同）。
+- **posm2_fft**：
+  - CPU 仍計算每個定向的探針格點座標與合法平移範圍（8.4.3）；StaM 頻譜仍以 pocketfft 建立，上傳一次（每個 StaM 構型）。
+  - MobM 頻譜有兩種算法（`GpuDockPrep::Spectra`）：
+    - **direct**：三線性分配可逐軸分解，原子 a 的頻譜為 P_a(k) = Π_d [(1 − u_d) e(k_d b_d) + u_d e(k_d (b_d + 1))]，e(m) = exp(−2πi m / p_d)。各定向、各原子先算三軸的因子表，再一次算出 Σ_a conj(P_a)(S_type(a) + q_a S_elec + |q_a| S_desolv)，不需正向 FFT；成本約與「探針原子數 × 頻譜點數」成正比。
+    - **fft**：與 CPU 相同，每個通道一次 R2C（cuFFT）並累加。
+    - 預設：探針原子數 ≤ 40 × 使用的通道數時用 direct（依下表實測的交叉點）。
+  - 之後一次 C2R（cuFFT，批次），每個定向以 16 個 block 平行找出最低的 `fftTopPerRot` 個平移再合併（`fftTopPerRot` ≤ 16；更大時下載能量在 CPU 選）。同能量時取索引較小者（與 CPU 相同）。
+  - 每批定向數依可用 GPU 記憶體的 50% 決定（最多 64）；工作記憶體在每個配對的 L1poss 準備完後釋放，不佔用最小化的記憶體。
+  - 正確性（2KJJ／1L2Y，三種 `grid.mode`，`fftTopPerRot` 1、3、20，兩種算法）：保留的平移與 CPU 相同的比例 ≥ 99.7%（不同者與 CPU 同名次的能量仍在下述誤差內），同名次能量與 CPU 的差 ≤ 3.1×10⁻⁴ kcal/mol。
+- **速度**（2KJJ 為 StaM，4 × 4 個構型配對，30 Å 盒子，TITAN V／Ryzen 7 9700X 16 執行緒）：
+
+| 項目 | 設定 | CPU | GPU |
+|---|---|---|---|
+| posm2 快速篩選（BTN） | `rotStep` 30、`posStep` 1，L1poss 134,723,504 | 8.10 s | 0.27 s |
+| posm2_fft 相關計算（BTN） | `rotStep` 15，73,728 個定向，81³ | 268.4 s | 7.9 s（direct）／36.0 s（fft） |
+| posm2_fft 相關計算（1L2Y，40 Å 盒子） | `rotStep` 30，9,216 個定向，108³ | — | 9.8 s（direct）／11.4 s（fft） |
+| posm2_fft 整個 9b（BTN，含最小化） | `rotStep` 15、`fftTopPerRot` 2 | 252.2 s | 20.4 s |
+
+- **未改善的部分**：posm3／posm4 的小分子（BTN，L2poss 約 80 萬）整個 9b 在 GPU 上反而較慢（CPU 42.9 s，GPU 約 71 s）：GPU 核心只佔 5.9 s，其餘為主機端的最小化控制（協程切換、請求的打包與解包）。留待核心與主機端最佳化處理。
 
 ### 15.2 依賴套件
 
@@ -1805,7 +1831,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 值 | 連結方式 | Boost 目錄 | 用途 |
 |---|---|---|---|
 | `OFF`（預設） | 全部動態 | `boost1900` | 開發 |
-| `ON` | RDKit（`RDKit::*_static`）、Boost、GMP、cudart、cuFFT（`libcufft_static`）、libstdc++、libgcc 靜態；glibc、libz、libbz2、liblzma 動態 | `boost1900noicu` | 拿到其他機器執行 |
+| `ON` | RDKit（`RDKit::*_static`）、Boost、GMP、cudart、cuFFT（`libcufft_static_nocallback`）、libstdc++、libgcc 靜態；glibc、libz、libbz2、liblzma 動態 | `boost1900noicu` | 拿到其他機器執行 |
 
 - `Boost_USE_STATIC_LIBS` 必須在 `find_package(RDKit)` 之前設定，否則 RDKit 內部的 `find_package(Boost)` 會選用動態版。
 - 使用含 ICU 的 Boost 靜態連結時，系統 ICU 會再載入系統 `libstdc++`，造成同一程式有兩份 libstdc++；因此靜態版改用無 ICU 的 Boost。
@@ -2042,3 +2068,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.57 | 2026-10-18 | CUDA 版第 1 步：`OD_CUDA` 建置選項、CPU／GPU 共用的計算函式（`energy_kernel.hpp`、`EnergySystem::model()`）、GPU 批次能量與梯度（`GpuEnergy`）、CPU／GPU 比對的容許誤差與實測（15.1.2） |
 | 1.58 | 2026-10-18 | CUDA 版第 2 步：9a 最小化以 GPU 計算能量與梯度（`ConfEvaluator`、協程批次最小化 `minimizeTorsionsBatch`）；新增 `gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`，可在 `--resume` 時修改；正確性對照與實測（15.1.3、16、14） |
 | 1.59 | 2026-10-18 | CUDA 版第 3 步：9b 最小化以 GPU 計算姿勢能量與梯度（`field_kernel.hpp`、`dock_kernel.hpp`、`GpuField`、`GpuPoseEvaluator`）；`MobmDocker::dockPairs` 合併同一 StaM 構型的所有配對；協程排程 `runBatched` 改為多執行緒；GPU 核心 block 大小依系統選擇、每次呼叫各一次傳輸；新增 `gpu.dock9bBatchNum`（15.1.3、15.1.4、16、14） |
+| 1.60 | 2026-10-19 | CUDA 版第 4 步：8.5 快速篩選在 GPU（與 CPU 結果完全相同；posm2 的 L1poss 在 GPU 產生）；posm2_fft 在 GPU（direct 頻譜或 cuFFT、批次 C2R、平行選擇）；`PoseEvaluator` 的可選介面、`GpuDockPrep`；靜態版改連 `cufft_static_nocallback`（8.4.3、15.1、15.1.4、15.1.5、15.3.1） |

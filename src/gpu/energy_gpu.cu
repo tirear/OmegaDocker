@@ -236,6 +236,7 @@ struct GpuField::Impl {
 GpuField::GpuField(int device) : impl_(std::make_unique<Impl>()) { impl_->device = device; }
 GpuField::~GpuField() = default;
 std::uint64_t GpuField::id() const { return impl_->id; }
+const FieldView& GpuField::deviceView() const { return impl_->view; }
 
 std::size_t GpuField::deviceBytes() const {
   const Impl& d = *impl_;

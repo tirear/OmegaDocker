@@ -5,6 +5,7 @@
 #include "fft_dock.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 #include "pocketfft_hdronly.h"
@@ -43,7 +44,9 @@ int fftSize(int n) {
 }
 
 FftStam buildFftStam(const StamField& field, double clamp) {
+  static std::atomic<std::uint64_t> next{1};
   FftStam s;
+  s.id = next.fetch_add(1);
   s.geom = field.geom();
   s.clamp = clamp;
   for (int d = 0; d < 3; ++d) s.pad[d] = fftSize(s.geom.n[d]);
@@ -142,6 +145,26 @@ void fftCorrelate(const FftStam& s, std::span<const Vec3> f, std::span<const int
   if (first) return;  // no probe atoms
   pocketfft::c2r(l.shape, l.sc, l.sr, l.axes, pocketfft::BACKWARD, w.acc.data(), w.energy.data(),
                  1.0f / static_cast<float>(s.realSize()), 1);
+}
+
+void fftSelect(const FftStam& s, const float* energy, const std::array<int, 3>& lo, const std::array<int, 3>& hi,
+               std::size_t top, std::vector<std::pair<float, std::size_t>>& best) {
+  best.clear();  // max-heap on (energy, index)
+  for (int k = lo[2]; k <= hi[2]; ++k)
+    for (int j = lo[1]; j <= hi[1]; ++j)
+      for (int i = lo[0]; i <= hi[0]; ++i) {
+        const std::size_t idx = s.index(i, j, k);
+        const std::pair<float, std::size_t> e{energy[idx], idx};
+        if (best.size() < top) {
+          best.push_back(e);
+          std::push_heap(best.begin(), best.end());
+        } else if (e < best.front()) {
+          std::pop_heap(best.begin(), best.end());
+          best.back() = e;
+          std::push_heap(best.begin(), best.end());
+        }
+      }
+  std::sort_heap(best.begin(), best.end());
 }
 
 }  // namespace od

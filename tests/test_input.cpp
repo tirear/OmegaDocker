@@ -4519,4 +4519,80 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
   }
   ev.idle();
 }
+
+TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FieldSet fs;
+  auto gfield = std::make_shared<od::GpuField>(0);
+  auto prep = std::make_shared<od::GpuDockPrep>(0);
+  od::GpuPoseEvaluator ev(fs.x.mobSys->model(), gfield, 0, 1024, prep);
+  const auto angles = fs.x.mobSys->inputAngles();
+  // Quick filter (spec 8.5): the same L2poss and counters as the CPU.
+  for (od::Posm posm : {od::Posm::Posm1, od::Posm::Posm2}) {
+    for (const auto& [name, field] : fs.fields) {
+      INFO(name);
+      od::Dock9bParams p = fs.p;
+      p.posm = posm;
+      p.posStep = 2.0;
+      const od::MobmDocker dk(*fs.x.mobSys, field, p);
+      const auto c = dk.conformation(angles);
+      const long long n = dk.l1Count(c);
+      od::Dock9bStats cs, gs;
+      std::vector<long long> cpu, gpu;
+      for (long long k = 0; k < n; ++k) {
+        const auto pose = dk.l1Pose(c, 17, k);
+        if (!pose) ++cs.outsideBox;
+        else if (dk.quickFilter(c, *pose, cs)) cpu.push_back(k);
+      }
+      REQUIRE(ev.quickFilter(dk, c, 17, 0, n, gpu, gs));
+      std::sort(gpu.begin(), gpu.end());
+      MESSAGE(std::format("{} {}: L1poss {}, L2poss CPU {} GPU {}; outside {}/{}, overlap {}/{}, far {}/{}",
+                          posm == od::Posm::Posm1 ? "posm1" : "posm2", name, n, cpu.size(), gpu.size(), cs.outsideBox,
+                          gs.outsideBox, cs.overlap, gs.overlap, cs.far, gs.far));
+      CHECK(!cpu.empty());
+      CHECK(gpu == cpu);
+      CHECK(gs.outsideBox == cs.outsideBox);
+      CHECK(gs.overlap == cs.overlap);
+      CHECK(gs.far == cs.far);
+    }
+  }
+  // posm2_fft (spec 8.4.3): energies of the kept translations as the CPU (cuFFT vs pocketfft rounding),
+  // with the direct and the FFT probe spectra.
+  for (auto mode : {od::GpuDockPrep::Spectra::Direct, od::GpuDockPrep::Spectra::Fft})
+  for (int top : {1, 3, 20}) {
+    prep->setSpectra(mode);
+    const char* mname = mode == od::GpuDockPrep::Spectra::Direct ? "direct" : "fft";
+    for (const auto& [name, field] : fs.fields) {
+      INFO(name);
+      INFO(top);
+      INFO(mname);
+      const od::FftStam s = od::buildFftStam(field, 10.0);
+      od::Dock9bParams p = fs.p;
+      p.posm = od::Posm::Posm2Fft;
+      p.fftTopPerRot = top;
+      const od::MobmDocker dkc(*fs.x.mobSys, field, p, nullptr, &s);
+      p.evaluator = &ev;
+      const od::MobmDocker dkg(*fs.x.mobSys, field, p, nullptr, &s);
+      const auto cc = dkc.conformation(angles);
+      const auto cg = dkg.conformation(angles);
+      REQUIRE(cg.fftPoses.size() == cc.fftPoses.size());
+      REQUIRE(!cc.fftPoses.empty());
+      std::size_t same = 0;
+      double worst = 0;
+      for (std::size_t k = 0; k < cc.fftPoses.size(); ++k) {
+        same += cg.fftPoses[k].t == cc.fftPoses[k].t;
+        CHECK(cg.fftPoses[k].q.w == cc.fftPoses[k].q.w);
+        worst = std::max(worst, std::abs(static_cast<double>(cg.fftEnergy[k]) - cc.fftEnergy[k]));
+        CHECK(cg.fftEnergy[k] == doctest::Approx(cc.fftEnergy[k]).epsilon(1e-4).scale(50.0));
+      }
+      MESSAGE(std::format("posm2_fft {} spectra {} top {}: kept {}, same translation {}, max |GPU - CPU| energy {:.2e}", name,
+                          mname, top, cc.fftPoses.size(), same, worst));
+      CHECK(same >= cc.fftPoses.size() * 9 / 10);
+    }
+  }
+  ev.idle();
+}
 #endif
