@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.61 |
+| 文件版本 | 1.62 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1788,6 +1788,31 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
   （「—」：1.60 時未以此方式單獨量測。）
 
+### 15.1.7 CUDA 版：核心最佳化（二）（1.62）
+
+- **工具**：Nsight Compute（`ncu`，可讀效能計數器）以 `-lineinfo` 取得每行原始碼的 warp 取樣。9b float 核心（1L2Y，8,192 個姿勢）：每執行緒 121 個暫存器，理論與實際 occupancy 25%；停頓主要為 wait、global 讀取延遲、barrier。取樣比例最高的部分：兩面角旋轉階段（執行緒 0 依序算每個兩面角的軸與 cos／sin，其他執行緒等待）約 13%；原子對梯度的分段 shuffle 加總約 12%；12-6／12-10 的冪次迴圈約 10%。
+- **採用**（結果逐位元不變；CPU 也使用同一函式，CPU 版輸出與 1.61 逐位元相同，已比對 posm1、posm2_fft、posm3 的所有輸出檔與檢查點）：
+  - `ad4VdwHb`：m = 12、n = 6 或 10 時展開乘法（乘法順序與迴圈相同）；其他 m、n 仍用迴圈。
+  - 各兩面角的 cos、sin 在旋轉前由所有執行緒平行算好放在 shared memory；依序處理時執行緒 0 只算軸。shared memory 放不下時沿用原做法。
+- **測過但未採用**（同一時段量測）：
+  - 每原子電荷、sv、vol 與實際用到的原子對參數表也放在 shared memory：9b 幾乎不變（2.70 → 2.67 µs），1D3Z 變慢（27.4 → 39.7 µs，shared memory 用量增加使 occupancy 下降）。這些讀取已大多命中 L1。
+  - `__launch_bounds__` 限制暫存器（每 SM 3 或 4 個 256 執行緒的 block）：暫存器溢出，9b 變慢 2–6%。
+  - 梯度在 shared memory 以 64 位元定點整數累加（加總順序無關，可使 GPU 結果每次相同）：sm_70 沒有原生的 shared 64 位元 atomic，9b 變慢約 7%。
+  - 梯度在 shared memory 以 float atomic 累加（AutoDock-GPU 的做法；違反 12.1 的 double 加總，只作上限量測）：也沒有變快（2.58 → 2.76 µs），表示梯度累加的位置已不是瓶頸。
+- **速度**（TITAN V，同一時段量測，每次呼叫的平均；1.61 的表是在機器有其他負載時測得，絕對值偏高）：
+
+| 項目 | 1.61 | 1.62 |
+|---|---|---|
+| 9a double，1L2Y，每樣本 | 2.43 µs | 2.25 µs |
+| 9a double，2KJJ 環區，每樣本 | 10.85 µs | 10.56 µs |
+| 9a double，1ZNF，每樣本 | 4.06 µs | 3.82 µs |
+| 9a double，1D3Z，每樣本 | 27.34 µs | 28.13 µs |
+| 9b float，1L2Y，`full`，每姿勢 | 2.70 µs | 2.58 µs |
+| 9b float，1L2Y，`flexres`，每姿勢 | 4.94 µs | 4.20 µs |
+| 9b float，1L2Y，`delta`，每姿勢 | 2.70 µs | 2.56 µs |
+
+- **測試分子的原子數**：除 BTN 等小分子外，測試用的生物分子都超過 256 個座標（含虛擬原子）：1L2Y 304、1ZNF 424、2KJJ 環區 795、1D3Z 1,231。核心沒有原子數上限；座標與 cos、sin 在 TITAN V 上 float 約 7,900 個、double 約 3,900 個座標以內放在 shared memory。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2089,3 +2114,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.59 | 2026-10-18 | CUDA 版第 3 步：9b 最小化以 GPU 計算姿勢能量與梯度（`field_kernel.hpp`、`dock_kernel.hpp`、`GpuField`、`GpuPoseEvaluator`）；`MobmDocker::dockPairs` 合併同一 StaM 構型的所有配對；協程排程 `runBatched` 改為多執行緒；GPU 核心 block 大小依系統選擇、每次呼叫各一次傳輸；新增 `gpu.dock9bBatchNum`（15.1.3、15.1.4、16、14） |
 | 1.60 | 2026-10-19 | CUDA 版第 4 步：8.5 快速篩選在 GPU（與 CPU 結果完全相同；posm2 的 L1poss 在 GPU 產生）；posm2_fft 在 GPU（direct 頻譜或 cuFFT、批次 C2R、平行選擇）；`PoseEvaluator` 的可選介面、`GpuDockPrep`；靜態版改連 `cufft_static_nocallback`（8.4.3、15.1、15.1.4、15.1.5、15.3.1） |
 | 1.61 | 2026-10-19 | CUDA 核心最佳化：座標放在 shared memory、原子對梯度的 i 端以 warp 分段加總（15.1.2、15.1.6）；更正 1.60 中 posm3 的 CPU／GPU 時間（15.1.5） |
+| 1.62 | 2026-10-19 | CUDA 核心最佳化（二）：`ad4VdwHb` 展開 12-6／12-10 的乘法、兩面角 cos／sin 平行預先計算（結果逐位元不變）；記錄 Nsight Compute 分析、未採用的嘗試與同一時段的量測（15.1.7） |

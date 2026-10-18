@@ -59,9 +59,9 @@ __device__ inline double warpMax(double v) {
   return v;
 }
 
-// One block of NT threads per sample. shared: the coordinates are kept in dynamic shared memory
-// (the gradient stays in global memory: double atomics on shared memory are emulated on sm_70);
-// xs is then only used to return the coordinates (keepX).
+// One block of NT threads per sample. shared: the coordinates and the cos and sin of each torsion
+// are kept in dynamic shared memory (the gradient stays in global memory: double atomics on shared
+// memory are emulated on sm_70); xs is then only used to return the coordinates (keepX).
 template <class T, bool Dock, int NT>
 __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T* angles, T* xs, double* gs,
                                                            FlatTerms* terms, double* grad, DockView dv,
@@ -78,10 +78,13 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
   x = shared ? reinterpret_cast<T*>(smem) : xs + s * nc;
   g = grad ? gs + s * nc : nullptr;
 
+  T* tcs = shared ? x + nc : nullptr;
   for (std::size_t i = tid; i < nc; i += kThreads) {
     x[i] = static_cast<T>(m.ref[i]);
     if (g) g[i] = 0;
   }
+  if (tcs)
+    for (int t = tid; t < m.torsionCount; t += kThreads) flat::torsionCosSin(m, t, ang, tcs[2 * t], tcs[2 * t + 1]);
   __syncthreads();
 
   __shared__ T so[3], sk[3], scs[2];
@@ -89,7 +92,13 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
   for (int t = m.torsionCount; t-- > 0;) {
     if (tid == 0) {
       T o[3], k[3], c = 0, sn = 0;
-      sok = flat::torsionAxis(m, t, ang, x, o, k, c, sn);
+      if (tcs) {
+        sok = flat::torsionAxisOnly(m, t, x, o, k);
+        c = tcs[2 * t];
+        sn = tcs[2 * t + 1];
+      } else {
+        sok = flat::torsionAxis(m, t, ang, x, o, k, c, sn);
+      }
       for (int a = 0; a < 3; ++a) {
         so[a] = o[a];
         sk[a] = k[a];
@@ -344,10 +353,10 @@ int sharedLimit() {
   }();
   return limit;
 }
-// Dynamic shared memory for the coordinates of one sample; 0: they do not fit.
+// Dynamic shared memory for the coordinates and torsion cos and sin of one sample; 0: they do not fit.
 template <class T>
 std::size_t sharedBytes(const EnergyModelView& m) {
-  const std::size_t b = 3 * static_cast<std::size_t>(m.coordCount) * sizeof(T);
+  const std::size_t b = (3 * static_cast<std::size_t>(m.coordCount) + 2 * static_cast<std::size_t>(m.torsionCount)) * sizeof(T);
   return b <= static_cast<std::size_t>(sharedLimit()) - 4096 ? b : 0;  // the kernel's own shared memory
 }
 

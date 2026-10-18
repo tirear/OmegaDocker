@@ -86,12 +86,19 @@ OD_HD inline T piT() {
   return T(3.141592653589793);
 }
 
-// Axis point o, unit direction k, cos and sin of the rotation of torsion t.
-// Returns false for a zero-length axis (the torsion is skipped).
+// Cos and sin of the rotation of torsion t.
 template <class T>
-OD_HD inline bool torsionAxis(const EnergyModelView& m, int t, const T* angles, const T* x, T o[3], T k[3], T& c, T& s) {
+OD_HD inline void torsionCosSin(const EnergyModelView& m, int t, const T* angles, T& c, T& s) {
   using std::cos;
   using std::sin;
+  const T delta = (angles[t] - static_cast<T>(m.torsions[t].inputAngle)) * piT<T>() / T(180);
+  c = cos(delta);
+  s = sin(delta);
+}
+
+// Axis point o and unit direction k of torsion t; false for a zero-length axis.
+template <class T>
+OD_HD inline bool torsionAxisOnly(const EnergyModelView& m, int t, const T* x, T o[3], T k[3]) {
   using std::sqrt;
   const FlatTorsion& tt = m.torsions[t];
   for (int a = 0; a < 3; ++a) {
@@ -101,9 +108,15 @@ OD_HD inline bool torsionAxis(const EnergyModelView& m, int t, const T* angles, 
   const T len = sqrt(k[0] * k[0] + k[1] * k[1] + k[2] * k[2]);
   if (len == 0) return false;
   for (int a = 0; a < 3; ++a) k[a] /= len;
-  const T delta = (angles[t] - static_cast<T>(tt.inputAngle)) * piT<T>() / T(180);
-  c = cos(delta);
-  s = sin(delta);
+  return true;
+}
+
+// Axis point o, unit direction k, cos and sin of the rotation of torsion t.
+// Returns false for a zero-length axis (the torsion is skipped).
+template <class T>
+OD_HD inline bool torsionAxis(const EnergyModelView& m, int t, const T* angles, const T* x, T o[3], T k[3], T& c, T& s) {
+  if (!torsionAxisOnly(m, t, x, o, k)) return false;
+  torsionCosSin(m, t, angles, c, s);
   return true;
 }
 

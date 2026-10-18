@@ -38,9 +38,35 @@ OD_HD inline void ad4VdwHb(T r, T AC, T BD, int m, int n, T reqm, T halfSmooth, 
   }
   const T inv = T(1) / s;
   T rn = 1;
-  for (int k = 0; k < n; ++k) rn *= inv;
-  T rm = rn;
-  for (int k = n; k < m; ++k) rm *= inv;
+  T rm;
+  // Unrolled for the 12-6 and 12-10 terms (same multiplication order as the loops).
+  if (m == 12 && (n == 6 || n == 10)) {
+    rn = inv;
+    rn *= inv;
+    rn *= inv;
+    rn *= inv;
+    rn *= inv;
+    rn *= inv;
+    if (n == 10) {
+      rn *= inv;
+      rn *= inv;
+      rn *= inv;
+      rn *= inv;
+    }
+    rm = rn;
+    rm *= inv;
+    rm *= inv;
+    if (n == 6) {
+      rm *= inv;
+      rm *= inv;
+      rm *= inv;
+      rm *= inv;
+    }
+  } else {
+    for (int k = 0; k < n; ++k) rn *= inv;
+    rm = rn;
+    for (int k = n; k < m; ++k) rm *= inv;
+  }
   e = AC * rm - BD * rn;
   dedr = ds * (n * BD * rn - m * AC * rm) / s;
 }
