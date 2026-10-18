@@ -4,16 +4,11 @@
 
 #pragma once
 #include <format>
-#include <stdexcept>
 #include <string>
 
-namespace od {
+#include "error.hpp"
 
-// Fatal error: reported by main() and the program exits with status 1.
-class Error : public std::runtime_error {
-public:
-  using std::runtime_error::runtime_error;
-};
+namespace od {
 
 void logInfo(const std::string& msg);
 void logWarn(const std::string& msg);

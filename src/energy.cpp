@@ -305,6 +305,47 @@ EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<do
   return e;
 }
 
+EnergyModel EnergySystem::model() const {
+  EnergyModel m;
+  m.coordCount = coordCount_;
+  m.torsionCount = torsionCount_;
+  m.ref.resize(3 * static_cast<std::size_t>(coordCount_));
+  for (std::size_t k = 0; k < parts_.size(); ++k) {
+    const Molecule& mol = *parts_[k].mol;
+    const auto& tree = *parts_[k].tree;
+    const int o = offset_[k];
+    auto put = [&](int idx, const Vec3& p) {
+      for (int c = 0; c < 3; ++c) m.ref[3 * idx + c] = p[c];
+    };
+    for (std::size_t a = 0; a < mol.atoms.size(); ++a) put(o + static_cast<int>(a), mol.atoms[a].xyz);
+    for (std::size_t v = 0; v < tree.virtuals.size(); ++v) put(o + tree.atomCount + static_cast<int>(v), tree.virtuals[v].xyz);
+    for (const auto& tt : tree.torsions) {
+      FlatTorsion ft{o + tt.fixedAtom, o + tt.movingAtom, static_cast<int>(m.moving.size()), 0, tt.inputAngle};
+      for (int a : tt.moving) m.moving.push_back(o + a);
+      ft.movingEnd = static_cast<int>(m.moving.size());
+      m.torsions.push_back(ft);
+    }
+    for (std::size_t v = 0; v < tree.virtuals.size(); ++v)
+      m.closures.push_back({o + tree.atomCount + static_cast<int>(v), o + tree.virtuals[v].copyOf, 0, 0.0});
+    for (const auto& rs : tree.restraints) m.closures.push_back({o + rs.a, o + rs.b, 1, rs.r0});
+  }
+  m.charge = charge_;
+  m.sv = sv_;
+  m.vol = vol_;
+  for (const Ad4PairParams& pp : pairParams_) m.pairParams.push_back({pp.AC, pp.BD, pp.reqm, pp.m, pp.n});
+  m.pairs.reserve(pairs_.size());
+  for (const Pair& p : pairs_) m.pairs.push_back({p.i, p.j, p.type, p.heavy ? 1 : 0});
+  m.halfSmooth = 0.5 * params_.smooth;
+  m.clashDistance = params_.clashDistance;
+  m.clashBase = params_.clashBase;
+  m.clashK = params_.clashK;
+  m.closureG = params_.closureG;
+  m.elecCoeff = params_.coeffs.elec;
+  m.desolvCoeff = params_.coeffs.desolv;
+  m.rMin = params_.elecMinDistance;
+  return m;
+}
+
 EnergyTerms EnergySystem::evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient,
                                    std::vector<Vec3>* coords, const ExternalTerm* external) const {
   return evaluateT(anglesDeg, gradient, coords, external);

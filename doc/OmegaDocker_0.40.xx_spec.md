@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.56 |
+| 文件版本 | 1.57 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1671,6 +1671,28 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - CUDA 13.0 已移除 sm_70 以下的編譯支援，CUDA 12.9 是支援 TITAN V 的最後一版；本版以 CUDA 12.x 為目標，CUDA 程式碼不得使用需要 sm_75 以上的功能。
 - 已確認 `nvcc -std=c++20 -arch=sm_70 -Xcompiler -fopenmp` 可編譯並在 TITAN V 上執行。
 
+### 15.1.2 CUDA 版：建置與正確性基準（1.57）
+
+- **建置**：CMake 選項 `OD_CUDA`（預設 `OFF`）；`CMAKE_CUDA_ARCHITECTURES` 未指定時為 70；C++20；`OD_STATIC_DEPS=ON` 時連結 `cudart_static`。CUDA 程式碼在 `src/gpu/`，啟用時定義 `OD_HAVE_CUDA`。不啟用時程式與 CPU 版完全相同。
+- **共用的計算函式**（`src/energy_kernel.hpp`）：`EnergySystem::model()` 把 9a 能量系統（7.9）轉成扁平的資料（`EnergyModel`：參考座標、兩面角與移動原子、原子對、閉合項、各原子的電荷與溶劑化參數）。座標建構、單一原子對、單一閉合項、單一兩面角梯度項寫成 `__host__ __device__` 函式，CPU 與 GPU 共用；運算順序與 `EnergySystem::evaluate` 相同，CPU 以這些函式逐一計算的結果與 `evaluate` 逐位元相同（double 與 float，測試）。
+- **GPU 計算**（`GpuEnergy`）：一個樣本一個 thread block（256 執行緒）；座標與每原子梯度放在 global memory；兩面角依序處理（每個兩面角由多個執行緒旋轉其移動原子）；原子對與閉合項分給各執行緒，每原子梯度以 double `atomicAdd` 累加；能量各項以 warp 內加總後再加總各 warp；每個兩面角的梯度由一個 warp 加總。精度分工同 12.1（float 版：座標與逐項計算為 float，加總為 double）。原子數與兩面角數不設上限。
+- **與 CPU 版的差異來源**：加總順序（`atomicAdd` 的順序每次執行可能不同，因此 GPU 結果不保證每次逐位元相同）、FMA（nvcc 預設合併乘加）、CUDA 的 `sinf`／`cosf` 與 glibc 的捨入不同。關閉 FMA（`--fmad=false`）時差異大小不變，主要來源為 float 三角函數與加總順序。
+- **容許誤差**（測試 `gpu: energy and gradient match the CPU reference`；各 64 組兩面角：輸入值，以及加上寬度 5°、10°、…的均勻隨機擾動）：
+  - 能量：各項與 CPU 的差 ÷ max(1, 各項絕對值和)；梯度：差 ÷ max(1, 最大梯度分量)；座標：最大差（Å）。
+  - double：GPU 與 CPU double 的差 < 10⁻¹⁰（能量、梯度、座標）；碰撞原子對數相同。
+  - float：GPU float 與 CPU float 都和 CPU double 比較；GPU 的誤差 ≤ 2 × CPU 的誤差 + 10⁻⁵。即 GPU float 的精度不得明顯差於 CPU float。不直接比較 GPU float 與 CPU float，因為兩者的差和 float 本身的誤差同級，且隨扭轉樹深度與碰撞程度變大。
+- **實測**（TITAN V；對 CPU double 的最大差）：
+
+| 系統 | 兩面角 | 原子對 | GPU double | GPU float／CPU float：能量 | 梯度 | 座標（Å） |
+|---|---|---|---|---|---|---|
+| 1L2Y | 61 | 16,904 | 3.5×10⁻¹³ | 9.7×10⁻⁵／1.5×10⁻⁴ | 9.8×10⁻⁵／1.8×10⁻⁴ | 3.1×10⁻⁵／3.1×10⁻⁵ |
+| 2KJJ（A:10–14 可動，含閉合） | 93 | 79,200 | 9.9×10⁻¹⁴ | 7.6×10⁻⁵／8.1×10⁻⁵ | 1.1×10⁻⁴／9.5×10⁻⁵ | 1.1×10⁻⁵／1.2×10⁻⁵ |
+| 1ZNF（`metalBond = "break"`） | 57 | 31,107 | 5.6×10⁻¹⁴ | 9.5×10⁻⁵／8.3×10⁻⁵ | 1.0×10⁻⁴／9.0×10⁻⁵ | 8.3×10⁻⁶／9.2×10⁻⁶ |
+| 1D3Z | 287 | 274,653 | 3.7×10⁻¹² | 2.0×10⁻²／2.0×10⁻² | 2.3×10⁻²／2.3×10⁻² | 1.4×10⁻³／1.4×10⁻³ |
+
+  - 1D3Z 的 float 誤差較大，是因為最大擾動很大（數百度，嚴重碰撞），float 與 double 的碰撞原子對數差 1（GPU 與 CPU 相同）；GPU 與 CPU 的 float 誤差相同。
+- **速度**（未最佳化的第一版；float、含梯度，不含座標下載；CPU 為 AMD Ryzen 7 9700X 16 執行緒，以 OpenMP 平行計算各樣本）：8192 個樣本時每個樣本 GPU／CPU 為 1L2Y 9.5／32.6 μs（3.4 倍）、2KJJ 40.6／211 μs（5.2 倍）、1ZNF 16.0／61.0 μs（3.8 倍）、1D3Z 62.4／420 μs（6.7 倍）。效能最佳化（依原子數分級，15.1）之後處理。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -1967,3 +1989,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.54 | 2026-10-17 | 實作 `conf9a.minMethod`、`dock9b.minMethod`：`sd`、`cg`、`fire`、`lbfgs`、`adadelta` 共用一個實作，補充各方法細節；`adadelta` 使用 AutoDock-GPU 的變數單位；9a 補充停止條件；對接樣本改為「能量最低的被接受點」（`sd`、`cg`、`lbfgs` 即最後被接受的點）（7.9、8.6、12）；新增 9a、9b 各方法實測 |
 | 1.55 | 2026-10-17 | 修正 9a `adadelta` 實測說明：未通過的原因是預設停止條件（`confMinDeltaE`）使其提早停止，非無法推開碰撞；新增 `confMinDeltaE` 0、`confMinMaxStep` 300 的比較；補充 `adadelta` 步長特性（12） |
 | 1.56 | 2026-10-17 | `conf9a.minMethod` 預設由 `fire` 改為 `lbfgs`（7.9、12、參數表） |
+| 1.57 | 2026-10-18 | CUDA 版第 1 步：`OD_CUDA` 建置選項、CPU／GPU 共用的計算函式（`energy_kernel.hpp`、`EnergySystem::model()`）、GPU 批次能量與梯度（`GpuEnergy`）、CPU／GPU 比對的容許誤差與實測（15.1.2） |

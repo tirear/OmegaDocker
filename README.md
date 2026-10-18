@@ -21,6 +21,8 @@ build/tests/od_tests
 
 `-DOD_STATIC_DEPS=ON` links RDKit, Boost and the OpenMP runtime statically.
 
+`-DOD_CUDA=ON` builds the CUDA back end (CUDA 12.x; `CMAKE_CUDA_ARCHITECTURES` defaults to 70). Set `CMAKE_CUDA_COMPILER` to the `nvcc` to use.
+
 # License
 
 OmegaDocker is licensed under the GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later); see [LICENSE](LICENSE).

@@ -11,6 +11,7 @@
 #include <format>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <fstream>
 #include <numbers>
@@ -20,6 +21,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 #include <omp.h>
@@ -38,6 +40,10 @@
 #include "log.hpp"
 #include "minimize.hpp"
 #include "dssp.hpp"
+#include "energy_kernel.hpp"
+#ifdef OD_HAVE_CUDA
+#include "energy_gpu.hpp"
+#endif
 #include "symrmsd.hpp"
 #include "energy.hpp"
 #include "grid.hpp"
@@ -3857,3 +3863,198 @@ TEST_CASE("checkpoint: SHA-256, binary state and directories") {
   CHECK(std::filesystem::read_symlink(dir / "checkpoint" / "last") == "round_2");
   std::filesystem::remove_all(dir);
 }
+
+namespace {
+
+// Energy systems of the flat-form tests: 1L2Y (MobM), 2KJJ with a free loop
+// (closure virtual atoms), 1ZNF with metalBond = "break" (distance restraints)
+// and 1D3Z (287 torsions).
+struct FlatCase {
+  std::string name;
+  std::unique_ptr<od::EnergySystem> sys;
+};
+
+struct FlatFixture {
+  ConfigFixture cf;
+  StaFixture sf;
+  std::vector<od::Molecule> big;
+  std::vector<od::Topology> bigTopo;
+  std::optional<od::MolConfig> cfgA, cfgZ, cfgBig;
+  od::MolConfig cfgS;
+  std::vector<FlatCase> cases;
+
+  FlatFixture() {
+    std::vector<std::string> errors;
+    std::ofstream(cf.path) << od::defaultMolConfigText(cf.inputs);
+    cfgA = od::readMolConfig(cf.path, cf.inputs, {}, errors);
+    REQUIRE(cfgA);
+    cases.push_back({"1L2Y", std::make_unique<od::EnergySystem>(
+                                 std::vector<od::EnergyPart>{{&cf.mols[0], &cfgA->molecules[0].tree}}, od::EnergyParams{})});
+
+    cfgS = sf.ok(freeResidues(sf.text, "A", 10, 14));
+    cases.push_back({"2KJJ loop", std::make_unique<od::EnergySystem>(
+                                      std::vector<od::EnergyPart>{{&sf.mols[0], &cfgS.molecules[0].tree}}, od::EnergyParams{})});
+
+    cf.mols.push_back(zincFinger());
+    cf.topos.push_back(od::analyzeTopology(cf.mols.back(), {}));
+    od::assignDssp({&cf.mols.back()}, {&cf.topos.back()});
+    cf.inputs.clear();
+    for (std::size_t i = 0; i < cf.mols.size(); ++i) cf.inputs.push_back({&cf.mols[i], &cf.topos[i]});
+    std::ofstream(cf.path) << phi10(setQuoted(uncommentMetal(od::defaultMolConfigText(cf.inputs)),
+                                              "id           = \"mobm:1ZNF.cif:A\"", "metalBond    = ", "break"));
+    cfgZ = od::readMolConfig(cf.path, cf.inputs, {}, errors);
+    REQUIRE(cfgZ);
+    cases.push_back({"1ZNF metal break", std::make_unique<od::EnergySystem>(
+                                             std::vector<od::EnergyPart>{{&cf.mols.back(), &cfgZ->molecules.back().tree}},
+                                             od::EnergyParams{})});
+
+    big.push_back(od::loadMolecules(kData + "/1D3Z.cif", od::Role::MobM, ccd()).front());
+    bigTopo.push_back(od::analyzeTopology(big[0], {}));
+    od::assignDssp({&big[0]}, {&bigTopo[0]});
+    const std::vector<od::MolInput> in{{&big[0], &bigTopo[0]}};
+    std::ofstream(cf.path) << od::defaultMolConfigText(in);
+    cfgBig = od::readMolConfig(cf.path, in, {}, errors);
+    REQUIRE(cfgBig);
+    cases.push_back({"1D3Z", std::make_unique<od::EnergySystem>(
+                                 std::vector<od::EnergyPart>{{&big[0], &cfgBig->molecules[0].tree}}, od::EnergyParams{})});
+  }
+};
+
+// Angle sets: input angles, then perturbations of growing width.
+template <class T>
+std::vector<std::vector<T>> flatAngleSets(const od::EnergySystem& sys, int n) {
+  std::vector<std::vector<T>> out;
+  for (int s = 0; s < n; ++s) {
+    const auto a = s == 0 ? sys.inputAngles() : perturbed(sys.inputAngles(), 5.0 * s, 100 + s);
+    out.emplace_back(a.begin(), a.end());
+  }
+  return out;
+}
+
+std::array<double, 7> termArray(const od::EnergyTerms& e) {
+  return {e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.closure, e.closureMaxDeviation};
+}
+std::array<double, 7> termArray(const od::FlatTerms& e) {
+  return {e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.closure, e.closureMaxDeviation};
+}
+
+}  // namespace
+
+TEST_CASE("energy kernel: flat form equals EnergySystem::evaluate") {
+  FlatFixture f;
+  for (const auto& c : f.cases) {
+    const od::EnergyModel model = c.sys->model();
+    const od::EnergyModelView v = model.view();
+    CHECK(v.torsionCount == c.sys->torsionCount());
+    CHECK(v.pairCount == static_cast<int>(c.sys->pairCount()));
+    std::vector<double> xd(3 * v.coordCount), gd(3 * v.coordCount), gradD(v.torsionCount), grad;
+    std::vector<float> xf(3 * v.coordCount);
+    int mismatches = 0;
+    for (const auto& a : flatAngleSets<double>(*c.sys, 8)) {
+      std::vector<od::Vec3> coords;
+      const auto ref = c.sys->evaluate(a, &grad, &coords);
+      const auto e = od::flat::evaluate(v, a.data(), xd.data(), gd.data(), gradD.data());
+      mismatches += termArray(ref) != termArray(e) || ref.clashPairs != e.clashPairs || grad != gradD;
+      for (int i = 0; i < v.coordCount; ++i)
+        for (int k = 0; k < 3; ++k) mismatches += coords[i][k] != xd[3 * i + k];
+
+      const std::vector<float> af(a.begin(), a.end());
+      std::vector<od::Vec3f> coordsF;
+      const auto refF = c.sys->evaluate(std::span<const float>(af), &grad, &coordsF, nullptr);
+      const auto eF = od::flat::evaluate(v, af.data(), xf.data(), gd.data(), gradD.data());
+      mismatches += termArray(refF) != termArray(eF) || refF.clashPairs != eF.clashPairs || grad != gradD;
+      for (int i = 0; i < v.coordCount; ++i)
+        for (int k = 0; k < 3; ++k) mismatches += coordsF[i][k] != xf[3 * i + k];
+    }
+    INFO(c.name);
+    CHECK(mismatches == 0);
+  }
+}
+
+#ifdef OD_HAVE_CUDA
+namespace {
+
+// Largest differences of one evaluation from a reference: energy terms
+// relative to the sum of their magnitudes, gradient relative to its largest
+// component, coordinates in Å.
+struct EvalDiff {
+  double energy = 0, gradient = 0, coord = 0;
+  void add(const od::EnergyTerms& ref, const std::vector<double>& gRef, const std::vector<od::Vec3>& xRef,
+           const std::array<double, 7>& e, const double* g, auto xAt) {
+    const auto r = termArray(ref);
+    const double scale = std::max(1.0, std::abs(ref.vdw) + std::abs(ref.hbond) + std::abs(ref.elec) + std::abs(ref.desolv) +
+                                           std::abs(ref.clash) + std::abs(ref.closure));
+    for (int k = 0; k < 6; ++k) energy = std::max(energy, std::abs(r[k] - e[k]) / scale);
+    double gMax = 1;
+    for (double v : gRef) gMax = std::max(gMax, std::abs(v));
+    for (std::size_t t = 0; t < gRef.size(); ++t) gradient = std::max(gradient, std::abs(gRef[t] - g[t]) / gMax);
+    for (std::size_t i = 0; i < xRef.size(); ++i)
+      for (int k = 0; k < 3; ++k) coord = std::max(coord, std::abs(xRef[i][k] - xAt(i, k)));
+  }
+};
+
+}  // namespace
+
+// Double: GPU against the CPU double reference. Float: GPU float and CPU
+// float, both against the CPU double reference (spec 12.1).
+TEST_CASE("gpu: energy and gradient match the CPU reference") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  const auto info = od::gpuDeviceInfo(0);
+  MESSAGE(std::format("{} (sm_{}{}), {} MiB", info.name, info.major, info.minor, info.totalMem >> 20));
+  FlatFixture f;
+  constexpr int kSets = 64;
+  for (const auto& c : f.cases) {
+    const od::EnergyModel model = c.sys->model();
+    od::GpuEnergy gpu(model);
+    const int nt = c.sys->torsionCount(), nc = 3 * model.coordCount;
+    const auto sets = flatAngleSets<double>(*c.sys, kSets);
+    std::vector<od::EnergyTerms> ref(kSets);
+    std::vector<std::vector<double>> gRef(kSets);
+    std::vector<std::vector<od::Vec3>> xRef(kSets);
+    for (int s = 0; s < kSets; ++s) ref[s] = c.sys->evaluate(sets[s], &gRef[s], &xRef[s]);
+
+    auto onGpu = [&]<class T>(T, EvalDiff& d, int& clashDiff) {
+      std::vector<T> angles;
+      for (const auto& a : sets) angles.insert(angles.end(), a.begin(), a.end());
+      std::vector<od::FlatTerms> terms(kSets);
+      std::vector<double> grad(static_cast<std::size_t>(kSets) * nt);
+      std::vector<T> coords(static_cast<std::size_t>(kSets) * nc);
+      gpu.evaluate(angles.data(), kSets, terms.data(), grad.data(), coords.data());
+      for (int s = 0; s < kSets; ++s) {
+        const T* x = coords.data() + static_cast<std::size_t>(s) * nc;
+        d.add(ref[s], gRef[s], xRef[s], termArray(terms[s]), grad.data() + static_cast<std::size_t>(s) * nt,
+              [&](std::size_t i, int k) { return static_cast<double>(x[3 * i + k]); });
+        clashDiff += ref[s].clashPairs != terms[s].clashPairs;
+      }
+    };
+    EvalDiff gd, gf, cf;
+    int clashD = 0, clashF = 0, clashCpuF = 0;
+    onGpu(0.0, gd, clashD);
+    onGpu(0.0f, gf, clashF);
+    for (int s = 0; s < kSets; ++s) {
+      const std::vector<float> a(sets[s].begin(), sets[s].end());
+      std::vector<double> g;
+      std::vector<od::Vec3f> x;
+      const auto e = c.sys->evaluate(std::span<const float>(a), &g, &x, nullptr);
+      cf.add(ref[s], gRef[s], xRef[s], termArray(e), g.data(), [&](std::size_t i, int k) { return static_cast<double>(x[i][k]); });
+      clashCpuF += ref[s].clashPairs != e.clashPairs;
+    }
+    MESSAGE(std::format("{}: {} torsions, {} pairs. GPU double: energy {:.1e}, gradient {:.1e}, coord {:.1e} Å. "
+                        "Float vs double, GPU / CPU: energy {:.1e} / {:.1e}, gradient {:.1e} / {:.1e}, coord {:.1e} / {:.1e} Å, "
+                        "clash count {} / {}",
+                        c.name, nt, model.pairs.size(), gd.energy, gd.gradient, gd.coord, gf.energy, cf.energy, gf.gradient,
+                        cf.gradient, gf.coord, cf.coord, clashF, clashCpuF));
+    INFO(c.name);
+    CHECK(clashD == 0);
+    CHECK(gd.energy < 1e-10);
+    CHECK(gd.gradient < 1e-10);
+    CHECK(gd.coord < 1e-10);
+    CHECK(gf.energy <= 2 * cf.energy + 1e-5);
+    CHECK(gf.gradient <= 2 * cf.gradient + 1e-5);
+    CHECK(gf.coord <= 2 * cf.coord + 1e-5);
+  }
+}
+#endif

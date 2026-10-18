@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ad4.hpp"
+#include "energy_kernel.hpp"
 #include "molecule.hpp"
 #include "torsion_tree.hpp"
 
@@ -88,6 +89,8 @@ class EnergySystem {
     bool heavy;          // both heavy atoms: clash penalty applies
   };
   const std::vector<Pair>& pairs() const { return pairs_; }
+  // Flat form for the shared CPU/GPU kernels (energy_kernel.hpp).
+  EnergyModel model() const;
 
  private:
   template <class T>
