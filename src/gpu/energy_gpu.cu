@@ -59,18 +59,24 @@ __device__ inline double warpMax(double v) {
   return v;
 }
 
-// One block of NT threads per sample.
+// One block of NT threads per sample. shared: the coordinates are kept in dynamic shared memory
+// (the gradient stays in global memory: double atomics on shared memory are emulated on sm_70);
+// xs is then only used to return the coordinates (keepX).
 template <class T, bool Dock, int NT>
 __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T* angles, T* xs, double* gs,
                                                            FlatTerms* terms, double* grad, DockView dv,
-                                                           const DockPose* poses, DockTerms* dterms, double* grad6) {
+                                                           const DockPose* poses, DockTerms* dterms, double* grad6,
+                                                           int shared, int keepX) {
   constexpr int kThreads = NT, kWarps = NT / 32;
+  extern __shared__ __align__(16) unsigned char smem[];
   const int s = blockIdx.x;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const std::size_t nc = 3 * static_cast<std::size_t>(m.coordCount);
   const T* ang = angles + static_cast<std::size_t>(s) * m.torsionCount;
-  T* x = xs + s * nc;
-  double* g = grad ? gs + s * nc : nullptr;
+  T* x;
+  double* g;
+  x = shared ? reinterpret_cast<T*>(smem) : xs + s * nc;
+  g = grad ? gs + s * nc : nullptr;
 
   for (std::size_t i = tid; i < nc; i += kThreads) {
     x[i] = static_cast<T>(m.ref[i]);
@@ -102,17 +108,33 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
 
   double e[5] = {0, 0, 0, 0, 0};
   int clashPairs = 0;
-  for (int p = tid; p < m.pairCount; p += kThreads) {
+  // Warp w takes pairs base + lane. The pairs are sorted by i: the i contributions of a warp are
+  // summed per i (segmented shuffle sum) and added once by the first lane of each segment.
+  for (int base = warp * 32; base < m.pairCount; base += kThreads) {
+    const int p = base + lane;
     T d[3], r, dedr;
-    if (!flat::pairTerm(m, p, x, e, clashPairs, d, r, dedr)) continue;
-    if (!g || r <= 0) continue;
-    const T f = dedr / r;
-    const FlatPair& pr = m.pairs[p];
-    for (int c = 0; c < 3; ++c) {
-      const double v = f * d[c];
-      atomicAdd(g + 3 * pr.i + c, v);
-      atomicAdd(g + 3 * pr.j + c, -v);
+    const bool ok = p < m.pairCount && flat::pairTerm(m, p, x, e, clashPairs, d, r, dedr);
+    if (!g) continue;
+    double v[3] = {0, 0, 0};
+    const int key = p < m.pairCount ? m.pairs[p].i : -1;
+    if (ok && r > 0) {
+      const T f = dedr / r;
+      const int j = m.pairs[p].j;
+      for (int c = 0; c < 3; ++c) {
+        v[c] = f * d[c];
+        atomicAdd(g + 3 * j + c, -v[c]);
+      }
     }
+    for (int o = 1; o < 32; o *= 2) {
+      const int k = __shfl_down_sync(0xffffffffu, key, o);
+      double nv[3];
+      for (int c = 0; c < 3; ++c) nv[c] = __shfl_down_sync(0xffffffffu, v[c], o);
+      if (lane + o < 32 && k == key)
+        for (int c = 0; c < 3; ++c) v[c] += nv[c];
+    }
+    const int prev = __shfl_up_sync(0xffffffffu, key, 1);
+    if (key >= 0 && (lane == 0 || prev != key) && (v[0] != 0 || v[1] != 0 || v[2] != 0))
+      for (int c = 0; c < 3; ++c) atomicAdd(g + 3 * key + c, v[c]);
   }
   double closure = 0, maxDev = 0;
   for (int c = tid; c < m.closureCount; c += kThreads) {
@@ -171,6 +193,9 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
       if (grad6)
         for (int i = 0; i < 6; ++i) grad6[static_cast<std::size_t>(s) * 6 + i] = r[11 + i];
     }
+  }
+  if (shared && keepX) {
+    for (std::size_t i = tid; i < nc; i += kThreads) xs[s * nc + i] = x[i];
   }
   if (!g) return;
 
@@ -306,14 +331,45 @@ int blockThreads(const EnergyModelView& m, int probes) {
   return nt;
 }
 
+// Largest dynamic shared memory per block (opt-in).
+int sharedLimit() {
+  static const int limit = [] {
+    int dev = 0, v = 0;
+    cudaGetDevice(&dev);
+    if (cudaDeviceGetAttribute(&v, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) {
+      cudaGetLastError();
+      v = 48 * 1024;
+    }
+    return v;
+  }();
+  return limit;
+}
+// Dynamic shared memory for the coordinates of one sample; 0: they do not fit.
+template <class T>
+std::size_t sharedBytes(const EnergyModelView& m) {
+  const std::size_t b = 3 * static_cast<std::size_t>(m.coordCount) * sizeof(T);
+  return b <= static_cast<std::size_t>(sharedLimit()) - 4096 ? b : 0;  // the kernel's own shared memory
+}
+
+template <class T, bool Dock, int NT>
+void launchNT(int n, std::size_t shm, bool keepX, const EnergyModelView& m, const T* angles, T* xs, double* gs,
+              FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms, double* grad6) {
+  if (shm > 48 * 1024)
+    check(cudaFuncSetAttribute(evaluateKernel<T, Dock, NT>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shm)),
+          "cudaFuncSetAttribute");
+  evaluateKernel<T, Dock, NT><<<n, NT, shm>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6, shm ? 1 : 0,
+                                              keepX ? 1 : 0);
+}
+
 template <class T, bool Dock>
-void launch(int threads, int n, const EnergyModelView& m, const T* angles, T* xs, double* gs, FlatTerms* terms,
-            double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms, double* grad6) {
+void launch(int threads, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const T* angles, T* xs,
+            double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms,
+            double* grad6) {
   switch (threads) {
-    case 32: evaluateKernel<T, Dock, 32><<<n, 32>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
-    case 64: evaluateKernel<T, Dock, 64><<<n, 64>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
-    case 128: evaluateKernel<T, Dock, 128><<<n, 128>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
-    default: evaluateKernel<T, Dock, 256><<<n, 256>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 32: launchNT<T, Dock, 32>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 64: launchNT<T, Dock, 64>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 128: launchNT<T, Dock, 128>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    default: launchNT<T, Dock, 256>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
   }
 }
 
@@ -369,9 +425,10 @@ struct GpuEnergy::Impl {
     const std::size_t inBytes = align8(nn * nt * sizeof(T));
     const std::size_t oTerms = 0, oGrad = align8(nn * sizeof(FlatTerms));
     const std::size_t outBytes = oGrad + (hGrad ? nn * nt * sizeof(double) : 0);
+    const std::size_t shm = sharedBytes<T>(view);
     in.reserve(std::max<std::size_t>(8, inBytes));
     out.reserve(outBytes);
-    xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(T));
+    if (!shm || hCoords) xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(T));
     if (hGrad) gs.reserve(std::max<std::size_t>(1, nn * nc));
     hIn.reserve(std::max<std::size_t>(8, inBytes));
     hOut.reserve(outBytes);
@@ -379,7 +436,8 @@ struct GpuEnergy::Impl {
       std::copy_n(hAngles, nn * nt, reinterpret_cast<T*>(hIn.p));
       check(cudaMemcpy(in.p, hIn.p, inBytes, cudaMemcpyHostToDevice), "upload");
     }
-    launch<T, false>(blockThreads(view, 0), n, view, reinterpret_cast<const T*>(in.p), reinterpret_cast<T*>(xs.p),
+    launch<T, false>(blockThreads(view, 0), n, shm, hCoords != nullptr, view, reinterpret_cast<const T*>(in.p),
+                     reinterpret_cast<T*>(xs.p),
                      hGrad ? gs.p : nullptr, reinterpret_cast<FlatTerms*>(out.p + oTerms),
                      hGrad ? reinterpret_cast<double*>(out.p + oGrad) : nullptr, DockView{}, nullptr, nullptr, nullptr);
     check(cudaGetLastError(), "evaluateKernel launch");
@@ -400,9 +458,10 @@ struct GpuEnergy::Impl {
     const std::size_t oTerms = 0, oDterms = align8(nn * sizeof(FlatTerms)), oGrad6 = oDterms + align8(nn * sizeof(DockTerms)),
                       oGrad = oGrad6 + nn * 6 * sizeof(double);
     const std::size_t outBytes = hGrad ? oGrad + nn * nt * sizeof(double) : oGrad6;
+    const std::size_t shm = sharedBytes<float>(view);
     in.reserve(inBytes);
     out.reserve(outBytes);
-    xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(float));
+    if (!shm) xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(float));
     if (hGrad) gs.reserve(std::max<std::size_t>(1, nn * nc));
     hIn.reserve(inBytes);
     hOut.reserve(outBytes);
@@ -411,7 +470,7 @@ struct GpuEnergy::Impl {
     check(cudaMemcpy(in.p, hIn.p, inBytes, cudaMemcpyHostToDevice), "upload");
     DockView dv = dock;
     dv.field = f.view;
-    launch<float, true>(blockThreads(view, dv.probeCount), n, view, reinterpret_cast<const float*>(in.p),
+    launch<float, true>(blockThreads(view, dv.probeCount), n, shm, false, view, reinterpret_cast<const float*>(in.p),
                         reinterpret_cast<float*>(xs.p), hGrad ? gs.p : nullptr, reinterpret_cast<FlatTerms*>(out.p + oTerms),
                         hGrad ? reinterpret_cast<double*>(out.p + oGrad) : nullptr, dv,
                         reinterpret_cast<const DockPose*>(in.p + iPoses), reinterpret_cast<DockTerms*>(out.p + oDterms),

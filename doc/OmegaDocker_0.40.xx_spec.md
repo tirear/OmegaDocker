@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.60 |
+| 文件版本 | 1.61 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1679,7 +1679,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - **建置**：CMake 選項 `OD_CUDA`（預設 `OFF`）；`CMAKE_CUDA_ARCHITECTURES` 未指定時為 70；C++20；`OD_STATIC_DEPS=ON` 時連結 `cudart_static` 與 `cufft_static_nocallback`（不需 device link），否則 `cudart` 與 `cufft`。CUDA 程式碼在 `src/gpu/`，啟用時定義 `OD_HAVE_CUDA`。不啟用時程式與 CPU 版完全相同。
 - **共用的計算函式**（`src/energy_kernel.hpp`）：`EnergySystem::model()` 把 9a 能量系統（7.9）轉成扁平的資料（`EnergyModel`：參考座標、兩面角與移動原子、原子對、閉合項、各原子的電荷與溶劑化參數）。座標建構、單一原子對、單一閉合項、單一兩面角梯度項寫成 `__host__ __device__` 函式，CPU 與 GPU 共用；運算順序與 `EnergySystem::evaluate` 相同，CPU 以這些函式逐一計算的結果與 `evaluate` 逐位元相同（double 與 float，測試）。
-- **GPU 計算**（`GpuEnergy`）：一個樣本一個 thread block（256 執行緒）；座標與每原子梯度放在 global memory；兩面角依序處理（每個兩面角由多個執行緒旋轉其移動原子）；原子對與閉合項分給各執行緒，每原子梯度以 double `atomicAdd` 累加；能量各項以 warp 內加總後再加總各 warp；每個兩面角的梯度由一個 warp 加總。精度分工同 12.1（float 版：座標與逐項計算為 float，加總為 double）。原子數與兩面角數不設上限。
+- **GPU 計算**（`GpuEnergy`）：一個樣本一個 thread block（256 執行緒）；座標放在 shared memory（放不下時放在 global memory），每原子梯度放在 global memory（sm_70 的 shared memory double atomic 為軟體模擬，較慢）；兩面角依序處理（每個兩面角由多個執行緒旋轉其移動原子）；原子對與閉合項分給各執行緒，每原子梯度以 double `atomicAdd` 累加（原子對依 i 排序，每個 warp 先把同一 i 的貢獻以 shuffle 分段加總，每段只做一次 `atomicAdd`；j 端逐對 `atomicAdd`）；能量各項以 warp 內加總後再加總各 warp；每個兩面角的梯度由一個 warp 加總。精度分工同 12.1（float 版：座標與逐項計算為 float，加總為 double）。原子數與兩面角數不設上限。
 - **與 CPU 版的差異來源**：加總順序（`atomicAdd` 的順序每次執行可能不同，因此 GPU 結果不保證每次逐位元相同）、FMA（nvcc 預設合併乘加）、CUDA 的 `sinf`／`cosf` 與 glibc 的捨入不同。關閉 FMA（`--fmad=false`）時差異大小不變，主要來源為 float 三角函數與加總順序。
 - **容許誤差**（測試 `gpu: energy and gradient match the CPU reference`；各 64 組兩面角：輸入值，以及加上寬度 5°、10°、…的均勻隨機擾動）：
   - 能量：各項與 CPU 的差 ÷ max(1, 各項絕對值和)；梯度：差 ÷ max(1, 最大梯度分量)；座標：最大差（Å）。
@@ -1767,7 +1767,26 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | posm2_fft 相關計算（1L2Y，40 Å 盒子） | `rotStep` 30，9,216 個定向，108³ | — | 9.8 s（direct）／11.4 s（fft） |
 | posm2_fft 整個 9b（BTN，含最小化） | `rotStep` 15、`fftTopPerRot` 2 | 252.2 s | 20.4 s |
 
-- **未改善的部分**：posm3／posm4 的小分子（BTN，L2poss 約 80 萬）整個 9b 在 GPU 上反而較慢（CPU 42.9 s，GPU 約 71 s）：GPU 核心只佔 5.9 s，其餘為主機端的最小化控制（協程切換、請求的打包與解包）。留待核心與主機端最佳化處理。
+- **未改善的部分**：posm3／posm4 的小分子（BTN，L2poss 約 80 萬）整個 9b 在 GPU 上仍較慢（同一時段連續測：CPU 21.0 s，GPU 28.1 s；1.60 記載的 42.9 s／約 71 s 是在機器有其他負載時測得，數值不正確）：GPU 核心只佔一小部分，其餘為主機端的最小化控制（協程切換、請求的打包與解包）。留待主機端最佳化處理。
+
+### 15.1.6 CUDA 版：核心最佳化（1.61）
+
+- **座標放在 shared memory**：每個樣本的座標（3 × 原子數，含虛擬原子）放在動態 shared memory，上限為裝置的 opt-in 上限減 4 KiB（TITAN V：96 KiB，float 約 7,900 個原子、double 約 3,900 個）；超過時退回 global memory。需要回傳座標時（9a 的 `coords`）在最後複製到 global memory。梯度仍放在 global memory。
+- **原子對梯度的 i 端**：原子對依 i 排序，warp 的第 k 個執行緒處理第 base + k 對；同一 i 的貢獻以 `__shfl_down_sync` 分段加總後，每段做一次 `atomicAdd`。j 端仍逐對 `atomicAdd`（同一 warp 內 j 各不相同，沒有同位址衝突）。
+- **測過但未採用**：每個 warp 處理連續一段原子對、同一 i 跨迴圈累加（比上述慢約 10%）；梯度也放在 shared memory（sm_70 無原生 shared double atomic，慢約 2 倍）。
+- **結果**：double 版與 CPU 的差不變（≤ 3.7×10⁻¹²），float 版的誤差範圍不變；GPU 結果仍因 `atomicAdd` 順序而不保證每次逐位元相同。
+- **速度**（TITAN V；單次呼叫的平均）：
+
+| 項目 | 1.60 | 座標放在 shared memory | + i 端分段加總 |
+|---|---|---|---|
+| 9a double，1L2Y（304 座標，16,904 對），每樣本 | — | 4.89 µs | 3.20 µs |
+| 9a double，2KJJ 環區（795 座標，79,200 對），每樣本 | — | 19.66 µs | 12.66 µs |
+| 9a double，1D3Z（1,231 座標，274,653 對），每樣本 | — | 42.49 µs | 32.08 µs |
+| 9b float，1L2Y，`grid.mode = full`，每姿勢 | — | 5.20 µs | 3.15 µs |
+| 9b 姿勢核心合計（2KJJ + 1L2Y，posm1，5,000 樣本，4 × 4 配對） | 30.0 s | 15.9 s | 11.1 s |
+| 同上，整個 9b | 42.0 s | 22.4 s | 19.9 s |
+
+  （「—」：1.60 時未以此方式單獨量測。）
 
 ### 15.2 依賴套件
 
@@ -2069,3 +2088,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.58 | 2026-10-18 | CUDA 版第 2 步：9a 最小化以 GPU 計算能量與梯度（`ConfEvaluator`、協程批次最小化 `minimizeTorsionsBatch`）；新增 `gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`，可在 `--resume` 時修改；正確性對照與實測（15.1.3、16、14） |
 | 1.59 | 2026-10-18 | CUDA 版第 3 步：9b 最小化以 GPU 計算姿勢能量與梯度（`field_kernel.hpp`、`dock_kernel.hpp`、`GpuField`、`GpuPoseEvaluator`）；`MobmDocker::dockPairs` 合併同一 StaM 構型的所有配對；協程排程 `runBatched` 改為多執行緒；GPU 核心 block 大小依系統選擇、每次呼叫各一次傳輸；新增 `gpu.dock9bBatchNum`（15.1.3、15.1.4、16、14） |
 | 1.60 | 2026-10-19 | CUDA 版第 4 步：8.5 快速篩選在 GPU（與 CPU 結果完全相同；posm2 的 L1poss 在 GPU 產生）；posm2_fft 在 GPU（direct 頻譜或 cuFFT、批次 C2R、平行選擇）；`PoseEvaluator` 的可選介面、`GpuDockPrep`；靜態版改連 `cufft_static_nocallback`（8.4.3、15.1、15.1.4、15.1.5、15.3.1） |
+| 1.61 | 2026-10-19 | CUDA 核心最佳化：座標放在 shared memory、原子對梯度的 i 端以 warp 分段加總（15.1.2、15.1.6）；更正 1.60 中 posm3 的 CPU／GPU 時間（15.1.5） |
