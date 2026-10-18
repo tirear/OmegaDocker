@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.62 |
+| 文件版本 | 1.63 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1767,7 +1767,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | posm2_fft 相關計算（1L2Y，40 Å 盒子） | `rotStep` 30，9,216 個定向，108³ | — | 9.8 s（direct）／11.4 s（fft） |
 | posm2_fft 整個 9b（BTN，含最小化） | `rotStep` 15、`fftTopPerRot` 2 | 252.2 s | 20.4 s |
 
-- **未改善的部分**：posm3／posm4 的小分子（BTN，L2poss 約 80 萬）整個 9b 在 GPU 上仍較慢（同一時段連續測：CPU 21.0 s，GPU 28.1 s；1.60 記載的 42.9 s／約 71 s 是在機器有其他負載時測得，數值不正確）：GPU 核心只佔一小部分，其餘為主機端的最小化控制（協程切換、請求的打包與解包）。留待主機端最佳化處理。
+- **未改善的部分**：posm3／posm4 的小分子（BTN，L2poss 約 80 萬）整個 9b 在 GPU 上仍較慢（同一時段連續測：CPU 21.0 s，GPU 28.1 s；1.60 記載的 42.9 s／約 71 s 是在機器有其他負載時測得，數值不正確）：GPU 核心只佔一小部分，其餘為主機端的最小化控制（協程切換、請求的打包與解包）。1.63 以 CPU／GPU 重疊改善（15.1.8）。
 
 ### 15.1.6 CUDA 版：核心最佳化（1.61）
 
@@ -1812,6 +1812,25 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 9b float，1L2Y，`delta`，每姿勢 | 2.70 µs | 2.56 µs |
 
 - **測試分子的原子數**：除 BTN 等小分子外，測試用的生物分子都超過 256 個座標（含虛擬原子）：1L2Y 304、1ZNF 424、2KJJ 環區 795、1D3Z 1,231。核心沒有原子數上限；座標與 cos、sin 在 TITAN V 上 float 約 7,900 個、double 約 3,900 個座標以內放在 shared memory。
+
+### 15.1.8 CUDA 版：9b 的 CPU／GPU 重疊（1.63）
+
+- **原因**：`runBatched` 交替兩個階段：序列的 flush（打包請求、GPU 計算、解包）時其他 OpenMP 執行緒等待；平行恢復協程時 GPU 閒置。posm3、BTN（2KJJ，30 Å，4 × 4 配對）：flush 12.8 s（其中 GPU 核心 6.1 s、資料複製 2.0 s、序列打包／解包約 2.8 s），恢復 13.2 s。Nsight Systems 的 CPU 取樣中約 45% 在 libgomp 等待。
+- **做法**：
+  - `runBatchedAsync`（`src/fiber_batch.hpp`）：協程的 slot 分成連續的 `groups` 組；依序對每組：等待其計算完成（`complete`）、平行恢復其協程、送出下一次計算（`submit`）。一組的協程在 CPU 上執行時，其他組在 GPU 上計算。任何一組失敗時，先完成所有已送出的計算再拋出例外。
+  - `PoseEvaluator` 新增可選的 `lanes()`、`submit`、`complete`；`lanes() = 1`（預設，例如 CPU 版）時沿用 `runBatched`。`GpuPoseEvaluator` 使用 2 條 lane（`GpuEnergy::kLanes`）：每條 lane 有自己的工作記憶體、pinned 主機記憶體與 CUDA stream，上傳、核心、下載都是非同步。`evaluateDock` 為 lane 0 的 submit + complete。
+  - 打包與解包（請求轉 float、結果轉回、梯度重排）以 OpenMP 平行。
+  - 每組的請求數約為 `gpu.dock9bBatchNum` 的一半（總工作記憶體不變）。
+- **結果**：每個樣本的計算只取決於自己的請求，與分組無關；CPU 版輸出與 1.62 逐位元相同（posm1、posm3 已比對所有輸出檔與檢查點）。CPU 測試用的 evaluator 以 1、2、3 條 lane 執行，結果與不分批的 CPU 路徑逐位元相同。
+- **速度**（整個 9b，舊版、新版交替各執行 2 次，2KJJ 為 StaM，4 × 4 配對）：
+
+| 設定 | 1.62 | 1.63 |
+|---|---|---|
+| posm3，BTN，30 Å（CPU 版 21.0 s） | 27.3／26.9 s | 18.1／19.9 s |
+| posm2_fft，BTN，30 Å，`rotStep` 15、`fftTopPerRot` 2 | 10.1／9.9 s | 8.1／8.1 s |
+| posm1，1L2Y，64 Å，`posm1SampleNum` 5000 | 11.0／11.1 s | 8.6／8.5 s |
+
+- **尚未處理**：9a 的批次最小化（`minimizeTorsionsBatch`、`GpuConfEvaluator`）仍為同步 flush。
 
 ### 15.2 依賴套件
 
@@ -2115,3 +2134,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.60 | 2026-10-19 | CUDA 版第 4 步：8.5 快速篩選在 GPU（與 CPU 結果完全相同；posm2 的 L1poss 在 GPU 產生）；posm2_fft 在 GPU（direct 頻譜或 cuFFT、批次 C2R、平行選擇）；`PoseEvaluator` 的可選介面、`GpuDockPrep`；靜態版改連 `cufft_static_nocallback`（8.4.3、15.1、15.1.4、15.1.5、15.3.1） |
 | 1.61 | 2026-10-19 | CUDA 核心最佳化：座標放在 shared memory、原子對梯度的 i 端以 warp 分段加總（15.1.2、15.1.6）；更正 1.60 中 posm3 的 CPU／GPU 時間（15.1.5） |
 | 1.62 | 2026-10-19 | CUDA 核心最佳化（二）：`ad4VdwHb` 展開 12-6／12-10 的乘法、兩面角 cos／sin 平行預先計算（結果逐位元不變）；記錄 Nsight Compute 分析、未採用的嘗試與同一時段的量測（15.1.7） |
+| 1.63 | 2026-10-19 | 9b 的 CPU／GPU 重疊：`runBatchedAsync`、`PoseEvaluator` 的非同步介面、`GpuEnergy` 的 2 條 lane（各自的 stream 與工作記憶體）、平行打包與解包（15.1.5、15.1.8） |

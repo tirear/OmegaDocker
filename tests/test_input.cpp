@@ -2960,13 +2960,36 @@ struct FieldSet {
   }
 };
 
-// PoseEvaluator on the CPU (MobmDocker::evaluate), recording the batch sizes.
+// PoseEvaluator on the CPU (MobmDocker::evaluate), recording the batch sizes; with nLanes > 1
+// the asynchronous form (submit evaluates, complete returns the stored results).
 struct CpuPoseEvaluator : od::PoseEvaluator {
   const od::MobmDocker* dk = nullptr;
   const od::MobmDocker::Conf* conf = nullptr;
-  int batch, largest = 0, binds = 0;
-  explicit CpuPoseEvaluator(int b) : batch(b) {}
+  int batch, nLanes, largest = 0, binds = 0;
+  struct Done {
+    bool pending = false;
+    std::vector<od::MobmDocker::PoseEnergy> out;
+    std::vector<double> grad;
+  };
+  std::vector<Done> done;
+  explicit CpuPoseEvaluator(int b, int l = 1) : batch(b), nLanes(l), done(l) {}
   int maxBatch() const override { return batch; }
+  int lanes() const override { return nLanes; }
+  void submit(int lane, int n, const od::PoseRequest* req) override {
+    Done& d = done[lane];
+    REQUIRE_FALSE(d.pending);
+    d.pending = true;
+    d.out.resize(n);
+    d.grad.resize(n * (6 + dk->sys().torsionCount()));
+    evaluate(n, req, d.out.data(), d.grad.data());
+  }
+  void complete(int lane, od::MobmDocker::PoseEnergy* out, double* grad) override {
+    Done& d = done[lane];
+    REQUIRE(d.pending);
+    d.pending = false;
+    std::copy(d.out.begin(), d.out.end(), out);
+    std::copy(d.grad.begin(), d.grad.end(), grad);
+  }
   void bind(const od::MobmDocker& d) override {
     dk = &d;
     ++binds;
@@ -3067,25 +3090,29 @@ TEST_CASE("dock9b: batched minimization with a PoseEvaluator equals the CPU path
     const auto sa = dk.dockPair(fs.x.mobSys->inputAngles(), 5, 16, [&](std::vector<od::DockSample>& ch) {
       a.insert(a.end(), ch.begin(), ch.end());
     });
-    CpuPoseEvaluator ev(7);
-    od::Dock9bParams pe = fs.p;
-    pe.evaluator = &ev;
-    const od::MobmDocker dke(*fs.x.mobSys, field, pe);
-    const auto sb = dke.dockPair(fs.x.mobSys->inputAngles(), 5, 16, [&](std::vector<od::DockSample>& ch) {
-      b.insert(b.end(), ch.begin(), ch.end());
-    });
-    CHECK(sa.l2 > 0);
-    CHECK(sa.l2 == sb.l2);
-    CHECK(sa.steps == sb.steps);
-    CHECK(sa.evaluations == sb.evaluations);
-    CHECK(sa.leftGrid == sb.leftGrid);
-    CHECK(ev.largest == 7);
-    CHECK(ev.binds == static_cast<int>((sa.l2 + 15) / 16));
-    REQUIRE(a.size() == b.size());
-    int diff = 0;
-    for (std::size_t i = 0; i < a.size(); ++i)
-      diff += a[i].energy != b[i].energy || a[i].angles != b[i].angles || a[i].pose.t != b[i].pose.t || a[i].steps != b[i].steps;
-    CHECK(diff == 0);
+    for (int lanes : {1, 2, 3}) {
+      INFO("lanes ", lanes);
+      b.clear();
+      CpuPoseEvaluator ev(7, lanes);
+      od::Dock9bParams pe = fs.p;
+      pe.evaluator = &ev;
+      const od::MobmDocker dke(*fs.x.mobSys, field, pe);
+      const auto sb = dke.dockPair(fs.x.mobSys->inputAngles(), 5, 16, [&](std::vector<od::DockSample>& ch) {
+        b.insert(b.end(), ch.begin(), ch.end());
+      });
+      CHECK(sa.l2 > 0);
+      CHECK(sa.l2 == sb.l2);
+      CHECK(sa.steps == sb.steps);
+      CHECK(sa.evaluations == sb.evaluations);
+      CHECK(sa.leftGrid == sb.leftGrid);
+      CHECK(ev.largest == (7 + lanes - 1) / lanes);
+      CHECK(ev.binds == static_cast<int>((sa.l2 + 15) / 16));
+      REQUIRE(a.size() == b.size());
+      int diff = 0;
+      for (std::size_t i = 0; i < a.size(); ++i)
+        diff += a[i].energy != b[i].energy || a[i].angles != b[i].angles || a[i].pose.t != b[i].pose.t || a[i].steps != b[i].steps;
+      CHECK(diff == 0);
+    }
   }
 }
 
@@ -3108,26 +3135,85 @@ TEST_CASE("dock9b: dockPairs delivers the chunks of sequential dockPair calls") 
   std::vector<od::Dock9bStats> refStats;
   const od::MobmDocker dk(*fs.x.mobSys, field, fs.p);
   for (int j = 0; j < 4; ++j) refStats.push_back(dk.dockPair(angles[j], 11 + j, 5, record(ref, j)));
-  CpuPoseEvaluator ev(9);
-  od::Dock9bParams pe = fs.p;
-  pe.evaluator = &ev;
-  const od::MobmDocker dke(*fs.x.mobSys, field, pe);
-  std::vector<od::MobmDocker::PairJob> jobs(4);
-  for (int j = 0; j < 4; ++j) {
-    jobs[j].mobAnglesDeg = angles[j];
-    jobs[j].stream = 11 + j;
-    jobs[j].sink = record(got, j);
+  for (int lanes : {1, 2}) {
+    INFO("lanes ", lanes);
+    got.clear();
+    CpuPoseEvaluator ev(9, lanes);
+    od::Dock9bParams pe = fs.p;
+    pe.evaluator = &ev;
+    const od::MobmDocker dke(*fs.x.mobSys, field, pe);
+    std::vector<od::MobmDocker::PairJob> jobs(4);
+    for (int j = 0; j < 4; ++j) {
+      jobs[j].mobAnglesDeg = angles[j];
+      jobs[j].stream = 11 + j;
+      jobs[j].sink = record(got, j);
+    }
+    dke.dockPairs(jobs, 5);
+    CHECK(ref.size() > 4);
+    CHECK(got == ref);
+    for (int j = 0; j < 4; ++j) {
+      CHECK(jobs[j].stats.l2 == refStats[j].l2);
+      CHECK(jobs[j].stats.steps == refStats[j].steps);
+      CHECK(jobs[j].stats.leftGrid == refStats[j].leftGrid);
+      CHECK(jobs[j].stats.overlap == refStats[j].overlap);
+    }
+    CHECK(ev.largest == (9 + lanes - 1) / lanes);
   }
-  dke.dockPairs(jobs, 5);
-  CHECK(ref.size() > 4);
-  CHECK(got == ref);
-  for (int j = 0; j < 4; ++j) {
-    CHECK(jobs[j].stats.l2 == refStats[j].l2);
-    CHECK(jobs[j].stats.steps == refStats[j].steps);
-    CHECK(jobs[j].stats.leftGrid == refStats[j].leftGrid);
-    CHECK(jobs[j].stats.overlap == refStats[j].overlap);
+}
+
+TEST_CASE("runBatchedAsync: every task completes; submit and complete alternate per group") {
+  for (int groups : {1, 2, 3}) {
+    INFO("groups ", groups);
+    constexpr int kCount = 50, kActive = 8;
+    std::vector<int> req(kActive), res(kActive), out(kCount, -1);
+    std::vector<int> pending(groups, 0), submits(groups, 0);
+    std::vector<std::vector<int>> inFlight(groups);
+    bool ok = true;
+    od::runBatchedAsync(
+        kCount, kActive, groups,
+        [&](int i, int slot) {
+          int v = i;
+          for (int k = 0; k < i % 5; ++k) {
+            req[slot] = v;
+            od::batchWait();
+            v = res[slot];
+          }
+          out[i] = v;
+        },
+        [&](int g, std::span<const int> slots) {
+          ok = ok && !pending[g];
+          pending[g] = 1;
+          ++submits[g];
+          inFlight[g].clear();
+          for (int s : slots) {
+            ok = ok && kActive * g / groups <= s && s < kActive * (g + 1) / groups;  // contiguous groups
+            inFlight[g].push_back(req[s] + 1000);
+          }
+          inFlight[g].insert(inFlight[g].begin(), slots.begin(), slots.end());
+        },
+        [&](int g) {
+          ok = ok && pending[g];
+          pending[g] = 0;
+          const std::size_t n = inFlight[g].size() / 2;
+          for (std::size_t k = 0; k < n; ++k) res[inFlight[g][k]] = inFlight[g][n + k];
+        });
+    CHECK(ok);
+    for (int g = 0; g < groups; ++g) CHECK(pending[g] == 0);
+    for (int i = 0; i < kCount; ++i) CHECK(out[i] == i + 1000 * (i % 5));
+    if (groups > 1) CHECK(submits[1] > 0);
   }
-  CHECK(ev.largest == 9);
+  // A failing task: pending evaluations are completed before the exception is rethrown.
+  int pendingCount = 0;
+  CHECK_THROWS_AS(od::runBatchedAsync(
+                      20, 6, 2,
+                      [&](int i, int) {
+                        od::batchWait();
+                        if (i == 7) throw od::Error("task failed");
+                        od::batchWait();
+                      },
+                      [&](int, std::span<const int>) { ++pendingCount; }, [&](int) { --pendingCount; }),
+                  od::Error);
+  CHECK(pendingCount == 0);
 }
 
 TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {

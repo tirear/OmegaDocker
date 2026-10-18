@@ -17,6 +17,14 @@ namespace od {
 // must only write data of its own index or slot. An exception of a task is rethrown by runBatched.
 void runBatched(int count, int maxActive, const std::function<void(int index, int slot)>& task,
                 const std::function<void(std::span<const int> slots)>& flush);
+// Pipelined form (spec 15.1.8): the slots are split into `groups` contiguous groups. For each
+// group in turn: complete(group) waits for its evaluation and stores the results, its tasks are
+// resumed, then submit(group, slots) starts the evaluation of its waiting slots (ascending), so the
+// tasks of one group run while the others are evaluated. submit and complete are called on the
+// calling thread; every submit is followed by one complete of the same group, also on failure.
+void runBatchedAsync(int count, int maxActive, int groups, const std::function<void(int index, int slot)>& task,
+                     const std::function<void(int group, std::span<const int> slots)>& submit,
+                     const std::function<void(int group)>& complete);
 // Suspends the calling task until its request has been flushed.
 void batchWait();
 

@@ -361,24 +361,25 @@ std::size_t sharedBytes(const EnergyModelView& m) {
 }
 
 template <class T, bool Dock, int NT>
-void launchNT(int n, std::size_t shm, bool keepX, const EnergyModelView& m, const T* angles, T* xs, double* gs,
-              FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms, double* grad6) {
+void launchNT(cudaStream_t st, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const T* angles, T* xs,
+              double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms,
+              double* grad6) {
   if (shm > 48 * 1024)
     check(cudaFuncSetAttribute(evaluateKernel<T, Dock, NT>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shm)),
           "cudaFuncSetAttribute");
-  evaluateKernel<T, Dock, NT><<<n, NT, shm>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6, shm ? 1 : 0,
-                                              keepX ? 1 : 0);
+  evaluateKernel<T, Dock, NT><<<n, NT, shm, st>>>(m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6, shm ? 1 : 0,
+                                                  keepX ? 1 : 0);
 }
 
 template <class T, bool Dock>
-void launch(int threads, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const T* angles, T* xs,
-            double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms,
-            double* grad6) {
+void launch(cudaStream_t st, int threads, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const T* angles,
+            T* xs, double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses,
+            DockTerms* dterms, double* grad6) {
   switch (threads) {
-    case 32: launchNT<T, Dock, 32>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
-    case 64: launchNT<T, Dock, 64>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
-    case 128: launchNT<T, Dock, 128>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
-    default: launchNT<T, Dock, 256>(n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 32: launchNT<T, Dock, 32>(st, n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 64: launchNT<T, Dock, 64>(st, n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    case 128: launchNT<T, Dock, 128>(st, n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
+    default: launchNT<T, Dock, 256>(st, n, shm, keepX, m, angles, xs, gs, terms, grad, dv, poses, dterms, grad6); break;
   }
 }
 
@@ -407,6 +408,33 @@ struct PinnedBuf {
 
 constexpr std::size_t align8(std::size_t b) { return (b + 7) & ~std::size_t(7); }
 
+// Work memory and stream of one lane (spec 15.1.8): inputs and outputs are each one contiguous
+// block (one copy per call).
+struct Lane {
+  DevBuf<char> in, out, xs;
+  DevBuf<double> gs;
+  PinnedBuf hIn, hOut;
+  cudaStream_t stream = nullptr;
+  // Pending dock evaluation.
+  std::size_t n = 0, outBytes = 0, oDterms = 0, oGrad6 = 0, oGrad = 0;
+  bool grad = false, pending = false;
+
+  Lane() = default;
+  Lane(const Lane&) = delete;
+  Lane& operator=(const Lane&) = delete;
+  ~Lane() {
+    if (stream) cudaStreamDestroy(stream);
+  }
+  void release() {
+    in.release();
+    out.release();
+    xs.release();
+    gs.release();
+    hIn.release();
+    hOut.release();
+  }
+};
+
 }  // namespace
 
 struct GpuEnergy::Impl {
@@ -418,10 +446,7 @@ struct GpuEnergy::Impl {
   DevBuf<FlatPairParams> pairParams;
   DevBuf<FlatPair> pairs;
   DevBuf<FlatClosure> closures;
-  // Work memory: inputs and outputs are each one contiguous block (one copy per call).
-  DevBuf<char> in, out, xs;
-  DevBuf<double> gs;
-  PinnedBuf hIn, hOut;
+  Lane lanes[GpuEnergy::kLanes];
   DevBuf<DockProbe> probes;
   DockView dock{};
 
@@ -429,70 +454,96 @@ struct GpuEnergy::Impl {
   void run(const T* hAngles, int n, FlatTerms* hTerms, double* hGrad, T* hCoords) {
     if (n <= 0) return;
     check(cudaSetDevice(device), "cudaSetDevice");
+    Lane& L = lanes[0];
     const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
     const std::size_t nn = static_cast<std::size_t>(n);
     const std::size_t inBytes = align8(nn * nt * sizeof(T));
     const std::size_t oTerms = 0, oGrad = align8(nn * sizeof(FlatTerms));
     const std::size_t outBytes = oGrad + (hGrad ? nn * nt * sizeof(double) : 0);
     const std::size_t shm = sharedBytes<T>(view);
-    in.reserve(std::max<std::size_t>(8, inBytes));
-    out.reserve(outBytes);
-    if (!shm || hCoords) xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(T));
-    if (hGrad) gs.reserve(std::max<std::size_t>(1, nn * nc));
-    hIn.reserve(std::max<std::size_t>(8, inBytes));
-    hOut.reserve(outBytes);
+    L.in.reserve(std::max<std::size_t>(8, inBytes));
+    L.out.reserve(outBytes);
+    if (!shm || hCoords) L.xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(T));
+    if (hGrad) L.gs.reserve(std::max<std::size_t>(1, nn * nc));
+    L.hIn.reserve(std::max<std::size_t>(8, inBytes));
+    L.hOut.reserve(outBytes);
     if (nt) {
-      std::copy_n(hAngles, nn * nt, reinterpret_cast<T*>(hIn.p));
-      check(cudaMemcpy(in.p, hIn.p, inBytes, cudaMemcpyHostToDevice), "upload");
+      std::copy_n(hAngles, nn * nt, reinterpret_cast<T*>(L.hIn.p));
+      check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
     }
-    launch<T, false>(blockThreads(view, 0), n, shm, hCoords != nullptr, view, reinterpret_cast<const T*>(in.p),
-                     reinterpret_cast<T*>(xs.p),
-                     hGrad ? gs.p : nullptr, reinterpret_cast<FlatTerms*>(out.p + oTerms),
-                     hGrad ? reinterpret_cast<double*>(out.p + oGrad) : nullptr, DockView{}, nullptr, nullptr, nullptr);
+    launch<T, false>(L.stream, blockThreads(view, 0), n, shm, hCoords != nullptr, view,
+                     reinterpret_cast<const T*>(L.in.p), reinterpret_cast<T*>(L.xs.p), hGrad ? L.gs.p : nullptr,
+                     reinterpret_cast<FlatTerms*>(L.out.p + oTerms),
+                     hGrad ? reinterpret_cast<double*>(L.out.p + oGrad) : nullptr, DockView{}, nullptr, nullptr, nullptr);
     check(cudaGetLastError(), "evaluateKernel launch");
-    check(cudaMemcpy(hOut.p, out.p, outBytes, cudaMemcpyDeviceToHost), "download");
-    std::copy_n(reinterpret_cast<const FlatTerms*>(hOut.p + oTerms), nn, hTerms);
-    if (hGrad) std::copy_n(reinterpret_cast<const double*>(hOut.p + oGrad), nn * nt, hGrad);
-    if (hCoords) check(cudaMemcpy(hCoords, xs.p, nn * nc * sizeof(T), cudaMemcpyDeviceToHost), "download coordinates");
+    check(cudaMemcpyAsync(L.hOut.p, L.out.p, outBytes, cudaMemcpyDeviceToHost, L.stream), "download");
+    check(cudaStreamSynchronize(L.stream), "evaluateKernel");
+    std::copy_n(reinterpret_cast<const FlatTerms*>(L.hOut.p + oTerms), nn, hTerms);
+    if (hGrad) std::copy_n(reinterpret_cast<const double*>(L.hOut.p + oGrad), nn * nt, hGrad);
+    if (hCoords) check(cudaMemcpy(hCoords, L.xs.p, nn * nc * sizeof(T), cudaMemcpyDeviceToHost), "download coordinates");
   }
 
-  void runDock(const GpuField::Impl& f, const float* hAngles, const DockPose* hPoses, int n, FlatTerms* hTerms,
-               DockTerms* hDterms, double* hGrad) {
+  void submitDock(int lane, const GpuField::Impl& f, const float* hAngles, const DockPose* hPoses, int n, bool wantGrad) {
+    Lane& L = lanes[lane];
+    if (L.pending) throw Error("submitDock: lane busy");
+    L.n = 0;
     if (n <= 0) return;
     if (f.id == 0) throw Error("evaluateDock: no field");
     check(cudaSetDevice(device), "cudaSetDevice");
     const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
     const std::size_t nn = static_cast<std::size_t>(n);
     const std::size_t iPoses = align8(nn * nt * sizeof(float)), inBytes = iPoses + nn * sizeof(DockPose);
-    const std::size_t oTerms = 0, oDterms = align8(nn * sizeof(FlatTerms)), oGrad6 = oDterms + align8(nn * sizeof(DockTerms)),
-                      oGrad = oGrad6 + nn * 6 * sizeof(double);
-    const std::size_t outBytes = hGrad ? oGrad + nn * nt * sizeof(double) : oGrad6;
+    L.oDterms = align8(nn * sizeof(FlatTerms));
+    L.oGrad6 = L.oDterms + align8(nn * sizeof(DockTerms));
+    L.oGrad = L.oGrad6 + nn * 6 * sizeof(double);
+    L.outBytes = wantGrad ? L.oGrad + nn * nt * sizeof(double) : L.oGrad6;
     const std::size_t shm = sharedBytes<float>(view);
-    in.reserve(inBytes);
-    out.reserve(outBytes);
-    if (!shm) xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(float));
-    if (hGrad) gs.reserve(std::max<std::size_t>(1, nn * nc));
-    hIn.reserve(inBytes);
-    hOut.reserve(outBytes);
-    std::copy_n(hAngles, nn * nt, reinterpret_cast<float*>(hIn.p));
-    std::copy_n(hPoses, nn, reinterpret_cast<DockPose*>(hIn.p + iPoses));
-    check(cudaMemcpy(in.p, hIn.p, inBytes, cudaMemcpyHostToDevice), "upload");
+    L.in.reserve(inBytes);
+    L.out.reserve(L.outBytes);
+    if (!shm) L.xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(float));
+    if (wantGrad) L.gs.reserve(std::max<std::size_t>(1, nn * nc));
+    L.hIn.reserve(inBytes);
+    L.hOut.reserve(L.outBytes);
+    float* ha = reinterpret_cast<float*>(L.hIn.p);
+    DockPose* hp = reinterpret_cast<DockPose*>(L.hIn.p + iPoses);
+#pragma omp parallel for schedule(static)
+    for (long long s = 0; s < static_cast<long long>(nn); ++s) {
+      std::copy_n(hAngles + s * nt, nt, ha + s * nt);
+      hp[s] = hPoses[s];
+    }
+    check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
     DockView dv = dock;
     dv.field = f.view;
-    launch<float, true>(blockThreads(view, dv.probeCount), n, shm, false, view, reinterpret_cast<const float*>(in.p),
-                        reinterpret_cast<float*>(xs.p), hGrad ? gs.p : nullptr, reinterpret_cast<FlatTerms*>(out.p + oTerms),
-                        hGrad ? reinterpret_cast<double*>(out.p + oGrad) : nullptr, dv,
-                        reinterpret_cast<const DockPose*>(in.p + iPoses), reinterpret_cast<DockTerms*>(out.p + oDterms),
-                        hGrad ? reinterpret_cast<double*>(out.p + oGrad6) : nullptr);
+    launch<float, true>(L.stream, blockThreads(view, dv.probeCount), n, shm, false, view,
+                        reinterpret_cast<const float*>(L.in.p), reinterpret_cast<float*>(L.xs.p),
+                        wantGrad ? L.gs.p : nullptr, reinterpret_cast<FlatTerms*>(L.out.p),
+                        wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad) : nullptr, dv,
+                        reinterpret_cast<const DockPose*>(L.in.p + iPoses),
+                        reinterpret_cast<DockTerms*>(L.out.p + L.oDterms),
+                        wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad6) : nullptr);
     check(cudaGetLastError(), "evaluateKernel (dock) launch");
-    check(cudaMemcpy(hOut.p, out.p, outBytes, cudaMemcpyDeviceToHost), "download");
-    std::copy_n(reinterpret_cast<const FlatTerms*>(hOut.p + oTerms), nn, hTerms);
-    std::copy_n(reinterpret_cast<const DockTerms*>(hOut.p + oDterms), nn, hDterms);
-    if (!hGrad) return;
-    const double* g6 = reinterpret_cast<const double*>(hOut.p + oGrad6);
-    const double* gt = reinterpret_cast<const double*>(hOut.p + oGrad);
-    const std::size_t ng = 6 + nt;
-    for (std::size_t s = 0; s < nn; ++s) {
+    check(cudaMemcpyAsync(L.hOut.p, L.out.p, L.outBytes, cudaMemcpyDeviceToHost, L.stream), "download");
+    L.n = nn;
+    L.grad = wantGrad;
+    L.pending = true;
+  }
+
+  void completeDock(int lane, FlatTerms* hTerms, DockTerms* hDterms, double* hGrad) {
+    Lane& L = lanes[lane];
+    if (!L.pending) return;
+    L.pending = false;
+    check(cudaStreamSynchronize(L.stream), "evaluateKernel (dock)");
+    const std::size_t nn = L.n, nt = static_cast<std::size_t>(view.torsionCount), ng = 6 + nt;
+    const FlatTerms* ft = reinterpret_cast<const FlatTerms*>(L.hOut.p);
+    const DockTerms* dt = reinterpret_cast<const DockTerms*>(L.hOut.p + L.oDterms);
+    const double* g6 = reinterpret_cast<const double*>(L.hOut.p + L.oGrad6);
+    const double* gt = reinterpret_cast<const double*>(L.hOut.p + L.oGrad);
+    const bool grad = L.grad && hGrad;
+#pragma omp parallel for schedule(static)
+    for (long long s = 0; s < static_cast<long long>(nn); ++s) {
+      hTerms[s] = ft[s];
+      hDterms[s] = dt[s];
+      if (!grad) continue;
       std::copy_n(g6 + s * 6, 6, hGrad + s * ng);
       std::copy_n(gt + s * nt, nt, hGrad + s * ng + 6);
     }
@@ -522,6 +573,7 @@ GpuEnergy::GpuEnergy(const EnergyModel& m, int device) : impl_(std::make_unique<
   d.view.pairParams = d.pairParams.p;
   d.view.pairs = d.pairs.p;
   d.view.closures = d.closures.p;
+  for (Lane& L : d.lanes) check(cudaStreamCreateWithFlags(&L.stream, cudaStreamNonBlocking), "cudaStreamCreate");
 }
 
 GpuEnergy::~GpuEnergy() = default;
@@ -541,7 +593,16 @@ void GpuEnergy::setProbes(const std::vector<DockProbe>& probes, double clashDist
 
 void GpuEnergy::evaluateDock(const GpuField& field, const float* angles, const DockPose* poses, int n, FlatTerms* terms,
                              DockTerms* dterms, double* grad) {
-  impl_->runDock(*field.impl_, angles, poses, n, terms, dterms, grad);
+  impl_->submitDock(0, *field.impl_, angles, poses, n, grad != nullptr);
+  impl_->completeDock(0, terms, dterms, grad);
+}
+
+void GpuEnergy::submitDock(int lane, const GpuField& field, const float* angles, const DockPose* poses, int n, bool grad) {
+  impl_->submitDock(lane, *field.impl_, angles, poses, n, grad);
+}
+
+void GpuEnergy::completeDock(int lane, FlatTerms* terms, DockTerms* dterms, double* grad) {
+  impl_->completeDock(lane, terms, dterms, grad);
 }
 
 std::size_t GpuEnergy::bytesPerSampleDock() const {
@@ -549,12 +610,13 @@ std::size_t GpuEnergy::bytesPerSampleDock() const {
 }
 
 void GpuEnergy::releaseScratch() {
-  impl_->in.release();
-  impl_->out.release();
-  impl_->xs.release();
-  impl_->gs.release();
-  impl_->hIn.release();
-  impl_->hOut.release();
+  for (Lane& L : impl_->lanes) {
+    if (L.pending) {
+      cudaStreamSynchronize(L.stream);
+      L.pending = false;
+    }
+    L.release();
+  }
 }
 
 void GpuEnergy::evaluate(const double* angles, int n, FlatTerms* terms, double* grad, double* coords) {

@@ -81,23 +81,47 @@ void MobmDocker::minimizeBatched(std::span<const BatchItem> items, std::vector<D
     };
     ok[i] = minimize(c, *l1Pose(c, items[i].stream, items[i].k), res[i], stats[i], ev);
   };
-  std::vector<PoseRequest> breq;
-  std::vector<PoseEnergy> bout;
-  std::vector<double> bgrad;
-  const auto flush = [&](std::span<const int> slots) {
+  const int lanes = std::max(1, pev.lanes());
+  std::vector<std::vector<PoseRequest>> breq(lanes);
+  std::vector<std::vector<PoseEnergy>> bout(lanes);
+  std::vector<std::vector<double>> bgrad(lanes);
+  std::vector<std::vector<int>> bslots(lanes);
+  const auto gather = [&](int l, std::span<const int> slots) {
     const std::size_t n = slots.size();
-    breq.resize(n);
-    bout.resize(n);
-    bgrad.resize(n * ng);
-    for (std::size_t i = 0; i < n; ++i) breq[i] = req[slots[i]];
-    pev.evaluate(static_cast<int>(n), breq.data(), bout.data(), bgrad.data());
-    for (std::size_t i = 0; i < n; ++i) {
-      pe[slots[i]] = bout[i];
-      std::copy_n(bgrad.begin() + static_cast<std::ptrdiff_t>(i * ng), ng,
+    breq[l].resize(n);
+    bout[l].resize(n);
+    bgrad[l].resize(n * ng);
+    bslots[l].assign(slots.begin(), slots.end());
+    for (std::size_t i = 0; i < n; ++i) breq[l][i] = req[slots[i]];
+  };
+  const auto scatter = [&](int l) {
+    const std::vector<int>& slots = bslots[l];
+    const long long n = static_cast<long long>(slots.size());
+#pragma omp parallel for schedule(static)
+    for (long long i = 0; i < n; ++i) {
+      pe[slots[i]] = bout[l][i];
+      std::copy_n(bgrad[l].begin() + static_cast<std::ptrdiff_t>(i * ng), ng,
                   grad.begin() + static_cast<std::ptrdiff_t>(slots[i] * ng));
     }
   };
-  runBatched(m, nf, task, flush);
+  if (lanes == 1) {
+    const auto flush = [&](std::span<const int> slots) {
+      gather(0, slots);
+      pev.evaluate(static_cast<int>(slots.size()), breq[0].data(), bout[0].data(), bgrad[0].data());
+      scatter(0);
+    };
+    runBatched(m, nf, task, flush);
+    return;
+  }
+  const auto submit = [&](int l, std::span<const int> slots) {
+    gather(l, slots);
+    pev.submit(l, static_cast<int>(slots.size()), breq[l].data());
+  };
+  const auto complete = [&](int l) {
+    pev.complete(l, bout[l].data(), bgrad[l].data());
+    scatter(l);
+  };
+  runBatchedAsync(m, nf, lanes, task, submit, complete);
 }
 
 void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const {

@@ -64,6 +64,12 @@ class GpuEnergy {
   void setProbes(const std::vector<DockProbe>& probes, double clashDistance, double clashBase, double clashK);
   void evaluateDock(const GpuField& field, const float* angles, const DockPose* poses, int n, FlatTerms* terms,
                     DockTerms* dterms, double* grad);
+  // Asynchronous form of evaluateDock (spec 15.1.8): kLanes independent evaluations may be in
+  // flight. submitDock copies the inputs and returns; completeDock waits and stores the results
+  // (grad: when requested at submitDock). Lanes have their own work memory.
+  static constexpr int kLanes = 2;
+  void submitDock(int lane, const GpuField& field, const float* angles, const DockPose* poses, int n, bool grad);
+  void completeDock(int lane, FlatTerms* terms, DockTerms* dterms, double* grad);
   std::size_t bytesPerSampleDock() const;
   // Device work memory per sample of evaluate (bytes).
   std::size_t bytesPerSample(bool fp64, bool grad) const;

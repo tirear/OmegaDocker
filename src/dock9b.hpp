@@ -271,6 +271,11 @@ class PoseEvaluator {
   virtual void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) = 0;
   // Called when 9b of a round ends (e.g. to free work memory).
   virtual void idle() {}
+  // Asynchronous form (spec 15.1.8): with lanes() > 1, up to lanes() evaluations are in flight;
+  // submit copies the requests of a lane, complete waits and stores the results of its last submit.
+  virtual int lanes() const { return 1; }
+  virtual void submit(int /*lane*/, int /*n*/, const PoseRequest* /*req*/) {}
+  virtual void complete(int /*lane*/, MobmDocker::PoseEnergy* /*out*/, double* /*grad*/) {}
 
   // Optional device versions of L1poss preparation (spec 15.1.5); the defaults leave it to the CPU.
   // 8.5 quick filter of the L1pos [k0, k1) of c: appends the passing ones to l2 (any order) and

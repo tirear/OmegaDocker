@@ -43,15 +43,23 @@ class GpuPoseEvaluator : public PoseEvaluator {
     sized_ = field_->id();
   }
   void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) override {
+    submit(0, n, req);
+    complete(0, out, grad);
+  }
+  int lanes() const override { return GpuEnergy::kLanes; }
+  void submit(int lane, int n, const PoseRequest* req) override {
+    Work& w = work_[lane];
     const std::size_t nn = static_cast<std::size_t>(n), nt = static_cast<std::size_t>(nt_);
-    angles_.resize(nn * nt);
-    poses_.resize(nn);
-    terms_.resize(nn);
-    dterms_.resize(nn);
-    for (std::size_t i = 0; i < nn; ++i) {
+    w.n = n;
+    w.angles.resize(nn * nt);
+    w.poses.resize(nn);
+    w.terms.resize(nn);
+    w.dterms.resize(nn);
+#pragma omp parallel for schedule(static)
+    for (long long i = 0; i < n; ++i) {
       const PoseRequest& r = req[i];
-      for (std::size_t k = 0; k < nt; ++k) angles_[i * nt + k] = static_cast<float>(r.anglesDeg[k]);
-      DockPose& ps = poses_[i];
+      for (std::size_t k = 0; k < nt; ++k) w.angles[i * nt + k] = static_cast<float>(r.anglesDeg[k]);
+      DockPose& ps = w.poses[i];
       for (int c = 0; c < 3; ++c) {
         ps.t[c] = static_cast<float>(r.pose.t[c]);
         ps.center[c] = static_cast<float>(r.center[c]);
@@ -61,9 +69,14 @@ class GpuPoseEvaluator : public PoseEvaluator {
       ps.q[2] = static_cast<float>(r.pose.q.y);
       ps.q[3] = static_cast<float>(r.pose.q.z);
     }
-    gpu_.evaluateDock(*field_, angles_.data(), poses_.data(), n, terms_.data(), dterms_.data(), grad);
-    for (std::size_t i = 0; i < nn; ++i) {
-      const FlatTerms& f = terms_[i];
+    gpu_.submitDock(lane, *field_, w.angles.data(), w.poses.data(), n, true);
+  }
+  void complete(int lane, MobmDocker::PoseEnergy* out, double* grad) override {
+    Work& w = work_[lane];
+    gpu_.completeDock(lane, w.terms.data(), w.dterms.data(), grad);
+#pragma omp parallel for schedule(static)
+    for (long long i = 0; i < w.n; ++i) {
+      const FlatTerms& f = w.terms[i];
       MobmDocker::PoseEnergy& pe = out[i];
       pe = {};
       pe.intra.vdw = f.vdw;
@@ -74,10 +87,10 @@ class GpuPoseEvaluator : public PoseEvaluator {
       pe.intra.closure = f.closure;
       pe.intra.clashPairs = f.clashPairs;
       pe.intra.closureMaxDeviation = f.closureMaxDeviation;
-      pe.inter = dterms_[i].inter;
-      pe.interClash = dterms_[i].interClash;
+      pe.inter = w.dterms[i].inter;
+      pe.interClash = w.dterms[i].interClash;
       pe.intra.external = pe.inter + pe.interClash;
-      pe.outside = dterms_[i].outside;
+      pe.outside = w.dterms[i].outside;
     }
   }
   void idle() override {
@@ -172,10 +185,15 @@ class GpuPoseEvaluator : public PoseEvaluator {
   std::shared_ptr<GpuDockPrep> prep_;
   int nt_, device_, want_, batch_;
   std::uint64_t sized_ = 0;
-  std::vector<float> angles_;
-  std::vector<DockPose> poses_;
-  std::vector<FlatTerms> terms_;
-  std::vector<DockTerms> dterms_;
+  // Host data of each lane.
+  struct Work {
+    int n = 0;
+    std::vector<float> angles;
+    std::vector<DockPose> poses;
+    std::vector<FlatTerms> terms;
+    std::vector<DockTerms> dterms;
+  };
+  Work work_[GpuEnergy::kLanes];
 };
 
 }  // namespace od

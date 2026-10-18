@@ -81,22 +81,27 @@ void batchWait() {
   swapcontext(&fb->ctx, fb->sched);
 }
 
-void runBatched(int count, int maxActive, const std::function<void(int, int)>& task,
-                const std::function<void(std::span<const int>)>& flush) {
-  if (count <= 0) return;
-  const int nf = std::max(1, std::min(maxActive, count));
+namespace {
+
+// Fibers and the start of new indices shared by runBatched and runBatchedAsync.
+struct Batch {
+  int count;
+  const std::function<void(int, int)>& task;
   std::vector<std::unique_ptr<Fiber>> fibers;
-  for (int k = 0; k < nf; ++k) {
-    fibers.push_back(std::make_unique<Fiber>());
-    Fiber& fb = *fibers.back();
-    fb.allocate();
-    fb.task = &task;
-    fb.slot = k;
-  }
   std::atomic<int> next{0};
   std::atomic<bool> failed{false};
+
+  Batch(int c, int nf, const std::function<void(int, int)>& t) : count(c), task(t) {
+    for (int k = 0; k < nf; ++k) {
+      fibers.push_back(std::make_unique<Fiber>());
+      Fiber& fb = *fibers.back();
+      fb.allocate();
+      fb.task = &task;
+      fb.slot = k;
+    }
+  }
   // Starts indices on fb until one waits for a flush, none are left or a task failed.
-  auto launch = [&](Fiber& fb) {
+  void launch(Fiber& fb) {
     while (!fb.running && !failed.load(std::memory_order_relaxed)) {
       const int i = next.fetch_add(1);
       if (i >= count) return;
@@ -113,32 +118,98 @@ void runBatched(int count, int maxActive, const std::function<void(int, int)>& t
       resume(fb);
       if (fb.error) failed = true;
     }
-  };
-  auto rethrow = [&] {
-    for (auto& fb : fibers)
-      if (fb->error) std::rethrow_exception(fb->error);
-  };
-  // The tasks of different slots are independent: they are resumed on several threads.
-#pragma omp parallel for schedule(dynamic, 1)
-  for (int k = 0; k < nf; ++k) launch(*fibers[k]);
-  rethrow();
-  std::vector<int> wait;
-  for (;;) {
-    wait.clear();
-    for (int k = 0; k < nf; ++k)
-      if (fibers[k]->running && fibers[k]->waiting) wait.push_back(k);
-    if (wait.empty()) break;
-    flush(wait);
-    const int nw = static_cast<int>(wait.size());
+  }
+  // Resumes the waiting fibers of slots (they continue with new indices when done).
+  void resumeAll(std::span<const int> slots) {
+    const int nw = static_cast<int>(slots.size());
 #pragma omp parallel for schedule(dynamic, 1)
     for (int w = 0; w < nw; ++w) {
-      Fiber& fb = *fibers[wait[w]];
+      Fiber& fb = *fibers[slots[w]];
       fb.waiting = false;
       resume(fb);
       if (fb.error) failed = true;
       else launch(fb);
     }
-    rethrow();
+  }
+  void launchAll(int k0, int k1) {
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int k = k0; k < k1; ++k) launch(*fibers[k]);
+  }
+  void waiting(int k0, int k1, std::vector<int>& out) const {
+    out.clear();
+    for (int k = k0; k < k1; ++k)
+      if (fibers[k]->running && fibers[k]->waiting) out.push_back(k);
+  }
+  void rethrow() const {
+    for (auto& fb : fibers)
+      if (fb->error) std::rethrow_exception(fb->error);
+  }
+};
+
+}  // namespace
+
+void runBatched(int count, int maxActive, const std::function<void(int, int)>& task,
+                const std::function<void(std::span<const int>)>& flush) {
+  if (count <= 0) return;
+  const int nf = std::max(1, std::min(maxActive, count));
+  Batch b(count, nf, task);
+  // The tasks of different slots are independent: they are resumed on several threads.
+  b.launchAll(0, nf);
+  b.rethrow();
+  std::vector<int> wait;
+  for (;;) {
+    b.waiting(0, nf, wait);
+    if (wait.empty()) break;
+    flush(wait);
+    b.resumeAll(wait);
+    b.rethrow();
+  }
+}
+
+void runBatchedAsync(int count, int maxActive, int groups, const std::function<void(int, int)>& task,
+                     const std::function<void(int, std::span<const int>)>& submit,
+                     const std::function<void(int)>& complete) {
+  if (count <= 0) return;
+  const int nf = std::max(1, std::min(maxActive, count));
+  const int ng = std::clamp(groups, 1, nf);
+  Batch b(count, nf, task);
+  auto lo = [&](int g) { return static_cast<int>(static_cast<long long>(nf) * g / ng); };
+  std::vector<char> pending(ng, 0);
+  std::vector<std::vector<int>> slots(ng);
+  auto drain = [&] {
+    for (int g = 0; g < ng; ++g)
+      if (pending[g]) {
+        pending[g] = 0;
+        complete(g);
+      }
+  };
+  try {
+    b.launchAll(0, nf);
+    b.rethrow();
+    for (int g = 0; g < ng; ++g) {
+      b.waiting(lo(g), lo(g + 1), slots[g]);
+      if (slots[g].empty()) continue;
+      submit(g, slots[g]);
+      pending[g] = 1;
+    }
+    for (bool any = true; any;) {
+      any = false;
+      for (int g = 0; g < ng; ++g) {
+        if (!pending[g]) continue;
+        pending[g] = 0;
+        complete(g);
+        b.resumeAll(slots[g]);
+        b.rethrow();
+        b.waiting(lo(g), lo(g + 1), slots[g]);
+        if (slots[g].empty()) continue;
+        submit(g, slots[g]);
+        pending[g] = 1;
+        any = true;
+      }
+    }
+  } catch (...) {
+    drain();
+    throw;
   }
 }
 
