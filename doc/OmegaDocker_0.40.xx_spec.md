@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.65 |
+| 文件版本 | 1.66 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1830,7 +1830,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | posm2_fft，BTN，30 Å，`rotStep` 15、`fftTopPerRot` 2 | 10.1／9.9 s | 8.1／8.1 s |
 | posm1，1L2Y，64 Å，`posm1SampleNum` 5000 | 11.0／11.1 s | 8.6／8.5 s |
 
-- **尚未處理**：9a 的批次最小化（`minimizeTorsionsBatch`、`GpuConfEvaluator`）仍為同步 flush。
+- **尚未處理**：9a 的批次最小化（`minimizeTorsionsBatch`、`GpuConfEvaluator`）仍為同步 flush（1.66 處理，15.1.11）。
 
 ### 15.1.9 協程切換（1.64）
 
@@ -1864,6 +1864,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 整個執行 | 143.4 s | 86.3 s |
 | 9b 格點，8 個構形，`grid.mode = full` | 3.80 s | 0.51 s |
 | 9b 格點，8 個構形，`grid.mode = flexres` | 0.28 s | 0.06 s |
+
+### 15.1.11 CUDA 版：9a 的 CPU／GPU 重疊（1.66）
+
+- **做法**：與 15.1.8 相同。`ConfEvaluator` 新增可選的 `lanes()`、`submit`、`complete`；`lanes() > 1` 時 `minimizeConfBatch` 改用 `minimizeTorsionsBatch` 的非同步形式（`BatchTorsionAsync`，以 `runBatchedAsync` 執行）。`GpuConfEvaluator` 使用 `GpuEnergy` 的 2 條 lane（`GpuEnergy::submit`／`complete`，雙精度、不輸出座標）。最後一次不含梯度的能量計算仍為同步。
+- **結果**：CPU 測試用的 evaluator 以 1、2、3 條 lane 執行，5 種最小化方法的結果都與逐樣本最小化逐位元相同；CPU 版輸出與 1.65 逐位元相同。
+- **速度**（15.1.10 的例子，舊版、新版交替各執行 2 次）：9a 30.2／30.4 s → 28.2／27.5 s。9a 的雙精度核心本身佔 22.9 s（Nsight Systems），所以重疊能省下的時間有限；9b 的單精度核心佔 9b 的 34.5／39.1 s。之後的加速主要取決於核心本身。
 
 ### 15.2 依賴套件
 
@@ -2170,3 +2176,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.63 | 2026-10-19 | 9b 的 CPU／GPU 重疊：`runBatchedAsync`、`PoseEvaluator` 的非同步介面、`GpuEnergy` 的 2 條 lane（各自的 stream 與工作記憶體）、平行打包與解包（15.1.5、15.1.8） |
 | 1.64 | 2026-10-19 | x86-64 的協程切換改用不經系統呼叫的 `odFiberSwitch`（15.1.9） |
 | 1.65 | 2026-10-19 | 能量格點、距離格點與 delta 區塊在 GPU 上計算（`GpuGridBuilder`、共用的 `gridPoint`／`distPoint`），與 CPU 逐位元相同（15.1.10） |
+| 1.66 | 2026-10-19 | 9a 的 CPU／GPU 重疊：`ConfEvaluator` 的非同步介面、`BatchTorsionAsync`、`GpuEnergy::submit`／`complete`（15.1.11） |

@@ -70,6 +70,9 @@ class GpuEnergy {
   static constexpr int kLanes = 2;
   void submitDock(int lane, const GpuField& field, const float* angles, const DockPose* poses, int n, bool grad);
   void completeDock(int lane, FlatTerms* terms, DockTerms* dterms, double* grad);
+  // Asynchronous form of the double precision evaluate without coordinates (9a, spec 15.1.11).
+  void submit(int lane, const double* angles, int n, bool grad);
+  void complete(int lane, FlatTerms* terms, double* grad);
   std::size_t bytesPerSampleDock() const;
   // Device work memory per sample of evaluate (bytes).
   std::size_t bytesPerSample(bool fp64, bool grad) const;

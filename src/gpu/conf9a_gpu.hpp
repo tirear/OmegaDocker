@@ -24,6 +24,22 @@ class GpuConfEvaluator : public ConfEvaluator {
   void evaluate(const double* anglesDeg, int n, EnergyTerms* terms, double* gradRad) override {
     buf_.resize(n);
     gpu_.evaluate(anglesDeg, n, buf_.data(), gradRad, static_cast<double*>(nullptr));
+    convert(n, terms);
+  }
+  int lanes() const override { return GpuEnergy::kLanes; }
+  void submit(int lane, const double* anglesDeg, int n) override {
+    size_[lane] = n;
+    gpu_.submit(lane, anglesDeg, n, true);
+  }
+  void complete(int lane, EnergyTerms* terms, double* gradRad) override {
+    buf_.resize(size_[lane]);
+    gpu_.complete(lane, buf_.data(), gradRad);
+    convert(size_[lane], terms);
+  }
+  void idle() override { gpu_.releaseScratch(); }
+
+ private:
+  void convert(int n, EnergyTerms* terms) const {
     for (int i = 0; i < n; ++i) {
       const FlatTerms& f = buf_[i];
       EnergyTerms& e = terms[i];
@@ -38,10 +54,9 @@ class GpuConfEvaluator : public ConfEvaluator {
       e.closureMaxDeviation = f.closureMaxDeviation;
     }
   }
-  void idle() override { gpu_.releaseScratch(); }
 
- private:
   GpuEnergy gpu_;
+  int size_[GpuEnergy::kLanes] = {};
   int batch_ = 1;
   std::vector<FlatTerms> buf_;
 };

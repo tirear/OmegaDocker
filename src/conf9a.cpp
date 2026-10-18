@@ -24,13 +24,31 @@ void minimizeConfBatch(ConfEvaluator& ev, int d, std::span<double> a, const MinP
   const int count = d > 0 ? static_cast<int>(a.size() / d) : 0;
   if (count == 0) return;
   const int batch = std::max(1, ev.maxBatch());
-  std::vector<EnergyTerms> buf;
-  const BatchTorsionObjective f = [&](const double* x, int n, double* e, double* g) {
-    buf.resize(n);
-    ev.evaluate(x, n, buf.data(), g);
-    for (int i = 0; i < n; ++i) e[i] = buf[i].total();
-  };
-  const auto r = minimizeTorsionsBatch(f, a, d, p, batch);
+  std::vector<MinResult> r;
+  if (ev.lanes() > 1) {
+    std::vector<std::vector<EnergyTerms>> buf(ev.lanes());
+    std::vector<int> size(ev.lanes(), 0);
+    BatchTorsionAsync f;
+    f.lanes = ev.lanes();
+    f.submit = [&](int l, const double* x, int n) {
+      size[l] = n;
+      ev.submit(l, x, n);
+    };
+    f.complete = [&](int l, double* e, double* g) {
+      buf[l].resize(size[l]);
+      ev.complete(l, buf[l].data(), g);
+      for (int i = 0; i < size[l]; ++i) e[i] = buf[l][i].total();
+    };
+    r = minimizeTorsionsBatch(f, a, d, p, batch);
+  } else {
+    std::vector<EnergyTerms> buf;
+    const BatchTorsionObjective f = [&](const double* x, int n, double* e, double* g) {
+      buf.resize(n);
+      ev.evaluate(x, n, buf.data(), g);
+      for (int i = 0; i < n; ++i) e[i] = buf[i].total();
+    };
+    r = minimizeTorsionsBatch(f, a, d, p, batch);
+  }
   for (int i = 0; i < count; ++i) steps[i] = r[i].steps;
   for (int done = 0; done < count; done += batch)
     ev.evaluate(a.data() + static_cast<std::size_t>(done) * d, std::min(batch, count - done), terms + done, nullptr);

@@ -46,6 +46,11 @@ class ConfEvaluator {
   virtual void evaluate(const double* anglesDeg, int n, EnergyTerms* terms, double* gradRad) = 0;
   // Called when a fillL2Pool call ends (e.g. to free work memory).
   virtual void idle() {}
+  // Asynchronous form (spec 15.1.11), as PoseEvaluator: with lanes() > 1, up to lanes()
+  // evaluations with gradients are in flight; complete stores the results of the lane's last submit.
+  virtual int lanes() const { return 1; }
+  virtual void submit(int /*lane*/, const double* /*anglesDeg*/, int /*n*/) {}
+  virtual void complete(int /*lane*/, EnergyTerms* /*terms*/, double* /*gradRad*/) {}
 };
 
 struct Fill9aParams {

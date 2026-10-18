@@ -1730,12 +1730,35 @@ std::array<double, 7> termArray(const od::FlatTerms& e) {
 }
 
 // ConfEvaluator on the CPU (EnergySystem::evaluate), recording the batch sizes.
+// With nLanes > 1 the asynchronous form (submit evaluates, complete returns the stored results).
 struct CpuConfEvaluator : od::ConfEvaluator {
   const od::EnergySystem& sys;
-  int batch;
+  int batch, nLanes;
   int calls = 0, largest = 0, idles = 0;
-  CpuConfEvaluator(const od::EnergySystem& s, int b) : sys(s), batch(b) {}
+  struct Done {
+    bool pending = false;
+    std::vector<od::EnergyTerms> terms;
+    std::vector<double> grad;
+  };
+  std::vector<Done> done;
+  CpuConfEvaluator(const od::EnergySystem& s, int b, int l = 1) : sys(s), batch(b), nLanes(l), done(l) {}
   int maxBatch() const override { return batch; }
+  int lanes() const override { return nLanes; }
+  void submit(int lane, const double* a, int n) override {
+    Done& d = done[lane];
+    REQUIRE_FALSE(d.pending);
+    d.pending = true;
+    d.terms.resize(n);
+    d.grad.resize(static_cast<std::size_t>(n) * sys.torsionCount());
+    evaluate(a, n, d.terms.data(), d.grad.data());
+  }
+  void complete(int lane, od::EnergyTerms* terms, double* grad) override {
+    Done& d = done[lane];
+    REQUIRE(d.pending);
+    d.pending = false;
+    std::copy(d.terms.begin(), d.terms.end(), terms);
+    std::copy(d.grad.begin(), d.grad.end(), grad);
+  }
   void evaluate(const double* a, int n, od::EnergyTerms* terms, double* grad) override {
     ++calls;
     largest = std::max(largest, n);
@@ -1770,20 +1793,22 @@ TEST_CASE("9a: batched minimization equals per-sample minimization (1L2Y)") {
     std::vector<int> refSteps(count);
     for (int i = 0; i < count; ++i)
       refTerms[i] = od::minimizeConf(sys, std::span<double>(ref.data() + static_cast<std::size_t>(i) * d, d), mp, &refSteps[i]);
-    for (int batch : {1, 7, 64}) {
-      CpuConfEvaluator ev(sys, batch);
-      std::vector<double> a = start;
-      std::vector<od::EnergyTerms> terms(count);
-      std::vector<int> steps(count);
-      od::minimizeConfBatch(ev, d, a, mp, terms.data(), steps.data());
-      INFO(method, " batch ", batch);
-      CHECK(a == ref);
-      CHECK(steps == refSteps);
-      int diff = 0;
-      for (int i = 0; i < count; ++i) diff += termArray(terms[i]) != termArray(refTerms[i]) || terms[i].clashPairs != refTerms[i].clashPairs;
-      CHECK(diff == 0);
-      CHECK(ev.largest == std::min(batch, count));
-    }
+    for (int batch : {1, 7, 64})
+      for (int lanes : {1, 2, 3}) {
+        CpuConfEvaluator ev(sys, batch, lanes);
+        std::vector<double> a = start;
+        std::vector<od::EnergyTerms> terms(count);
+        std::vector<int> steps(count);
+        od::minimizeConfBatch(ev, d, a, mp, terms.data(), steps.data());
+        INFO(method, " batch ", batch, " lanes ", lanes);
+        CHECK(a == ref);
+        CHECK(steps == refSteps);
+        int diff = 0;
+        for (int i = 0; i < count; ++i) diff += termArray(terms[i]) != termArray(refTerms[i]) || terms[i].clashPairs != refTerms[i].clashPairs;
+        CHECK(diff == 0);
+        // The final evaluation (no gradients) uses evaluate with up to batch samples.
+        CHECK(ev.largest == std::min(batch, count));
+      }
   }
 }
 

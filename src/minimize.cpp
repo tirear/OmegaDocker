@@ -392,4 +392,47 @@ std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionObjective& f, std
   return out;
 }
 
+std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionAsync& f, std::span<double> anglesDeg, int d,
+                                             const MinParams& p, int maxActive) {
+  const int count = d > 0 ? static_cast<int>(anglesDeg.size() / d) : 0;
+  std::vector<MinResult> out(count);
+  if (count == 0) return out;
+  const std::size_t nd = static_cast<std::size_t>(d);
+  const int nf = std::max(1, std::min(maxActive, count));
+  const int lanes = std::max(1, f.lanes);
+  std::vector<double> req(nf * nd), grad(nf * nd), energy(nf);
+  const auto task = [&](int index, int slot) {
+    const TorsionObjective obj = [&, slot](std::span<const double> x, std::vector<double>& g) {
+      std::copy(x.begin(), x.end(), req.begin() + static_cast<std::ptrdiff_t>(slot * nd));
+      batchWait();
+      const auto b = grad.begin() + static_cast<std::ptrdiff_t>(slot * nd);
+      g.assign(b, b + static_cast<std::ptrdiff_t>(nd));
+      return energy[slot];
+    };
+    out[index] = minimizeTorsions(obj, anglesDeg.subspan(static_cast<std::size_t>(index) * nd, nd), p);
+  };
+  std::vector<std::vector<double>> a(lanes), e(lanes), g(lanes);
+  std::vector<std::vector<int>> slots(lanes);
+  const auto submit = [&](int l, std::span<const int> s) {
+    const std::size_t m = s.size();
+    slots[l].assign(s.begin(), s.end());
+    a[l].resize(m * nd);
+    e[l].resize(m);
+    g[l].resize(m * nd);
+    for (std::size_t i = 0; i < m; ++i)
+      std::copy_n(req.begin() + static_cast<std::ptrdiff_t>(s[i] * nd), nd, a[l].begin() + static_cast<std::ptrdiff_t>(i * nd));
+    f.submit(l, a[l].data(), static_cast<int>(m));
+  };
+  const auto complete = [&](int l) {
+    f.complete(l, e[l].data(), g[l].data());
+    const std::vector<int>& s = slots[l];
+    for (std::size_t i = 0; i < s.size(); ++i) {
+      energy[s[i]] = e[l][i];
+      std::copy_n(g[l].begin() + static_cast<std::ptrdiff_t>(i * nd), nd, grad.begin() + static_cast<std::ptrdiff_t>(s[i] * nd));
+    }
+  };
+  runBatchedAsync(count, nf, lanes, task, submit, complete);
+  return out;
+}
+
 }  // namespace od

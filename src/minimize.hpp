@@ -73,4 +73,15 @@ using BatchTorsionObjective = std::function<void(const double* anglesDeg, int n,
 std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionObjective& f, std::span<double> anglesDeg, int d,
                                              const MinParams& p, int maxActive);
 
+// Pipelined form (spec 15.1.11, runBatchedAsync): the requests of `lanes` groups of samples are
+// evaluated asynchronously; submit(lane, anglesDeg, n) starts an evaluation, complete(lane, energy,
+// gradRad) waits for it and stores its results. Same results as minimizeTorsionsBatch.
+struct BatchTorsionAsync {
+  int lanes = 1;
+  std::function<void(int lane, const double* anglesDeg, int n)> submit;
+  std::function<void(int lane, double* energy, double* gradRad)> complete;
+};
+std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionAsync& f, std::span<double> anglesDeg, int d,
+                                             const MinParams& p, int maxActive);
+
 }  // namespace od

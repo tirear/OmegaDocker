@@ -455,6 +455,7 @@ struct GpuEnergy::Impl {
     if (n <= 0) return;
     check(cudaSetDevice(device), "cudaSetDevice");
     Lane& L = lanes[0];
+    if (L.pending) throw Error("evaluate: lane 0 busy");
     const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
     const std::size_t nn = static_cast<std::size_t>(n);
     const std::size_t inBytes = align8(nn * nt * sizeof(T));
@@ -481,6 +482,56 @@ struct GpuEnergy::Impl {
     std::copy_n(reinterpret_cast<const FlatTerms*>(L.hOut.p + oTerms), nn, hTerms);
     if (hGrad) std::copy_n(reinterpret_cast<const double*>(L.hOut.p + oGrad), nn * nt, hGrad);
     if (hCoords) check(cudaMemcpy(hCoords, L.xs.p, nn * nc * sizeof(T), cudaMemcpyDeviceToHost), "download coordinates");
+  }
+
+  void submitEval(int lane, const double* hAngles, int n, bool wantGrad) {
+    Lane& L = lanes[lane];
+    if (L.pending) throw Error("submit: lane busy");
+    L.n = 0;
+    if (n <= 0) return;
+    check(cudaSetDevice(device), "cudaSetDevice");
+    const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
+    const std::size_t nn = static_cast<std::size_t>(n);
+    const std::size_t inBytes = align8(nn * nt * sizeof(double));
+    L.oGrad = align8(nn * sizeof(FlatTerms));
+    L.outBytes = L.oGrad + (wantGrad ? nn * nt * sizeof(double) : 0);
+    const std::size_t shm = sharedBytes<double>(view);
+    L.in.reserve(std::max<std::size_t>(8, inBytes));
+    L.out.reserve(L.outBytes);
+    if (!shm) L.xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(double));
+    if (wantGrad) L.gs.reserve(std::max<std::size_t>(1, nn * nc));
+    L.hIn.reserve(std::max<std::size_t>(8, inBytes));
+    L.hOut.reserve(L.outBytes);
+    if (nt) {
+      double* ha = reinterpret_cast<double*>(L.hIn.p);
+#pragma omp parallel for schedule(static)
+      for (long long s = 0; s < static_cast<long long>(nn); ++s) std::copy_n(hAngles + s * nt, nt, ha + s * nt);
+      check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
+    }
+    launch<double, false>(L.stream, blockThreads(view, 0), n, shm, false, view,
+                          reinterpret_cast<const double*>(L.in.p), reinterpret_cast<double*>(L.xs.p),
+                          wantGrad ? L.gs.p : nullptr, reinterpret_cast<FlatTerms*>(L.out.p),
+                          wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad) : nullptr, DockView{}, nullptr,
+                          nullptr, nullptr);
+    check(cudaGetLastError(), "evaluateKernel launch");
+    check(cudaMemcpyAsync(L.hOut.p, L.out.p, L.outBytes, cudaMemcpyDeviceToHost, L.stream), "download");
+    L.n = nn;
+    L.grad = wantGrad;
+    L.pending = true;
+  }
+
+  void completeEval(int lane, FlatTerms* hTerms, double* hGrad) {
+    Lane& L = lanes[lane];
+    if (!L.pending) return;
+    L.pending = false;
+    check(cudaStreamSynchronize(L.stream), "evaluateKernel");
+    const std::size_t nn = L.n, nt = static_cast<std::size_t>(view.torsionCount);
+    std::copy_n(reinterpret_cast<const FlatTerms*>(L.hOut.p), nn, hTerms);
+    if (L.grad && hGrad) {
+      const double* g = reinterpret_cast<const double*>(L.hOut.p + L.oGrad);
+#pragma omp parallel for schedule(static)
+      for (long long s = 0; s < static_cast<long long>(nn); ++s) std::copy_n(g + s * nt, nt, hGrad + s * nt);
+    }
   }
 
   void submitDock(int lane, const GpuField::Impl& f, const float* hAngles, const DockPose* hPoses, int n, bool wantGrad) {
@@ -618,6 +669,10 @@ void GpuEnergy::releaseScratch() {
     L.release();
   }
 }
+
+void GpuEnergy::submit(int lane, const double* angles, int n, bool grad) { impl_->submitEval(lane, angles, n, grad); }
+
+void GpuEnergy::complete(int lane, FlatTerms* terms, double* grad) { impl_->completeEval(lane, terms, grad); }
 
 void GpuEnergy::evaluate(const double* angles, int n, FlatTerms* terms, double* grad, double* coords) {
   impl_->run(angles, n, terms, grad, coords);
