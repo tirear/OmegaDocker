@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.63 |
+| 文件版本 | 1.64 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1832,6 +1832,21 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - **尚未處理**：9a 的批次最小化（`minimizeTorsionsBatch`、`GpuConfEvaluator`）仍為同步 flush。
 
+### 15.1.9 協程切換（1.64）
+
+- **原因**：`swapcontext`／`getcontext` 每次都呼叫 `rt_sigprocmask`（系統呼叫），保存與恢復 signal mask。posm3、BTN（15.1.8 的設定）的 GPU 版有 23 s 的系統時間，幾乎都是這個。
+- **做法**：x86-64 改用組合語言的切換函式 `odFiberSwitch`（`src/fiber_batch.cpp`）：在目前的堆疊上保存 System V ABI 的 callee-saved 暫存器（`rbx`、`rbp`、`r12`–`r15`）、MXCSR 與 x87 控制字，換成另一個堆疊後恢復。新任務的初始堆疊會讓第一次切換「返回」到 `odFiberEntry`，再呼叫任務。signal mask 不隨協程切換（OmegaDocker 不在協程內改 signal mask）。其他架構沿用 `ucontext`。
+- **結果**：協程內的計算不變；與 1.63 的 CPU 測試及批次測試結果逐位元相同。GPU 版兩次執行之間，檢查點本來就因 `atomicAdd` 的加總順序而不同（1.63 自身連續兩次執行也一樣），其餘輸出檔相同。
+- **速度**（posm3、BTN，舊版、新版交替各執行 2 次；機器同時有其他負載，wall time 僅供參考）：
+
+| 項目 | 1.63 | 1.64 |
+|---|---|---|
+| wall time | 34.8／34.6 s | 27.3／28.0 s |
+| user time | 486／484 s | 396／408 s |
+| system time | 23.2／22.9 s | 1.7／1.8 s |
+
+  posm1、1L2Y（每個姿勢的計算量較大，切換次數較少）沒有明顯差異。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2135,3 +2150,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.61 | 2026-10-19 | CUDA 核心最佳化：座標放在 shared memory、原子對梯度的 i 端以 warp 分段加總（15.1.2、15.1.6）；更正 1.60 中 posm3 的 CPU／GPU 時間（15.1.5） |
 | 1.62 | 2026-10-19 | CUDA 核心最佳化（二）：`ad4VdwHb` 展開 12-6／12-10 的乘法、兩面角 cos／sin 平行預先計算（結果逐位元不變）；記錄 Nsight Compute 分析、未採用的嘗試與同一時段的量測（15.1.7） |
 | 1.63 | 2026-10-19 | 9b 的 CPU／GPU 重疊：`runBatchedAsync`、`PoseEvaluator` 的非同步介面、`GpuEnergy` 的 2 條 lane（各自的 stream 與工作記憶體）、平行打包與解包（15.1.5、15.1.8） |
+| 1.64 | 2026-10-19 | x86-64 的協程切換改用不經系統呼叫的 `odFiberSwitch`（15.1.9） |

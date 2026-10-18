@@ -5,8 +5,10 @@
 #include "fiber_batch.hpp"
 
 #include <sys/mman.h>
-#include <ucontext.h>
 #include <unistd.h>
+#if !defined(__x86_64__)
+#include <ucontext.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -22,9 +24,63 @@ namespace {
 
 constexpr std::size_t kFiberStack = 256 * 1024;
 
+#if defined(__x86_64__)
+// Context switch without system calls (spec 15.1.9): saves the callee-saved registers, MXCSR and
+// the x87 control word on the current stack, stores the stack pointer in *save and continues on
+// the stack `to` (System V ABI: everything else is caller-saved).
+extern "C" void odFiberSwitch(void** save, void* to);
+extern "C" void odFiberEntry();
+asm(R"(
+  .text
+  .globl odFiberSwitch
+  .type odFiberSwitch, @function
+odFiberSwitch:
+  .cfi_startproc
+  pushq %rbp
+  pushq %rbx
+  pushq %r12
+  pushq %r13
+  pushq %r14
+  pushq %r15
+  subq $16, %rsp
+  stmxcsr 8(%rsp)
+  fnstcw (%rsp)
+  movq %rsp, (%rdi)
+  movq %rsi, %rsp
+  ldmxcsr 8(%rsp)
+  fldcw (%rsp)
+  addq $16, %rsp
+  popq %r15
+  popq %r14
+  popq %r13
+  popq %r12
+  popq %rbx
+  popq %rbp
+  ret
+  .cfi_endproc
+  .size odFiberSwitch, .-odFiberSwitch
+
+  .globl odFiberEntry
+  .type odFiberEntry, @function
+odFiberEntry:
+  .cfi_startproc
+  .cfi_undefined rip
+  movq %r12, %rdi
+  call odFiberMain@PLT
+  ud2
+  .cfi_endproc
+  .size odFiberEntry, .-odFiberEntry
+)");
+#endif
+
 struct Fiber {
+#if defined(__x86_64__)
+  void* sp = nullptr;
+  void** sched = nullptr;  // saved stack pointer of the thread that resumed it last
+#else
   ucontext_t ctx{};
   ucontext_t* sched = nullptr;  // context of the thread that resumed it last
+#endif
   char* mem = nullptr;  // guard page + stack
   std::size_t memSize = 0;
   const std::function<void(int, int)>* task = nullptr;
@@ -50,25 +106,77 @@ struct Fiber {
 
 thread_local Fiber* tCurrent = nullptr;
 
-// Never returns: a finished task switches back to the thread that resumed it last
-// (uc_link would name the thread that started it).
-void fiberMain(unsigned lo, unsigned hi) {
-  Fiber& fb = *reinterpret_cast<Fiber*>((static_cast<std::uintptr_t>(hi) << 32) | lo);
+void runTask(Fiber& fb) {
   try {
     (*fb.task)(fb.index, fb.slot);
   } catch (...) {
     fb.error = std::current_exception();
   }
   fb.running = false;
+}
+
+}  // namespace
+
+#if defined(__x86_64__)
+// Never returns: a finished task switches back to the thread that resumed it last.
+extern "C" [[noreturn]] void odFiberMain(Fiber* fb) {
+  runTask(*fb);
+  void* unused;
+  odFiberSwitch(&unused, *fb->sched);
+  __builtin_unreachable();
+}
+#endif
+
+namespace {
+
+#if defined(__x86_64__)
+// Initial stack of a new task: odFiberSwitch "returns" to odFiberEntry with r12 = &fb.
+void prepare(Fiber& fb) {
+  auto top = reinterpret_cast<std::uintptr_t>(fb.mem + fb.memSize) & ~std::uintptr_t(15);
+  auto* s = reinterpret_cast<std::uint64_t*>(top);
+  s[-1] = reinterpret_cast<std::uint64_t>(&odFiberEntry);  // return address
+  for (int k = 2; k <= 7; ++k) s[-k] = 0;                    // rbp rbx r12 r13 r14 r15
+  s[-4] = reinterpret_cast<std::uint64_t>(&fb);              // r12
+  std::uint32_t mxcsr;
+  std::uint16_t fpcw;
+  asm volatile("stmxcsr %0" : "=m"(mxcsr));
+  asm volatile("fnstcw %0" : "=m"(fpcw));
+  s[-9] = fpcw;
+  s[-8] = mxcsr;
+  fb.sp = s - 9;
+}
+#else
+// Never returns: a finished task switches back to the thread that resumed it last
+// (uc_link would name the thread that started it).
+void fiberMain(unsigned lo, unsigned hi) {
+  Fiber& fb = *reinterpret_cast<Fiber*>((static_cast<std::uintptr_t>(hi) << 32) | lo);
+  runTask(fb);
   setcontext(fb.sched);
 }
 
+void prepare(Fiber& fb) {
+  getcontext(&fb.ctx);
+  fb.ctx.uc_stack.ss_sp = fb.mem + (fb.memSize - kFiberStack);
+  fb.ctx.uc_stack.ss_size = kFiberStack;
+  fb.ctx.uc_link = nullptr;
+  const auto ptr = reinterpret_cast<std::uintptr_t>(&fb);
+  makecontext(&fb.ctx, reinterpret_cast<void (*)()>(fiberMain), 2, static_cast<unsigned>(ptr & 0xffffffffu),
+              static_cast<unsigned>(ptr >> 32));
+}
+#endif
+
 void resume(Fiber& fb) {
-  ucontext_t sched;
   Fiber* const outer = tCurrent;
   tCurrent = &fb;
+#if defined(__x86_64__)
+  void* sched;
+  fb.sched = &sched;
+  odFiberSwitch(&sched, fb.sp);
+#else
+  ucontext_t sched;
   fb.sched = &sched;
   swapcontext(&sched, &fb.ctx);
+#endif
   tCurrent = outer;
 }
 
@@ -78,7 +186,11 @@ void batchWait() {
   Fiber* fb = tCurrent;
   if (!fb) fail("batchWait outside runBatched");
   fb->waiting = true;
+#if defined(__x86_64__)
+  odFiberSwitch(&fb->sp, *fb->sched);
+#else
   swapcontext(&fb->ctx, fb->sched);
+#endif
 }
 
 namespace {
@@ -108,13 +220,7 @@ struct Batch {
       fb.index = i;
       fb.running = true;
       fb.waiting = false;
-      getcontext(&fb.ctx);
-      fb.ctx.uc_stack.ss_sp = fb.mem + (fb.memSize - kFiberStack);
-      fb.ctx.uc_stack.ss_size = kFiberStack;
-      fb.ctx.uc_link = nullptr;
-      const auto ptr = reinterpret_cast<std::uintptr_t>(&fb);
-      makecontext(&fb.ctx, reinterpret_cast<void (*)()>(fiberMain), 2, static_cast<unsigned>(ptr & 0xffffffffu),
-                  static_cast<unsigned>(ptr >> 32));
+      prepare(fb);
       resume(fb);
       if (fb.error) failed = true;
     }
