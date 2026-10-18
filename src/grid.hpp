@@ -15,6 +15,7 @@
 #include "ad4.hpp"
 #include "energy.hpp"
 #include "field_kernel.hpp"
+#include "grid_kernel.hpp"
 #include "molecule.hpp"
 
 namespace od {
@@ -136,12 +137,36 @@ class CellList {
 
 }  // namespace detail
 
+// Inputs of gridPoint for buildEnergyGrids on the CPU or the GPU (spec 15.1.10); view points
+// into the members.
+struct GridBuildData {
+  GridBuildData(const GridGeometry& geom, const GridAtoms& stam, std::span<const Ad4Type> probeTypes,
+                const EnergyParams& params);
+  GridBuildData(const GridBuildData&) = delete;
+  GridBuildData& operator=(const GridBuildData&) = delete;
+
+  GridGeometry geom;
+  std::vector<Ad4Type> types;  // EnergyGrids::types
+  GridBuildView view{};
+  std::vector<double> xyz, elecQ, S, V, solT, volT, AC, BD, reqm;
+  std::vector<int> type, pm, pn;
+  detail::CellList cells;
+};
+
+// Inputs of distPoint for buildDistanceGrid (spec 15.1.10).
+struct DistBuildData {
+  DistBuildData(const GridGeometry& geom, const GridAtoms& stam, double cap);
+  DistBuildData(const DistBuildData&) = delete;
+  DistBuildData& operator=(const DistBuildData&) = delete;
+
+  DistBuildView view{};
+  std::vector<double> xyz;
+  detail::CellList cells;
+};
+
 // gridMode (spec 8.1).
 enum class GridMode : std::uint8_t { Full, Flexres, Delta };
 const char* gridModeName(GridMode m);  // "full" | "flexres" | "delta"
-
-// Blocks of kDeltaBlock^3 points (spec 8.1 delta).
-constexpr int kDeltaBlock = 8;
 
 // The StaM side of the 9b energy for one StaM conformation sample (spec 8.1, 8.2):
 // full: energy and distance grids of the sample; flexres: grids of the fixed atoms
@@ -158,6 +183,11 @@ class StamField {
   // (type maps, elec, desolv, distance) store the sample's values.
   static StamField delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
                          const EnergyGrids& grids, const DistanceGrid& dist, double threshold);
+  // delta from its blocks (e.g. computed on the GPU, spec 15.1.10): block per block (bz, by, bx
+  // order) -1 or the index of its values in data; data: per stored block, the maps (type maps,
+  // elec, desolv, distance) × kDeltaBlock^3 values (z, y, x order; 0 outside the grid).
+  static StamField delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
+                         std::vector<int> block, std::vector<float> data);
 
   GridMode mode() const { return mode_; }
   // Unique per StamField created by full, flexres or delta (copies share it).

@@ -96,67 +96,83 @@ int EnergyGrids::mapOf(Ad4Type t) const {
   return it == types.end() ? -1 : static_cast<int>(it - types.begin());
 }
 
-EnergyGrids buildEnergyGrids(const GridGeometry& geom, const GridAtoms& stam, std::span<const Ad4Type> probeTypes,
-                             const EnergyParams& params) {
-  EnergyGrids g;
-  g.geom = geom;
+GridBuildData::GridBuildData(const GridGeometry& g, const GridAtoms& stam, std::span<const Ad4Type> probeTypes,
+                             const EnergyParams& params)
+    : geom(g) {
   for (Ad4Type t : probeTypes)
-    if (t != Ad4Type::Merged && g.mapOf(t) < 0) g.types.push_back(t);
-  const int nt = static_cast<int>(g.types.size());
+    if (t != Ad4Type::Merged && std::find(types.begin(), types.end(), t) == types.end()) types.push_back(t);
+  const int nt = static_cast<int>(types.size());
+  if (nt > kGridMaxTypeMaps) fail("energy grids: more than {} probe types", kGridMaxTypeMaps);
   const int nTypes = static_cast<int>(Ad4Type::Count);
   const Ad4Coeffs& c = params.coeffs;
   // Per (probe type, StaM type): pair parameters.
-  std::vector<Ad4PairParams> pp(static_cast<std::size_t>(nt) * nTypes);
   for (int i = 0; i < nt; ++i)
-    for (int j = 0; j < nTypes; ++j) pp[i * nTypes + j] = ad4PairParams(g.types[i], static_cast<Ad4Type>(j), c);
+    for (int j = 0; j < nTypes; ++j) {
+      const Ad4PairParams q = ad4PairParams(types[i], static_cast<Ad4Type>(j), c);
+      AC.push_back(q.AC);
+      BD.push_back(q.BD);
+      reqm.push_back(q.reqm);
+      pm.push_back(q.m);
+      pn.push_back(q.n);
+    }
   // Per StaM atom: S_j = solpar + qasp |q|, V_j.
-  const std::size_t na = stam.size();
-  std::vector<double> S(na), V(na);
-  for (std::size_t a = 0; a < na; ++a) {
-    S[a] = ad4Params(stam.type[a]).solpar + c.qasp * std::abs(stam.charge[a]);
-    V[a] = ad4Params(stam.type[a]).volume;
+  for (std::size_t a = 0; a < stam.size(); ++a) {
+    for (int k = 0; k < 3; ++k) xyz.push_back(stam.xyz[a][k]);
+    type.push_back(static_cast<int>(stam.type[a]));
+    elecQ.push_back(c.elec * stam.charge[a]);
+    S.push_back(ad4Params(stam.type[a]).solpar + c.qasp * std::abs(stam.charge[a]));
+    V.push_back(ad4Params(stam.type[a]).volume);
   }
-  std::vector<double> solT(nt), volT(nt);
   for (int i = 0; i < nt; ++i) {
-    solT[i] = ad4Params(g.types[i]).solpar;
-    volT[i] = ad4Params(g.types[i]).volume;
+    solT.push_back(ad4Params(types[i]).solpar);
+    volT.push_back(ad4Params(types[i]).volume);
   }
+  cells = CellList(stam.xyz, 4.0);
+  GridBuildView& v = view;
+  for (int k = 0; k < 3; ++k) {
+    v.origin[k] = geom.origin[k];
+    v.n[k] = geom.n[k];
+  }
+  v.spacing = geom.spacing;
+  v.typeMapCount = nt;
+  v.nTypes = nTypes;
+  v.xyz = xyz.data();
+  v.type = type.data();
+  v.elecQ = elecQ.data();
+  v.S = S.data();
+  v.V = V.data();
+  v.solT = solT.data();
+  v.volT = volT.data();
+  v.AC = AC.data();
+  v.BD = BD.data();
+  v.reqm = reqm.data();
+  v.pm = pm.data();
+  v.pn = pn.data();
+  v.cDesolv = c.desolv;
+  v.cDesolvQasp = c.desolv * c.qasp;
+  v.halfSmooth = 0.5 * params.smooth;
+  v.rMin = params.elecMinDistance;
+  v.cells = cells.flat();
+}
 
+EnergyGrids buildEnergyGrids(const GridGeometry& geom, const GridAtoms& stam, std::span<const Ad4Type> probeTypes,
+                             const EnergyParams& params) {
+  const GridBuildData b(geom, stam, probeTypes, params);
+  EnergyGrids g;
+  g.geom = geom;
+  g.types = b.types;
+  const int nt = static_cast<int>(g.types.size());
   const std::size_t np = geom.size();
   g.typeMaps.assign(nt, std::vector<float>(np));
   g.elecMap.assign(np, 0.0f);
   g.desolvMap.assign(np, 0.0f);
-  const CellList cells(stam.xyz, 4.0);
-  const double half = 0.5 * params.smooth;
-  const double rMin = params.elecMinDistance;
 #pragma omp parallel for schedule(dynamic, 1) collapse(2)
   for (int k = 0; k < geom.n[2]; ++k)
     for (int j = 0; j < geom.n[1]; ++j) {
-      std::vector<double> e(nt);
+      double e[kGridMaxTypeMaps];
       for (int i = 0; i < geom.n[0]; ++i) {
-        const Vec3 p = geom.point(i, j, k);
-        std::fill(e.begin(), e.end(), 0.0);
-        double el = 0, ds = 0;
-        cells.forNear(p, kElecCutoff, [&](int a) {
-          const double r2 = dist2(p, stam.xyz[a]);
-          if (r2 >= kElecCutoff * kElecCutoff) return;
-          const double r = std::sqrt(r2);
-          double ee, de;
-          ad4Elec(r, c.elec * stam.charge[a], rMin, ee, de);
-          el += ee;
-          double gauss;
-          ad4Desolv(r, 1.0, rMin, gauss, de);
-          ds += c.desolv * c.qasp * V[a] * gauss;
-          const int ta = static_cast<int>(stam.type[a]);
-          for (int t = 0; t < nt; ++t) {
-            e[t] += c.desolv * (solT[t] * V[a] + S[a] * volT[t]) * gauss;
-            if (r < kVdwCutoff) {
-              const Ad4PairParams& q = pp[t * nTypes + ta];
-              ad4VdwHb(r, q.AC, q.BD, q.m, q.n, q.reqm, half, ee, de);
-              e[t] += ee;
-            }
-          }
-        });
+        double el, ds;
+        gridPoint(b.view, i, j, k, e, el, ds);
         const std::size_t idx = geom.index(i, j, k);
         for (int t = 0; t < nt; ++t) g.typeMaps[t][idx] = static_cast<float>(std::min(e[t], kGridClamp));
         g.elecMap[idx] = static_cast<float>(el);
@@ -166,24 +182,34 @@ EnergyGrids buildEnergyGrids(const GridGeometry& geom, const GridAtoms& stam, st
   return g;
 }
 
+DistBuildData::DistBuildData(const GridGeometry& geom, const GridAtoms& stam, double cap) {
+  std::vector<Vec3> heavy;
+  for (std::size_t a = 0; a < stam.size(); ++a)
+    if (stam.heavy[a]) {
+      heavy.push_back(stam.xyz[a]);
+      for (int k = 0; k < 3; ++k) xyz.push_back(stam.xyz[a][k]);
+    }
+  cells = CellList(heavy, std::max(cap, 1.0));
+  for (int k = 0; k < 3; ++k) {
+    view.origin[k] = geom.origin[k];
+    view.n[k] = geom.n[k];
+  }
+  view.spacing = geom.spacing;
+  view.cap = cap;
+  view.xyz = xyz.data();
+  view.cells = cells.flat();
+}
+
 DistanceGrid buildDistanceGrid(const GridGeometry& geom, const GridAtoms& stam, double cap) {
   DistanceGrid g;
   g.geom = geom;
   g.cap = cap;
   g.d.assign(geom.size(), static_cast<float>(cap));
-  std::vector<Vec3> heavy;
-  for (std::size_t a = 0; a < stam.size(); ++a)
-    if (stam.heavy[a]) heavy.push_back(stam.xyz[a]);
-  const CellList cells(heavy, std::max(cap, 1.0));
+  const DistBuildData b(geom, stam, cap);
 #pragma omp parallel for schedule(dynamic, 1) collapse(2)
   for (int k = 0; k < geom.n[2]; ++k)
     for (int j = 0; j < geom.n[1]; ++j)
-      for (int i = 0; i < geom.n[0]; ++i) {
-        const Vec3 p = geom.point(i, j, k);
-        double best = cap * cap;
-        cells.forNear(p, cap, [&](int a) { best = std::min(best, dist2(p, heavy[a])); });
-        g.d[geom.index(i, j, k)] = static_cast<float>(std::sqrt(best));
-      }
+      for (int i = 0; i < geom.n[0]; ++i) g.d[geom.index(i, j, k)] = distPoint(b.view, i, j, k);
   return g;
 }
 
@@ -442,6 +468,22 @@ StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_p
                 f.data_[base + m * bs + ((z - bz * B) * B + (y - by * B)) * B + (x - bx * B)] = s[g.index(x, y, z)];
         }
       }
+  return f;
+}
+
+StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
+                           std::vector<int> block, std::vector<float> data) {
+  StamField f = full(std::move(ref), std::move(refDist));
+  f.mode_ = GridMode::Delta;
+  const GridGeometry& g = f.grids_->geom;
+  constexpr int B = kDeltaBlock;
+  for (int c = 0; c < 3; ++c) f.nb_[c] = (g.n[c] + B - 1) / B;
+  const std::size_t bs = static_cast<std::size_t>(B) * B * B;
+  const std::size_t stored = static_cast<std::size_t>(std::count_if(block.begin(), block.end(), [](int b) { return b >= 0; }));
+  if (block.size() != static_cast<std::size_t>(f.nb_[0]) * f.nb_[1] * f.nb_[2] || data.size() != stored * bs * f.mapCount_)
+    fail("delta grids: block layout differs from the reference");
+  f.block_ = std::move(block);
+  f.data_ = std::move(data);
   return f;
 }
 

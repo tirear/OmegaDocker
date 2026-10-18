@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.64 |
+| 文件版本 | 1.65 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1847,6 +1847,24 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
   posm1、1L2Y（每個姿勢的計算量較大，切換次數較少）沒有明顯差異。
 
+### 15.1.10 CUDA 版：能量格點、距離格點與 delta 區塊（1.65）
+
+- **原因**：StaM 有可轉動的兩面角時，每個 StaM 構形樣本都要重建格點（8.1）。2KJJ 為 StaM、1L2Y 為 MobM、64 Å 盒子（173³ 點，5 個型別圖）、`stam.dockingConfSampleNum` 100：GPU 版整個執行 124 s 中，CPU 建格點佔 53.3 s（每個構形 0.46 s 能量格點、0.012 s 距離格點、0.05 s delta 比較），比 9a（26 s）和 9b 最小化（31 s）都多。
+- **共用的計算**：每個格點的值由 `gridPoint`（能量格點）與 `distPoint`（距離格點）計算（`src/grid_kernel.hpp`，`__host__ __device__`），CPU 的 `buildEnergyGrids`／`buildDistanceGrid` 與 GPU 都呼叫它們。輸入（原子、對參數、cell list）由 `GridBuildData`／`DistBuildData` 整理成平坦陣列。原子的走訪順序（cell list）與加總順序和 CPU 相同；這些函式只用加減乘除與 `sqrt`（兩邊都是 IEEE 正確捨入），GPU 檔以 `-fmad=false` 編譯，因此 GPU 的格點與 CPU 逐位元相同（含 `kGridClamp` 截斷與 NaN 的處理）。
+- **`GpuGridBuilder`**（`src/gpu/grid_gpu.cu`）：每個格點一個執行緒；依 z 方向分段計算（每次最多 2²⁶ 個輸出值），限制裝置記憶體。
+  - `full`、`flexres` 與參考構形：能量格點與距離格點在 GPU 上計算後複製回主機。
+  - `delta`：參考構形的所有圖（型別圖、elec、desolv、距離）上傳一次後留在裝置上。每個樣本以整層 8³ 區塊分段：計算所有圖、每個區塊與參考比較（與 CPU 相同：任一點 `|sample − ref| > grid.deltaThreshold`），依 bz、by、bx 順序編號後，只把不同的區塊複製回主機，由 `StamField::delta(ref, refDist, block, data)` 建立。區塊內容與 CPU 的 `StamField::delta` 逐位元相同。
+  - 裝置記憶體：參考圖 (型別圖數 + 3) × 格點數 × 4 bytes（上例 166 MB），另加一段的工作記憶體。
+- **驗證**：單元測試比較 GPU 與 CPU 的能量格點、距離格點與 delta 區塊（兩種盒子、預設分段與不整除的小分段、三個門檻），全部逐位元相同。CPU 版輸出與 1.64 逐位元相同。GPU 版的最終結果與 1.64 不同，但 1.64 自身連續兩次執行也不同（9a／9b 梯度 `atomicAdd` 的加總順序，15.1.4）；儲存的 delta 區塊數相同。
+- **速度**（上例，舊版、新版各執行 1 次；機器同時有其他負載）：
+
+| 項目 | 1.64 | 1.65 |
+|---|---|---|
+| 9b 格點，100 個 StaM 構形（`delta`） | 55.1 s | 5.4 s |
+| 整個執行 | 143.4 s | 86.3 s |
+| 9b 格點，8 個構形，`grid.mode = full` | 3.80 s | 0.51 s |
+| 9b 格點，8 個構形，`grid.mode = flexres` | 0.28 s | 0.06 s |
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2151,3 +2169,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.62 | 2026-10-19 | CUDA 核心最佳化（二）：`ad4VdwHb` 展開 12-6／12-10 的乘法、兩面角 cos／sin 平行預先計算（結果逐位元不變）；記錄 Nsight Compute 分析、未採用的嘗試與同一時段的量測（15.1.7） |
 | 1.63 | 2026-10-19 | 9b 的 CPU／GPU 重疊：`runBatchedAsync`、`PoseEvaluator` 的非同步介面、`GpuEnergy` 的 2 條 lane（各自的 stream 與工作記憶體）、平行打包與解包（15.1.5、15.1.8） |
 | 1.64 | 2026-10-19 | x86-64 的協程切換改用不經系統呼叫的 `odFiberSwitch`（15.1.9） |
+| 1.65 | 2026-10-19 | 能量格點、距離格點與 delta 區塊在 GPU 上計算（`GpuGridBuilder`、共用的 `gridPoint`／`distPoint`），與 CPU 逐位元相同（15.1.10） |

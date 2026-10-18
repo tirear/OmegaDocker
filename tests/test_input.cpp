@@ -46,6 +46,7 @@
 #include "conf9a_gpu.hpp"
 #include "dock9b_gpu.hpp"
 #include "energy_gpu.hpp"
+#include "grid_gpu.hpp"
 #endif
 #include "symrmsd.hpp"
 #include "energy.hpp"
@@ -4680,5 +4681,71 @@ TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
     }
   }
   ev.idle();
+}
+
+TEST_CASE("gpu: energy grids equal the CPU grids") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  GridFixture x;
+  const od::Vec3 c = x.stamCenter();
+  const od::EnergyParams params;
+  for (double size : {12.0, 26.0}) {
+    INFO("box ", size);
+    const auto geom = od::boxGrid(c, {size, size, size * 0.75}, 0.375);
+    const auto ref = od::buildEnergyGrids(geom, x.stam, x.mobm.type, params);
+    // The default slab and slabs that split the grid unevenly.
+    for (std::size_t slab : {std::size_t(0), std::size_t(7919)}) {
+      INFO("slab ", slab);
+      od::GpuGridBuilder gb(0, slab);
+      const od::GridBuildData b(geom, x.stam, x.mobm.type, params);
+      REQUIRE(b.types == ref.types);
+      std::vector<std::vector<float>> maps(b.types.size(), std::vector<float>(geom.size(), -1.0f));
+      std::vector<float*> ptr;
+      for (auto& m : maps) ptr.push_back(m.data());
+      std::vector<float> elec(geom.size(), -1.0f), desolv(geom.size(), -1.0f);
+      gb.build(b.view, od::kGridClamp, ptr.data(), elec.data(), desolv.data());
+      std::size_t diff = 0;
+      for (std::size_t t = 0; t < maps.size(); ++t) diff += maps[t] != ref.typeMaps[t];
+      CHECK(diff == 0);
+      CHECK(elec == ref.elecMap);
+      CHECK(desolv == ref.desolvMap);
+      // Distance grid.
+      const double cap = 4.25;
+      const auto refDist = od::buildDistanceGrid(geom, x.stam, cap);
+      std::vector<float> dist(geom.size(), -1.0f);
+      gb.buildDistance(od::DistBuildData(geom, x.stam, cap).view, dist.data());
+      CHECK(dist == refDist.d);
+      // delta blocks of a sample with moved atoms against the CPU StamField::delta.
+      od::GridAtoms moved = x.stam;
+      for (std::size_t a = 0; a < moved.size(); a += 7) moved.xyz[a][0] += 0.8;
+      const auto sg = od::buildEnergyGrids(geom, moved, x.mobm.type, params);
+      const auto sd = od::buildDistanceGrid(geom, moved, cap);
+      auto rg = std::make_shared<const od::EnergyGrids>(ref);
+      auto rd = std::make_shared<const od::DistanceGrid>(refDist);
+      std::vector<const float*> rmaps;
+      for (const auto& m : ref.typeMaps) rmaps.push_back(m.data());
+      rmaps.push_back(ref.elecMap.data());
+      rmaps.push_back(ref.desolvMap.data());
+      rmaps.push_back(refDist.d.data());
+      gb.setReference(42, rmaps.data(), static_cast<int>(rmaps.size()), geom.size());
+      CHECK(gb.referenceId() == 42);
+      for (double thr : {1e-4, 1e-2, 0.5}) {
+        INFO("threshold ", thr);
+        const auto cpu = od::StamField::delta(rg, rd, sg, sd, thr);
+        std::vector<int> block;
+        std::vector<float> data;
+        gb.buildDelta(od::GridBuildData(geom, moved, x.mobm.type, params).view, od::DistBuildData(geom, moved, cap).view,
+                      od::kGridClamp, thr, block, data);
+        const auto gpu = od::StamField::delta(rg, rd, std::move(block), std::move(data));
+        CHECK(cpu.deltaBlockCount() > 0);
+        if (thr == 0.5) CHECK(cpu.deltaBlockCount() < cpu.blockCount());
+        const od::FieldModel a = cpu.model(), b2 = gpu.model();
+        CHECK(a.block == b2.block);
+        CHECK(a.data == b2.data);
+      }
+    }
+  }
 }
 #endif

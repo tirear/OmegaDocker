@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <format>
 #include <limits>
@@ -47,6 +48,7 @@
 #ifdef OD_HAVE_CUDA
 #include "conf9a_gpu.hpp"
 #include "dock9b_gpu.hpp"
+#include "grid_gpu.hpp"
 #endif
 
 namespace {
@@ -936,8 +938,41 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const od::Dock9bParams dp = dockParams(opt, seed);
   // 9b on the GPU (spec 15.1.4, 15.1.5): one evaluator per MobM; field, quick filter and posm2_fft shared by them.
   std::vector<std::unique_ptr<od::PoseEvaluator>> poseEval(mobSets.size());
+  const double distCap = std::max({opt.maxNearDistance, opt.clashDistance,
+                                   opt.posm == "posm3" || opt.posm == "posm4" ? opt.sepaShellMax : 0.0}) +
+                         2 * opt.gridSpacing;
+  std::function<od::EnergyGrids(const od::GridAtoms&)> energyGrids = [&](const od::GridAtoms& a) {
+    return od::buildEnergyGrids(geom, a, probe, energyParams(opt));
+  };
+  std::function<od::DistanceGrid(const od::GridAtoms&)> distanceGrid = [&](const od::GridAtoms& a) {
+    return od::buildDistanceGrid(geom, a, distCap);
+  };
 #ifdef OD_HAVE_CUDA
+  // Grids on the GPU (spec 15.1.10): the same values as the CPU.
+  std::shared_ptr<od::GpuGridBuilder> gpuGrid;
   if (gpu) {
+    gpuGrid = std::make_shared<od::GpuGridBuilder>(opt.gpuDevice);
+    distanceGrid = [&](const od::GridAtoms& a) {
+      od::DistanceGrid g;
+      g.geom = geom;
+      g.cap = distCap;
+      g.d.resize(geom.size());
+      gpuGrid->buildDistance(od::DistBuildData(geom, a, distCap).view, g.d.data());
+      return g;
+    };
+    energyGrids = [&](const od::GridAtoms& a) {
+      const od::GridBuildData b(geom, a, probe, energyParams(opt));
+      od::EnergyGrids g;
+      g.geom = geom;
+      g.types = b.types;
+      g.typeMaps.assign(g.types.size(), std::vector<float>(geom.size()));
+      g.elecMap.resize(geom.size());
+      g.desolvMap.resize(geom.size());
+      std::vector<float*> maps;
+      for (auto& m : g.typeMaps) maps.push_back(m.data());
+      gpuGrid->build(b.view, od::kGridClamp, maps.data(), g.elecMap.data(), g.desolvMap.data());
+      return g;
+    };
     auto gpuField = std::make_shared<od::GpuField>(opt.gpuDevice);
     auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevice);
     for (std::size_t i = 0; i < mobSets.size(); ++i)
@@ -965,9 +1000,6 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   od::logInfo(std::format("9b grid.mode {}{}: StaM grid atoms {}, moved by torsions {}, backbone {}", od::gridModeName(gridMode),
                           opt.gridMode == "auto" ? " (auto)" : "", movedMask.size(), movedNum,
                           backboneMoves ? "movable" : "fixed"));
-  const double distCap = std::max({opt.maxNearDistance, opt.clashDistance,
-                                   opt.posm == "posm3" || opt.posm == "posm4" ? opt.sepaShellMax : 0.0}) +
-                         2 * opt.gridSpacing;
   // Grids built once and kept across rounds: full without StaM torsions (input conformation),
   // flexres (fixed atoms of the input conformation), delta (reference: input conformation).
   std::shared_ptr<const od::EnergyGrids> fixedGrids;
@@ -1086,8 +1118,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         return od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
       };
       auto build = [&](const od::GridAtoms& a) {
-        return std::pair{std::make_shared<const od::EnergyGrids>(od::buildEnergyGrids(geom, a, probe, energyParams(opt))),
-                         std::make_shared<const od::DistanceGrid>(od::buildDistanceGrid(geom, a, distCap))};
+        return std::pair{std::make_shared<const od::EnergyGrids>(energyGrids(a)),
+                         std::make_shared<const od::DistanceGrid>(distanceGrid(a))};
       };
       const bool firstBuild = !fixedGrids;
       od::StamField field;
@@ -1101,8 +1133,30 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         field = od::StamField::full(fixedGrids, fixedDist);
       } else if (gridMode == od::GridMode::Delta) {
         if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(stamAtoms(true));
-        const auto [g, d] = build(stamAtoms(false));
-        field = od::StamField::delta(fixedGrids, fixedDist, *g, *d, opt.gridDeltaThreshold);
+#ifdef OD_HAVE_CUDA
+        if (gpuGrid) {
+          // The reference maps stay on the device; only the differing blocks are copied back.
+          if (gpuGrid->referenceId() != 1) {
+            std::vector<const float*> maps;
+            for (const auto& m : fixedGrids->typeMaps) maps.push_back(m.data());
+            maps.push_back(fixedGrids->elecMap.data());
+            maps.push_back(fixedGrids->desolvMap.data());
+            maps.push_back(fixedDist->d.data());
+            gpuGrid->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
+          }
+          const od::GridAtoms a = stamAtoms(false);
+          std::vector<int> block;
+          std::vector<float> data;
+          gpuGrid->buildDelta(od::GridBuildData(geom, a, probe, energyParams(opt)).view,
+                              od::DistBuildData(geom, a, distCap).view, od::kGridClamp, opt.gridDeltaThreshold, block,
+                              data);
+          field = od::StamField::delta(fixedGrids, fixedDist, std::move(block), std::move(data));
+        } else
+#endif
+        {
+          const auto [g, d] = build(stamAtoms(false));
+          field = od::StamField::delta(fixedGrids, fixedDist, *g, *d, opt.gridDeltaThreshold);
+        }
         blockSum += static_cast<long long>(field.deltaBlockCount());
         blockTotal += static_cast<long long>(field.blockCount());
       } else {
