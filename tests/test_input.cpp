@@ -42,6 +42,7 @@
 #include "dssp.hpp"
 #include "energy_kernel.hpp"
 #ifdef OD_HAVE_CUDA
+#include "conf9a_gpu.hpp"
 #include "energy_gpu.hpp"
 #endif
 #include "symrmsd.hpp"
@@ -1713,6 +1714,109 @@ TEST_CASE("minimize: FIRE") {
       for (std::size_t i = 0; i < x.size(); ++i) bigM = std::max(bigM, std::abs(od::wrapDeg(visited[s][i] - visited[s - 1][i])));
     CHECK(bigM <= 10.0 + 1e-9);
     CHECK(rm.evaluations >= rm.steps + 1);
+  }
+}
+
+namespace {
+
+std::array<double, 7> termArray(const od::EnergyTerms& e) {
+  return {e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.closure, e.closureMaxDeviation};
+}
+std::array<double, 7> termArray(const od::FlatTerms& e) {
+  return {e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.closure, e.closureMaxDeviation};
+}
+
+// ConfEvaluator on the CPU (EnergySystem::evaluate), recording the batch sizes.
+struct CpuConfEvaluator : od::ConfEvaluator {
+  const od::EnergySystem& sys;
+  int batch;
+  int calls = 0, largest = 0, idles = 0;
+  CpuConfEvaluator(const od::EnergySystem& s, int b) : sys(s), batch(b) {}
+  int maxBatch() const override { return batch; }
+  void evaluate(const double* a, int n, od::EnergyTerms* terms, double* grad) override {
+    ++calls;
+    largest = std::max(largest, n);
+    const int d = sys.torsionCount();
+    std::vector<double> g;
+    for (int i = 0; i < n; ++i) {
+      terms[i] = sys.evaluate(std::span<const double>(a + static_cast<std::size_t>(i) * d, d), grad ? &g : nullptr);
+      if (grad) std::copy(g.begin(), g.end(), grad + static_cast<std::size_t>(i) * d);
+    }
+  }
+  void idle() override { ++idles; }
+};
+
+}  // namespace
+
+TEST_CASE("9a: batched minimization equals per-sample minimization (1L2Y)") {
+  Csgm1Fixture x;
+  const od::Molecule& m = x.m();
+  const od::EnergySystem sys({{&m, &x.s().tree}}, {});
+  const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
+  const int d = sys.torsionCount(), count = 20;
+  std::vector<double> start(static_cast<std::size_t>(count) * d);
+  for (int i = 0; i < count; ++i) {
+    od::Rng r(3, 0, i);
+    smp.sample(r, std::span<double>(start.data() + static_cast<std::size_t>(i) * d, d));
+  }
+  for (const char* method : {"sd", "cg", "fire", "lbfgs", "adadelta"}) {
+    od::MinParams mp;
+    mp.method = od::parseMinMethod(method);
+    std::vector<double> ref = start;
+    std::vector<od::EnergyTerms> refTerms(count);
+    std::vector<int> refSteps(count);
+    for (int i = 0; i < count; ++i)
+      refTerms[i] = od::minimizeConf(sys, std::span<double>(ref.data() + static_cast<std::size_t>(i) * d, d), mp, &refSteps[i]);
+    for (int batch : {1, 7, 64}) {
+      CpuConfEvaluator ev(sys, batch);
+      std::vector<double> a = start;
+      std::vector<od::EnergyTerms> terms(count);
+      std::vector<int> steps(count);
+      od::minimizeConfBatch(ev, d, a, mp, terms.data(), steps.data());
+      INFO(method, " batch ", batch);
+      CHECK(a == ref);
+      CHECK(steps == refSteps);
+      int diff = 0;
+      for (int i = 0; i < count; ++i) diff += termArray(terms[i]) != termArray(refTerms[i]) || terms[i].clashPairs != refTerms[i].clashPairs;
+      CHECK(diff == 0);
+      CHECK(ev.largest == std::min(batch, count));
+    }
+  }
+}
+
+TEST_CASE("9a: L2 pool refill with a ConfEvaluator equals the CPU path (1L2Y)") {
+  Csgm1Fixture x;
+  const od::Molecule& m = x.m();
+  const od::EnergySystem sys({{&m, &x.s().tree}}, {});
+  const od::Csgm1Sampler smp(m, x.s(), *x.cfg, {});
+  int calls = 0;
+  const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
+    smp.sample(r, a);
+#pragma omp atomic
+    ++calls;
+    return idx.global % 5 == 3 ? od::GenResult::GrowFailed : od::GenResult::Built;
+  };
+  od::Fill9aParams p;
+  p.minL2 = 24;
+  p.maxL1Batch = 10;
+  p.seed = 5;
+  p.stream = 1;
+  std::vector<od::ConfSample> a, b;
+  std::uint64_t ca = 0, cb = 0;
+  const auto sa = od::fillL2Pool(sys, gen, 6, p, ca, a);
+  CpuConfEvaluator ev(sys, 4);
+  p.evaluator = &ev;
+  const auto sb = od::fillL2Pool(sys, gen, 6, p, cb, b);
+  CHECK(ca == cb);
+  CHECK(sa.l1 == sb.l1);
+  CHECK(sa.growFailed == sb.growFailed);
+  CHECK(sa.growFailed > 0);
+  CHECK(sa.minSteps == sb.minSteps);
+  CHECK(ev.idles == 1);
+  REQUIRE(a.size() == b.size());
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    CHECK(a[i].angles == b[i].angles);
+    CHECK(a[i].energy == b[i].energy);
   }
 }
 
@@ -3931,13 +4035,6 @@ std::vector<std::vector<T>> flatAngleSets(const od::EnergySystem& sys, int n) {
   return out;
 }
 
-std::array<double, 7> termArray(const od::EnergyTerms& e) {
-  return {e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.closure, e.closureMaxDeviation};
-}
-std::array<double, 7> termArray(const od::FlatTerms& e) {
-  return {e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.closure, e.closureMaxDeviation};
-}
-
 }  // namespace
 
 TEST_CASE("energy kernel: flat form equals EnergySystem::evaluate") {
@@ -4055,6 +4152,64 @@ TEST_CASE("gpu: energy and gradient match the CPU reference") {
     CHECK(gf.energy <= 2 * cf.energy + 1e-5);
     CHECK(gf.gradient <= 2 * cf.gradient + 1e-5);
     CHECK(gf.coord <= 2 * cf.coord + 1e-5);
+  }
+}
+#endif
+
+#ifdef OD_HAVE_CUDA
+// 9a minimization with GPU energies against the CPU path (spec 15.1.3). Minimization paths of
+// large clashing systems are sensitive to rounding: the control is the CPU path from start
+// angles changed by 1e-10 degrees, and the GPU must agree with the CPU at least as often.
+TEST_CASE("gpu: 9a minimization matches the CPU path") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FlatFixture f;
+  for (const auto& c : f.cases) {
+    const od::EnergySystem& sys = *c.sys;
+    const int d = sys.torsionCount(), count = c.name == "1D3Z" ? 64 : 256;
+    std::vector<double> start;
+    for (int i = 0; i < count; ++i) {
+      const auto a = perturbed(sys.inputAngles(), 30, 500 + i);
+      start.insert(start.end(), a.begin(), a.end());
+    }
+    od::MinParams mp;
+    std::vector<double> ref = start, ctl = start;
+    for (double& v : ctl) v += 1e-10;
+    std::vector<od::EnergyTerms> refTerms(count), ctlTerms(count);
+    std::vector<int> refSteps(count), ctlSteps(count);
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < count; ++i) {
+      refTerms[i] = od::minimizeConf(sys, std::span<double>(ref.data() + static_cast<std::size_t>(i) * d, d), mp, &refSteps[i]);
+      ctlTerms[i] = od::minimizeConf(sys, std::span<double>(ctl.data() + static_cast<std::size_t>(i) * d, d), mp, &ctlSteps[i]);
+    }
+    od::GpuConfEvaluator ev(sys.model(), 0, 8192);
+    std::vector<double> a = start;
+    std::vector<od::EnergyTerms> terms(count);
+    std::vector<int> steps(count);
+    od::minimizeConfBatch(ev, d, a, mp, terms.data(), steps.data());
+    int sameSteps = 0, close = 0, ctlClose = 0;
+    double worst = 0, maxAng = 0;
+    auto relDiff = [](const od::EnergyTerms& x, const od::EnergyTerms& r) {
+      return std::abs(x.filterEnergy() - r.filterEnergy()) / std::max(1.0, std::abs(r.filterEnergy()));
+    };
+    for (int i = 0; i < count; ++i) {
+      sameSteps += steps[i] == refSteps[i];
+      const double rel = relDiff(terms[i], refTerms[i]);
+      worst = std::max(worst, rel);
+      close += rel < 1e-6;
+      ctlClose += relDiff(ctlTerms[i], refTerms[i]) < 1e-6;
+      for (int k = 0; k < d; ++k) {
+        double dd = std::abs(a[static_cast<std::size_t>(i) * d + k] - ref[static_cast<std::size_t>(i) * d + k]);
+        maxAng = std::max(maxAng, std::min(dd, 360 - dd));
+      }
+    }
+    MESSAGE(std::format("{}: {} samples; same step count {}, energy within 1e-6 (relative): GPU {}, CPU control {}; "
+                        "worst {:.2e}, max angle diff {:.2e} deg",
+                        c.name, count, sameSteps, close, ctlClose, worst, maxAng));
+    INFO(c.name);
+    CHECK(close >= ctlClose - count / 20);
   }
 }
 #endif

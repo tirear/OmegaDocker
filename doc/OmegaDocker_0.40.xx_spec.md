@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.57 |
+| 文件版本 | 1.58 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -507,7 +507,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - `nowL2`：加入後 L2 pool 的樣本數；`addedL2`：本批新增數；`L1`：本批產生數。
 - csgm3 不使用上式：每次產生的 L1 固定為 k(k−1)·n（7.7），第一次也不用 `initL1confSampleNum`；仍以 `MaxL1BatchNum` 分批處理、受 `MaxL1TotalNum` 限制（最後一次可能只產生部分線上的樣本）。之後若改回 csgm1，沿用上式由最後一次 csgm3 算出的 nextL1。
-- `MaxL1BatchNum`：由 `gpu.memLimit` 推算的單批上限；超過時分批處理。CPU 版以 `stam.maxL1BatchNum`／`mobm.maxL1BatchNum`（預設 65536）指定。
+- `MaxL1BatchNum`：單批上限，以 `stam.maxL1BatchNum`／`mobm.maxL1BatchNum`（預設 65536）指定；超過時分批處理。GPU 版在一批之內再以 `gpu.conf9aBatchNum` 個樣本同時最小化（15.1.3）。
 - 一批（L1 個）全部處理完才檢查是否達到 `minL2confSampleNum`，因此 L2 pool 可能超過該數。
 - 單次補充的累計 L1 達 `MaxL1TotalNum` 仍未達到 `minL2confSampleNum` → 報錯並結束；最後一批的數量不超過剩餘額度。
 - `MaxL1TotalNum`（`stam.maxL1TotalNum`／`mobm.maxL1TotalNum`，預設 10⁹）：單次補充的累計 L1 上限；達到時報錯並結束（避免產率為 0 時無限迴圈）。
@@ -1553,6 +1553,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `grid.mode` | `--grid_mode` | `auto`（依主鏈可動與否） | 8.1（`auto`、`full`、`flexres`、`delta`） |
 | `grid.deltaThreshold` | `--grid_deltaThreshold` | 1×10⁻⁴ | 8.1（kcal/mol；距離網格為 Å） |
 | `gpu.memLimit`（未實作） | `--gpu_memLimit` | 可用量 90% | 13 |
+| `gpu.enable` | `--gpu_enable` | true | 15.1.3（以 CUDA 建置且有裝置時使用 GPU） |
+| `gpu.device` | `--gpu_device` | 0 | 15.1.3 |
+| `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
 | `output.minPerRank` | `--output_minPerRank` | 40 | 10.3 |
@@ -1572,7 +1575,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `{stam,mobm}.initL1confSampleNum` | `--{stam,mobm}_initL1confSampleNum` | minL2 | 7.2 |
 | `{stam,mobm}.eliteConfSampleNum` | `--{stam,mobm}_eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
 | `{stam,mobm}.maxL1TotalNum` | `--{stam,mobm}_maxL1TotalNum` | 10⁹ | 7.4 |
-| `{stam,mobm}.maxL1BatchNum` | `--{stam,mobm}_maxL1BatchNum` | 65536（CPU 版；GPU 版由 `gpu.memLimit` 推算） | 7.4 |
+| `{stam,mobm}.maxL1BatchNum` | `--{stam,mobm}_maxL1BatchNum` | 65536 | 7.4 |
 | `{stam,mobm}.csgmGA` | `--{stam,mobm}_csgmGA` | `csgm2` | 7.3（`csgm2` 或 `csgm3`） |
 | `{stam,mobm}.csgmBuild` | `--{stam,mobm}_csgmBuild` | `whole` | 7.8（`whole`、`grow`、`growClose`） |
 | `{stam,mobm}.growMaxRetry` | `--{stam,mobm}_growMaxRetry` | 16 | 7.8 |
@@ -1692,6 +1695,27 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
   - 1D3Z 的 float 誤差較大，是因為最大擾動很大（數百度，嚴重碰撞），float 與 double 的碰撞原子對數差 1（GPU 與 CPU 相同）；GPU 與 CPU 的 float 誤差相同。
 - **速度**（未最佳化的第一版；float、含梯度，不含座標下載；CPU 為 AMD Ryzen 7 9700X 16 執行緒，以 OpenMP 平行計算各樣本）：8192 個樣本時每個樣本 GPU／CPU 為 1L2Y 9.5／32.6 μs（3.4 倍）、2KJJ 40.6／211 μs（5.2 倍）、1ZNF 16.0／61.0 μs（3.8 倍）、1D3Z 62.4／420 μs（6.7 倍）。效能最佳化（依原子數分級，15.1）之後處理。
+
+### 15.1.3 CUDA 版：9a 最小化（1.58）
+
+- **分工**：最小化方法（`conf9a.minMethod`，12）的控制邏輯留在 CPU，GPU 只負責批次計算能量與梯度（double，與 CPU 版 9a 相同精度，12.1）。樣本產生（csgm、grow、迴圈閉合）仍在 CPU 以 OpenMP 平行處理。
+- **批次最小化**（`minimizeTorsionsBatch`）：每個樣本以原本的 `minimizeTorsions` 最小化，各自在一個協程（`ucontext`，每個 256 KiB 堆疊）中執行；樣本需要能量時暫停，所有進行中的樣本都暫停後，以一次 GPU 呼叫計算全部請求，再逐一繼續。完成的樣本立即由下一個樣本遞補，同時進行的樣本數維持在 `gpu.conf9aBatchNum`（受啟動時可用 GPU 記憶體的 90% 限制，超過時記錄實際值）。五種方法都不需改寫。
+- **介面**：`ConfEvaluator`（`conf9a.hpp`）；`Fill9aParams.evaluator` 為空時與原本的 CPU 版完全相同。GPU 實作為 `GpuConfEvaluator`（`src/gpu/conf9a_gpu.hpp`），每個 StaM 群、MobM 各一個；每次 `fillL2Pool` 結束時釋放工作記憶體。最小化後的能量各項（篩選 `energy.Emax`、`topology.maxBreakDist` 用）也在 GPU 上計算。
+- **參數**：`gpu.enable`（預設 true；未以 CUDA 建置或沒有 CUDA 裝置時使用 CPU，並在記錄中說明）、`gpu.device`（預設 0）、`gpu.conf9aBatchNum`（預設 8192）。三者都可在 `--resume` 時修改（16）。
+- **正確性**：
+  - 以 CPU 計算能量的 `ConfEvaluator` 執行批次最小化，結果（角度、步數、能量各項）與逐一呼叫 `minimizeConf` 逐位元相同（五種方法，同時進行 1、7、64 個樣本）；`fillL2Pool` 的 L2 pool 也逐位元相同（測試）。
+  - GPU 與 CPU：能量的差約 10⁻¹²（15.1.2），但最小化路徑對捨入很敏感：大型且嚴重碰撞的系統，起始角度差 10⁻¹⁰° 就可能走到不同的局部極小。因此 GPU 測試以「CPU 從起始角度 +10⁻¹⁰° 出發」為對照：最小化後 9a 能量（相對差 < 10⁻⁶）與 CPU 一致的樣本數不得比對照少超過 5%。
+  - 實測（各樣本起始角度為輸入值加 ±30° 均勻擾動，L-BFGS）：
+
+| 系統 | 樣本 | 與 CPU 一致：GPU | CPU 對照 | 步數相同 |
+|---|---|---|---|---|
+| 1L2Y | 256 | 256 | 238 | 256 |
+| 2KJJ（A:10–14 可動） | 256 | 256 | 247 | 256 |
+| 1ZNF（`metalBond = "break"`） | 256 | 256 | 253 | 256 |
+| 1D3Z | 64 | 48 | 26 | 53 |
+
+- **可重現性**：GPU 的每原子梯度以 `atomicAdd` 累加，順序每次可能不同，因此 GPU 版 9a 的結果不保證每次執行逐位元相同（16 的「接續後與不中斷時逐位元相同」只適用於 CPU 版）。L2 pool 的樣本若剛好落在 `energy.Emax` 邊界，篩選結果可能改變，進而改變下一次補充的 L1 數量（7.4）。
+- **速度**（2KJJ 為 StaM、1L2Y 為 MobM，`mobm.minL2confSampleNum` 8000；TITAN V／Ryzen 7 9700X 16 執行緒）：9a StaM 群 1,464 個樣本 CPU 6.65 s → GPU 2.26 s；MobM 約 16,600 個樣本 CPU 10.62 s → GPU 3.62 s（約 2.9 倍）。核心尚未最佳化（15.1.2）。
 
 ### 15.2 依賴套件
 
@@ -1819,14 +1843,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ### 16.4 接續
 - `--resume=<outPrefix>`（只能在命令列）：從最後一個完整的檢查點的下一輪開始。
   - 「最後一個完整的檢查點」：`checkpoint/` 下有 `manifest.toml` 的 `round_<r>/` 中 r 最大者（不依賴 `last`，因此 rename 之後、更新 `last` 之前中斷也能取得最新一輪）；`.tmp` 目錄忽略。
-  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
+  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound` 與 `gpu.*`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
   - 不可同時使用 `--paramFile`、`--outPrefix`（報錯）；輸出寫回 `--resume` 指定的目錄。
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
-  - `gpuMemLimit`（`gpu.memLimit`）尚未實作，目前只有 `maxRound` 可修改。
+  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
-- 參數只允許修改 `maxRound`、`gpuMemLimit`；其他參數不同 → 報錯並結束。
+- 參數只允許修改 `maxRound`、`gpu.*`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
 
 ---
@@ -1990,3 +2014,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.55 | 2026-10-17 | 修正 9a `adadelta` 實測說明：未通過的原因是預設停止條件（`confMinDeltaE`）使其提早停止，非無法推開碰撞；新增 `confMinDeltaE` 0、`confMinMaxStep` 300 的比較；補充 `adadelta` 步長特性（12） |
 | 1.56 | 2026-10-17 | `conf9a.minMethod` 預設由 `fire` 改為 `lbfgs`（7.9、12、參數表） |
 | 1.57 | 2026-10-18 | CUDA 版第 1 步：`OD_CUDA` 建置選項、CPU／GPU 共用的計算函式（`energy_kernel.hpp`、`EnergySystem::model()`）、GPU 批次能量與梯度（`GpuEnergy`）、CPU／GPU 比對的容許誤差與實測（15.1.2） |
+| 1.58 | 2026-10-18 | CUDA 版第 2 步：9a 最小化以 GPU 計算能量與梯度（`ConfEvaluator`、協程批次最小化 `minimizeTorsionsBatch`）；新增 `gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`，可在 `--resume` 時修改；正確性對照與實測（15.1.3、16、14） |

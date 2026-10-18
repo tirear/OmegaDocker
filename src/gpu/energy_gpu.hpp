@@ -38,6 +38,10 @@ class GpuEnergy {
   void evaluate(const double* angles, int n, FlatTerms* terms, double* grad, double* coords);
   // Single precision (spec 12.1): coordinates and per-item terms in float, sums in double.
   void evaluate(const float* angles, int n, FlatTerms* terms, double* grad, float* coords);
+  // Device work memory per sample of evaluate (bytes).
+  std::size_t bytesPerSample(bool fp64, bool grad) const;
+  // Frees the work memory (it is allocated again by the next evaluate).
+  void releaseScratch();
 
  private:
   struct Impl;

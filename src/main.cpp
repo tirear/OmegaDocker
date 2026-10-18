@@ -44,6 +44,9 @@
 #include "molconfig.hpp"
 #include "topology.hpp"
 #include "version.hpp"
+#ifdef OD_HAVE_CUDA
+#include "conf9a_gpu.hpp"
+#endif
 
 namespace {
 
@@ -170,12 +173,37 @@ void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>
                           e.filterEnergy(), e.vdw, e.hbond, e.elec, e.desolv, e.clash, e.clashPairs, e.closure));
 }
 
+// Whether 9a minimization runs on the GPU (spec 15.1.3); logs the choice.
+bool selectGpu(const od::Options& opt) {
+#ifdef OD_HAVE_CUDA
+  if (!opt.gpuEnable) {
+    od::logInfo("9a energies: CPU (gpu.enable = false)");
+    return false;
+  }
+  const int n = od::gpuDeviceCount();
+  if (n == 0) {
+    od::logInfo("9a energies: CPU (no CUDA device)");
+    return false;
+  }
+  if (opt.gpuDevice >= n) od::fail("gpu.device {}: only {} CUDA device(s)", opt.gpuDevice, n);
+  const auto info = od::gpuDeviceInfo(opt.gpuDevice);
+  od::logInfo(std::format("9a energies: GPU {} {} (sm_{}{}, {} MiB free of {} MiB)", opt.gpuDevice, info.name, info.major,
+                          info.minor, info.freeMem >> 20, info.totalMem >> 20));
+  return true;
+#else
+  (void)opt;
+  od::logInfo("9a energies: CPU (built without CUDA)");
+  return false;
+#endif
+}
+
 // Conformation samples of the StaM group or one MobM: the L2 pool, its 9a
 // refills and the samples moved to a dcss (spec 7.3). Sample ids index samples().
 class ConfSet {
  public:
   ConfSet(std::string name, std::vector<od::EnergyPart> parts, std::vector<const od::MolSettings*> settings,
-          const od::MolConfig& cfg, const od::Options& opt, od::SampleSet set, std::uint64_t seed, std::uint64_t stream)
+          const od::MolConfig& cfg, const od::Options& opt, od::SampleSet set, std::uint64_t seed, std::uint64_t stream,
+          bool gpu)
       : name_(std::move(name)), parts_(std::move(parts)), settings_(std::move(settings)), opt_(opt),
         csgm_(set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm), sys_(parts_, energyParams(opt)) {
     if (sys_.torsionCount() == 0) {
@@ -199,6 +227,16 @@ class ConfSet {
     p_.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep, od::parseMinMethod(opt.confMinMethod)};
     p_.seed = seed;
     p_.stream = stream;
+#ifdef OD_HAVE_CUDA
+    if (gpu) {
+      gpu_ = std::make_unique<od::GpuConfEvaluator>(sys_.model(), opt.gpuDevice, opt.gpuConf9aBatchNum);
+      p_.evaluator = gpu_.get();
+      if (gpu_->maxBatch() < opt.gpuConf9aBatchNum)
+        od::logInfo(std::format("  {:<40} 9a GPU batch limited to {} samples by the free device memory", name_, gpu_->maxBatch()));
+    }
+#else
+    (void)gpu;
+#endif
     od::ClosureParams clp;
     clp.method = csgm_.closure == "kic" ? od::ClosureMethod::Kic
                  : csgm_.closure == "rcd" ? od::ClosureMethod::Rcd
@@ -376,6 +414,7 @@ class ConfSet {
   bool growClose_ = false;
   std::optional<od::LoopCloser> closer_;
   od::ConfSampleNums n_;
+  std::unique_ptr<od::ConfEvaluator> gpu_;
   od::Fill9aParams p_;
   std::uint64_t counter_ = 0;
   bool first_ = true;
@@ -1242,7 +1281,7 @@ std::vector<od::InputHash> inputHashes(const od::Options& opt) {
 }
 
 // --resume (spec 16.4): parameters of the last checkpoint, then the command line
-// (input files may be given again, e.g. when moved); only dock9c.maxRound may differ.
+// (input files may be given again, e.g. when moved); only dock9c.maxRound and gpu.* may differ.
 od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpointing& ck) {
   if (!cli.paramFile.empty()) od::fail("--paramFile cannot be used with --resume (the checkpoint parameters are used)");
   if (!cli.outPrefix.empty()) od::fail("--outPrefix cannot be used with --resume (the run continues in the --resume directory)");
@@ -1271,6 +1310,9 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   const od::Options stored = parse({argv[0], "--paramFile=" + cdir + "/params.toml"});
   od::Options cmp = opt;
   cmp.maxRound = stored.maxRound;
+  cmp.gpuEnable = stored.gpuEnable;
+  cmp.gpuDevice = stored.gpuDevice;
+  cmp.gpuConf9aBatchNum = stored.gpuConf9aBatchNum;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {
     auto lines = [](const std::string& s) {
@@ -1290,7 +1332,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
       const std::string x = k < la.size() ? la[k] : "", y = k < lb.size() ? lb[k] : "";
       if (x != y) diff += std::format("\n  checkpoint: {}\n  now:        {}", x, y);
     }
-    od::fail("--resume: only dock9c.maxRound may differ from the checkpoint parameters:{}", diff);
+    od::fail("--resume: only dock9c.maxRound and gpu.* may differ from the checkpoint parameters:{}", diff);
   }
   ck.resumeDir = dir;
   ck.resumeRound = round;
@@ -1422,6 +1464,7 @@ int run(int argc, char** argv) {
     od::logInfo(std::format("parameters used (defaults < {} < command line) written to {}",
                             opt.paramFile.empty() ? "no --paramFile" : opt.paramFile, path));
   }
+  const bool gpu = selectGpu(opt);
   std::unique_ptr<ConfSet> stamSet;
   {
     std::vector<od::EnergyPart> parts;
@@ -1430,14 +1473,14 @@ int run(int argc, char** argv) {
       parts.push_back({&sta[i], &cfg->molecules[i].tree});
       settings.push_back(&cfg->molecules[i]);
     }
-    stamSet = std::make_unique<ConfSet>("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0);
+    stamSet = std::make_unique<ConfSet>("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0, gpu);
   }
   std::vector<std::unique_ptr<ConfSet>> mobSets;
   for (std::size_t i = 0; i < mobs.size(); ++i) {
     const auto& s = cfg->molecules[sta.size() + i];
     mobSets.push_back(std::make_unique<ConfSet>(mobs[i].id, std::vector<od::EnergyPart>{{&mobs[i], &s.tree}},
                                                 std::vector<const od::MolSettings*>{&s}, *cfg, opt,
-                                                od::SampleSet::MobM, seed, 1 + i));
+                                                od::SampleSet::MobM, seed, 1 + i, gpu));
   }
   for (const ConfSet* c : {stamSet.get()})
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));

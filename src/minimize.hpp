@@ -64,4 +64,13 @@ struct MinResult {
 // lowest-energy accepted point is returned in anglesDeg, wrapped to (-180, 180].
 MinResult minimizeTorsions(const TorsionObjective& f, std::span<double> anglesDeg, const MinParams& p);
 
+// Batched torsion-space minimization (spec 15.1.3). Each sample is minimized exactly as by
+// minimizeTorsions; the samples run as coroutines and their pending evaluations are made
+// together with one call of f: anglesDeg n × d (one row per request), energy n, gradRad n × d.
+using BatchTorsionObjective = std::function<void(const double* anglesDeg, int n, double* energy, double* gradRad)>;
+
+// anglesDeg: count × d, minimized in place; at most maxActive samples at a time (n <= maxActive in f).
+std::vector<MinResult> minimizeTorsionsBatch(const BatchTorsionObjective& f, std::span<double> anglesDeg, int d,
+                                             const MinParams& p, int maxActive);
+
 }  // namespace od

@@ -83,6 +83,9 @@ struct Options {
   double gridSpacing = 0.375;
   std::string gridMode = "auto";  // auto | full | flexres | delta
   double gridDeltaThreshold = 1e-4;
+  bool gpuEnable = true;
+  int gpuDevice = 0;
+  int gpuConf9aBatchNum = 8192;
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
   std::string posm;  // posm1 | posm2 | posm3 | posm4

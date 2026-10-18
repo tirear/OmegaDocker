@@ -40,6 +40,11 @@ struct DevBuf {
     check(cudaMalloc(&p, count * sizeof(T)), "cudaMalloc");
     n = count;
   }
+  void release() {
+    if (p) cudaFree(p);
+    p = nullptr;
+    n = 0;
+  }
   void upload(const std::vector<T>& v) {
     reserve(v.empty() ? 1 : v.size());
     if (!v.empty()) check(cudaMemcpy(p, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice), "upload");
@@ -247,6 +252,20 @@ GpuEnergy::GpuEnergy(const EnergyModel& m, int device) : impl_(std::make_unique<
 }
 
 GpuEnergy::~GpuEnergy() = default;
+
+std::size_t GpuEnergy::bytesPerSample(bool fp64, bool grad) const {
+  const std::size_t nt = static_cast<std::size_t>(impl_->view.torsionCount), nc = 3 * static_cast<std::size_t>(impl_->view.coordCount);
+  const std::size_t r = fp64 ? sizeof(double) : sizeof(float);
+  return (nt + nc) * r + sizeof(FlatTerms) + (grad ? (nc + nt) * sizeof(double) : 0);
+}
+
+void GpuEnergy::releaseScratch() {
+  impl_->angles.release();
+  impl_->xs.release();
+  impl_->gs.release();
+  impl_->grad.release();
+  impl_->terms.release();
+}
 
 void GpuEnergy::evaluate(const double* angles, int n, FlatTerms* terms, double* grad, double* coords) {
   impl_->run(angles, n, terms, grad, coords);

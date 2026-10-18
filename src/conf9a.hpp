@@ -37,6 +37,17 @@ enum class GenResult : std::uint8_t { Built, GrowFailed, CloseFailed, SideGrowFa
 // rng: Rng(seed, stream, index.global).
 using ConfGenerator = std::function<GenResult(Rng& rng, const GenIndex& index, std::span<double> anglesDeg)>;
 
+// Batched 9a energy evaluation of an EnergySystem, e.g. on a GPU (spec 15.1.3).
+class ConfEvaluator {
+ public:
+  virtual ~ConfEvaluator() = default;
+  virtual int maxBatch() const = 0;  // most samples per call
+  // anglesDeg: n × torsionCount; terms: n; gradRad (optional): n × torsionCount, as EnergySystem::evaluate.
+  virtual void evaluate(const double* anglesDeg, int n, EnergyTerms* terms, double* gradRad) = 0;
+  // Called when a fillL2Pool call ends (e.g. to free work memory).
+  virtual void idle() {}
+};
+
 struct Fill9aParams {
   int minL2 = 0;                       // minL2confSampleNum
   long long maxL1Batch = 65536;        // --stamMaxL1BatchNum / --mobmMaxL1BatchNum
@@ -47,6 +58,7 @@ struct Fill9aParams {
   std::uint64_t seed = 0;
   std::uint64_t stream = 0;            // one per StaM group / MobM
   long long fixedL1 = 0;               // > 0: every L1 batch has this size (csgm3) instead of spec 7.4
+  ConfEvaluator* evaluator = nullptr;  // minimization energies; null: EnergySystem::evaluate on the CPU
 };
 
 struct Fill9aStats {
@@ -69,6 +81,10 @@ struct Fill9aStats {
 // are generated without reaching minL2.
 Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long long l1, const Fill9aParams& p,
                        std::uint64_t& counter, std::vector<ConfSample>& pool);
+
+// Samples anglesDeg (count × torsionCount) minimized in place with ev; terms and steps: count each.
+void minimizeConfBatch(ConfEvaluator& ev, int torsionCount, std::span<double> anglesDeg, const MinParams& p,
+                       EnergyTerms* terms, int* steps);
 
 // One sample: minimizes anglesDeg in place; returns the energy terms at the result.
 EnergyTerms minimizeConf(const EnergySystem& sys, std::span<double> anglesDeg, const MinParams& p, int* steps = nullptr);

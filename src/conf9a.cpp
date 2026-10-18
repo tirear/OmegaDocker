@@ -20,6 +20,22 @@ EnergyTerms minimizeConf(const EnergySystem& sys, std::span<double> a, const Min
   return sys.evaluate(a);
 }
 
+void minimizeConfBatch(ConfEvaluator& ev, int d, std::span<double> a, const MinParams& p, EnergyTerms* terms, int* steps) {
+  const int count = d > 0 ? static_cast<int>(a.size() / d) : 0;
+  if (count == 0) return;
+  const int batch = std::max(1, ev.maxBatch());
+  std::vector<EnergyTerms> buf;
+  const BatchTorsionObjective f = [&](const double* x, int n, double* e, double* g) {
+    buf.resize(n);
+    ev.evaluate(x, n, buf.data(), g);
+    for (int i = 0; i < n; ++i) e[i] = buf[i].total();
+  };
+  const auto r = minimizeTorsionsBatch(f, a, d, p, batch);
+  for (int i = 0; i < count; ++i) steps[i] = r[i].steps;
+  for (int done = 0; done < count; done += batch)
+    ev.evaluate(a.data() + static_cast<std::size_t>(done) * d, std::min(batch, count - done), terms + done, nullptr);
+}
+
 Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long long l1, const Fill9aParams& p,
                        std::uint64_t& counter, std::vector<ConfSample>& pool) {
   Fill9aStats st;
@@ -39,7 +55,23 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
         Rng rng(p.seed, p.stream, counter + done + i);
         std::span<double> a(angles.data() + i * d, d);
         built[i] = gen(rng, GenIndex{counter + done + i, done + i}, a);
-        if (built[i] == GenResult::Built) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
+        if (built[i] == GenResult::Built && !p.evaluator) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
+      }
+      if (p.evaluator) {
+        std::vector<long long> idx;
+        for (long long i = 0; i < n; ++i)
+          if (built[i] == GenResult::Built) idx.push_back(i);
+        std::vector<double> a(idx.size() * d);
+        for (std::size_t k = 0; k < idx.size(); ++k)
+          std::copy_n(angles.begin() + idx[k] * d, d, a.begin() + static_cast<std::ptrdiff_t>(k * d));
+        std::vector<EnergyTerms> t(idx.size());
+        std::vector<int> s(idx.size());
+        minimizeConfBatch(*p.evaluator, d, a, p.min, t.data(), s.data());
+        for (std::size_t k = 0; k < idx.size(); ++k) {
+          std::copy_n(a.begin() + static_cast<std::ptrdiff_t>(k * d), d, angles.begin() + idx[k] * d);
+          terms[idx[k]] = t[k];
+          steps[idx[k]] = s[k];
+        }
       }
       for (long long i = 0; i < n; ++i) {
         const EnergyTerms& e = terms[i];
@@ -87,6 +119,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
            st.l1, nowL2, p.minL2, st.growFailed, st.closeFailed, st.sideGrowFailed, st.overEmax, st.notClosed);
     l1 = std::min(p.fixedL1 > 0 ? p.fixedL1 : next, p.maxL1Total - st.l1);
   }
+  if (p.evaluator) p.evaluator->idle();
   return st;
 }
 

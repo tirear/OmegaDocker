@@ -276,6 +276,11 @@ const std::vector<Param>& params() {
     t.push_back(real("grid.deltaThreshold", "<E>", "1e-4",
                      "9b: grid.mode = delta: a block is stored when a point differs by more than this", OD_ACC(gridDeltaThreshold)));
 
+    t.push_back(boolean("gpu.enable", "true", "Use the GPU when built with CUDA and a device is present", OD_ACC(gpuEnable)));
+    t.push_back(integer("gpu.device", "<n>", "0", "CUDA device number", OD_ACC(gpuDevice)));
+    t.push_back(integer("gpu.conf9aBatchNum", "<n>", "8192",
+                        "9a: samples minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuConf9aBatchNum)));
+
     t.push_back(boolean("output.pdb", "true", "Write PDB output", OD_ACC(outPdb)));
     t.push_back(boolean("output.cif", "false", "Write mmCIF output", OD_ACC(outCif)));
     t.push_back(boolean("output.sdf", "false", "Write SDF output", OD_ACC(outSdf)));
@@ -486,7 +491,7 @@ const std::vector<CliOption>& cliOptions() {
        [](Options& o, const std::string& v) { o.molConfig = v; }},
       {"outPrefix", "<path>", "Output directory; required", false, [](Options& o, const std::string& v) { o.outPrefix = v; }},
       {"resume", "<path>",
-       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound may change", false,
+       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound and gpu.* may change", false,
        [](Options& o, const std::string& v) {
          if (v.empty()) fail("--resume requires a directory");
          o.resume = v;
@@ -741,6 +746,8 @@ void validateOptions(const Options& o) {
   check(o.EclashBase > o.Emax, "energy.EclashBase", "greater than energy.Emax");
   check(o.gridSpacing > 0, "grid.spacing", "> 0");
   check(o.gridDeltaThreshold >= 0, "grid.deltaThreshold", ">= 0");
+  check(o.gpuDevice >= 0, "gpu.device", ">= 0");
+  check(o.gpuConf9aBatchNum >= 1, "gpu.conf9aBatchNum", ">= 1");
   check(o.maxNearDistance > 0, "dock9b.maxNearDistance", "> 0");
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");
   check(o.posStep > 0, "dock9b.posStep", "> 0");
@@ -818,7 +825,7 @@ std::string usageText() {
       "OmegaDocker {}\n\n"
       "Usage: omegadocker --stamFile=<file> --mobmFiles=<file> [--mobmFiles=<file> ...] --outPrefix=<path>\n"
       "                   [--paramFile=<file>] [--<table>_<key>=<value> ...]\n"
-      "       omegadocker --resume=<path> [--dock9c_maxRound=<n>]\n\n"
+      "       omegadocker --resume=<path> [--dock9c_maxRound=<n>] [--gpu_<key>=<value> ...]\n\n"
       "Every option takes its value after '='. A parameter <table>.<key> of the parameter file is\n"
       "overridden by --<table>_<key>=<value>; arrays are comma separated; booleans are true/false, 1/0 or yes/no.\n"
       "Priority: built-in default < --paramFile < command line.\n\nCommand line only:\n",
