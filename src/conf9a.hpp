@@ -29,7 +29,7 @@ struct GenIndex {
 };
 
 // Outcome of generating one sample; only Built samples are minimized.
-enum class GenResult : std::uint8_t { Built, GrowFailed, CloseFailed, SideGrowFailed };
+enum class GenResult : std::uint8_t { Built, GrowFailed, CloseFailed, SideGrowFailed, PreNotClosed };
 
 // Writes one sample to anglesDeg; GrowFailed / CloseFailed / SideGrowFailed:
 // discarded before minimization (csgmBuild = grow, loop closure of spec 7.11,
@@ -59,6 +59,9 @@ struct Fill9aParams {
   long long maxL1Total = 1000000000;   // --stamMaxL1TotalNum / --mobmMaxL1TotalNum
   double Emax = 1000.0;
   double maxBreakDist = 0.5;
+  // > 0: samples whose closure deviation exceeds preCloseFactor × maxBreakDist before the
+  // minimization are discarded without minimizing them (conf9a.preCloseFactor).
+  double preCloseFactor = 1.0;
   MinParams min;
   std::uint64_t seed = 0;
   std::uint64_t stream = 0;            // one per StaM group / MobM
@@ -74,6 +77,7 @@ struct Fill9aStats {
   long long growFailed = 0; // discarded by the generator (csgmBuild = grow)
   long long closeFailed = 0; // discarded by the generator (loop closure, spec 7.11)
   long long sideGrowFailed = 0; // discarded by the generator (csgmBuild = growClose, after the closure)
+  long long preNotClosed = 0;   // discarded before the minimization (preCloseFactor)
   int batches = 0;
   long long minSteps = 0;   // minimization steps over all samples
   long long nextL1 = 0;     // L1 count of a following refill (spec 7.4)

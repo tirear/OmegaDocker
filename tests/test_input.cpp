@@ -5,6 +5,7 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -1878,7 +1879,7 @@ TEST_CASE("9a: L2 pool refill (1L2Y)") {
   run(4, b);
   CHECK(static_cast<int>(a.size()) >= p.minL2);
   CHECK(st.added == static_cast<long long>(a.size()));
-  CHECK(st.l1 == st.added + st.overEmax + st.notClosed);
+  CHECK(st.l1 == st.added + st.overEmax + st.notClosed + st.preNotClosed);
   REQUIRE(a.size() == b.size());
   for (std::size_t i = 0; i < a.size(); ++i) {
     CHECK(a[i].angles == b[i].angles);
@@ -2130,6 +2131,51 @@ double linkDeviation(const od::TorsionTree& tree, const od::ClosureLink& l, cons
 }
 
 }  // namespace
+
+TEST_CASE("9a: closure deviation checked before the minimization (2KJJ)") {
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 10, 14));
+  const od::MolSettings& s = cfg.molecules[0];
+  const od::EnergySystem sys({{&f.mols[0], &s.tree}}, {});
+  REQUIRE(sys.hasClosures());
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  std::vector<double> a(sys.torsionCount());
+  for (int k = 0; k < 50; ++k) {
+    od::Rng r(4, 0, k);
+    smp.sample(r, a);
+    CHECK(sys.closureDeviation(a) == doctest::Approx(sys.evaluate(a).closureMaxDeviation).epsilon(1e-12));
+  }
+  CHECK(sys.closureDeviation(sys.inputAngles()) < 1e-6);
+  // Random loops (open) and, for every third sample, the input conformation with small changes (closed).
+  const std::vector<double> in = sys.inputAngles();
+  const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> x) {
+    smp.sample(r, x);
+    if (idx.global % 3 == 0)
+      for (std::size_t q = 0; q < x.size(); ++q) x[q] = in[q] + 2.0 * (r.uniform() - 0.5);
+    return od::GenResult::Built;
+  };
+  od::Fill9aParams p;
+  p.minL2 = 3;
+  p.maxL1Batch = 40;
+  p.seed = 2;
+  p.min.maxSteps = 20;
+  const auto fill = [&](double factor, std::vector<od::ConfSample>& pool) {
+    p.preCloseFactor = factor;
+    std::uint64_t counter = 0;
+    return od::fillL2Pool(sys, gen, 40, p, counter, pool);
+  };
+  p.maxL1Total = 400;
+  std::vector<od::ConfSample> on, off;
+  const auto a1 = fill(1.0, on);
+  const auto a0 = fill(0.0, off);
+  CHECK(a1.preNotClosed > 0);
+  CHECK(a0.preNotClosed == 0);
+  CHECK(a1.l1 == a1.added + a1.overEmax + a1.notClosed + a1.preNotClosed);
+  // Only the samples discarded before the minimization differ: the others give the same results.
+  CHECK(a0.notClosed >= a1.notClosed);
+  CHECK(on.size() == off.size());
+  for (std::size_t i = 0; i < on.size() && i < off.size(); ++i) CHECK(on[i].angles == off[i].angles);
+}
 
 TEST_CASE("closure: RCD and KIC close a loop (2KJJ A:12-17)") {
   StaFixture f;
@@ -3219,13 +3265,15 @@ TEST_CASE("dock9b: dockPairs over several StaM fields delivers the chunks of seq
     const od::MobmDocker dk(*fs.x.mobSys, fs.fields[f].second, fs.p);
     for (int j = 0; j < 3; ++j) refStats.push_back(dk.dockPair(angles[j], 21 + j + 3 * f, 4, record(ref, f, j)));
   }
-  for (int lanes : {1, 2}) {
-    INFO("lanes ", lanes);
+  // lanes 0: without an evaluator; prepared: the jobs prepared ahead with prepareJobs.
+  for (int lanes : {0, 1, 2})
+  for (bool prepared : {false, true}) {
+    INFO("lanes ", lanes, " prepared ", prepared);
     got.clear();
-    CpuPoseEvaluator ev(11, lanes);
+    CpuPoseEvaluator ev(11, std::max(lanes, 1));
     ev.nFields = nf;
     od::Dock9bParams pe = fs.p;
-    pe.evaluator = &ev;
+    pe.evaluator = lanes > 0 ? &ev : nullptr;
     std::vector<std::unique_ptr<od::MobmDocker>> dks;
     std::vector<std::vector<od::MobmDocker::PairJob>> jobs(nf, std::vector<od::MobmDocker::PairJob>(3));
     std::vector<od::MobmDocker::PairGroup> groups;
@@ -3237,16 +3285,23 @@ TEST_CASE("dock9b: dockPairs over several StaM fields delivers the chunks of seq
         jobs[f][j].sink = record(got, f, j);
       }
       groups.push_back({dks.back().get(), &jobs[f]});
+      if (prepared) {
+        dks.back()->prepareJobs(jobs[f]);
+        for (int j = 0; j < 3; ++j) CHECK(jobs[f][j].stats.l2 == static_cast<long long>(jobs[f][j].prepared->l2.size()));
+      }
     }
     od::MobmDocker::dockPairs(groups, 4);
     CHECK(ref.size() > 9);
     CHECK(got == ref);
+    for (int f = 0; f < nf; ++f)
+      for (int j = 0; j < 3; ++j) CHECK_FALSE(jobs[f][j].prepared);
     for (int f = 0; f < nf; ++f)
       for (int j = 0; j < 3; ++j) {
         CHECK(jobs[f][j].stats.l2 == refStats[3 * f + j].l2);
         CHECK(jobs[f][j].stats.steps == refStats[3 * f + j].steps);
         CHECK(jobs[f][j].stats.leftGrid == refStats[3 * f + j].leftGrid);
       }
+    if (lanes == 0) continue;
     CHECK(ev.largest == (11 + lanes - 1) / lanes);
     // More groups than the evaluator binds together.
     ev.nFields = nf - 1;

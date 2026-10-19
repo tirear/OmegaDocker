@@ -194,6 +194,32 @@ std::vector<Vec3T<T>> EnergySystem::coordinatesT(std::span<const T> anglesDeg) c
 std::vector<Vec3f> EnergySystem::coordinates(std::span<const float> anglesDeg) const { return coordinatesT(anglesDeg); }
 std::vector<Vec3> EnergySystem::coordinates(std::span<const double> anglesDeg) const { return coordinatesT(anglesDeg); }
 
+bool EnergySystem::hasClosures() const {
+  for (const EnergyPart& p : parts_)
+    if (!p.tree->virtuals.empty() || !p.tree->restraints.empty()) return true;
+  return false;
+}
+
+double EnergySystem::closureDeviation(std::span<const double> anglesDeg) const {
+  if (!hasClosures()) return 0;
+  const std::vector<Vec3> x = coordinatesT(anglesDeg);
+  double dev = 0;
+  for (std::size_t k = 0; k < parts_.size(); ++k) {
+    const auto& tree = *parts_[k].tree;
+    const int o = offset_[k];
+    for (std::size_t v = 0; v < tree.virtuals.size(); ++v) {
+      const int i = o + tree.atomCount + static_cast<int>(v), j = o + tree.virtuals[v].copyOf;
+      const Vec3 d{x[i][0] - x[j][0], x[i][1] - x[j][1], x[i][2] - x[j][2]};
+      dev = std::max(dev, std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+    }
+    for (const auto& rs : tree.restraints) {
+      const Vec3 d{x[o + rs.a][0] - x[o + rs.b][0], x[o + rs.a][1] - x[o + rs.b][1], x[o + rs.a][2] - x[o + rs.b][2]};
+      dev = std::max(dev, std::abs(std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) - rs.r0));
+    }
+  }
+  return dev;
+}
+
 template <class T>
 EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient,
                                     std::vector<Vec3T<T>>* coords, const ExternalTermT<T>* external) const {

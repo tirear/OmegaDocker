@@ -80,6 +80,9 @@ class EnergySystem {
   // Coordinates only (atoms and virtual atoms of all parts).
   std::vector<Vec3f> coordinates(std::span<const float> anglesDeg) const;
   std::vector<Vec3> coordinates(std::span<const double> anglesDeg) const;
+  // Largest closure deviation (EnergyTerms::closureMaxDeviation) from the coordinates only; 0 without closures.
+  double closureDeviation(std::span<const double> anglesDeg) const;
+  bool hasClosures() const;
   // Index of the first tree torsion of a part in the concatenated angles.
   int torsionOffset(int part) const { return torsionOffset_[part]; }
 

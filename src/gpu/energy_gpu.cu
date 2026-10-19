@@ -751,6 +751,23 @@ void launchNT(cudaStream_t st, int n, std::size_t shm, bool keepX, const EnergyM
                                                         n, shm ? 1 : 0, keepX ? 1 : 0);
 }
 
+// Samples evaluated at the same time by launchNT (resident blocks of all multiprocessors), without
+// torsion transforms.
+template <class T, int Dock, int NT>
+int residentNT(const EnergyModelView& m, std::size_t shm) {
+  const auto kernel = evaluateKernel<T, Dock, NT, false>;
+  const auto [sms, l2] = smsAndL2();
+  constexpr int kMinBlocks = (24 * 32 + NT - 1) / NT;
+  int occ = 0;
+  if (shm > 48 * 1024)
+    check(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shm)),
+          "cudaFuncSetAttribute");
+  check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, kernel, NT, shm), "occupancy");
+  const std::size_t g = 3 * static_cast<std::size_t>(m.coordCount) * sizeof(double) * sms;
+  const int fit = static_cast<int>(std::min<std::size_t>(l2 / std::max<std::size_t>(g, 1), 1 << 20));
+  return sms * std::clamp(std::max(fit, kMinBlocks), 1, std::max(occ, 1));
+}
+
 template <class T, int Dock>
 void launch(cudaStream_t st, int threads, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const PairData<T>& pd, const TorsionData<T>& td, const T* angles,
             T* xs, double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses,
@@ -1148,6 +1165,18 @@ void GpuEnergy::completeDock(int lane, FlatTerms* terms, DockTerms* dterms, doub
 
 std::size_t GpuEnergy::bytesPerSampleDock() const {
   return bytesPerSample(false, true) + sizeof(DockPose) + sizeof(DockTerms) + 6 * sizeof(double);
+}
+
+int GpuEnergy::residentSamplesDock(int probeCount) const {
+  check(cudaSetDevice(impl_->device), "cudaSetDevice");
+  const EnergyModelView& m = impl_->view;
+  const std::size_t shm = sharedBytes<float>(m);
+  switch (blockThreads(m, probeCount)) {
+    case 32: return residentNT<float, 2, 32>(m, shm);
+    case 64: return residentNT<float, 2, 64>(m, shm);
+    case 128: return residentNT<float, 2, 128>(m, shm);
+    default: return residentNT<float, 2, 256>(m, shm);
+  }
 }
 
 void GpuEnergy::releaseScratch() {

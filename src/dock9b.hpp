@@ -193,6 +193,12 @@ class MobmDocker {
   Dock9bStats dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
                        const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only = false) const;
 
+  // Conformation, L1pos and quick-filter statistics of a pair.
+  struct Prepared {
+    Conf c;
+    std::vector<long long> l2;
+    Dock9bStats stats;
+  };
   // Several conformation pairs: each job as dockPair(mobAnglesDeg, stream, chunkSize, sink,
   // posm1Only), the sinks receiving the same chunks in job order. With an evaluator the
   // L2poss of all jobs are minimized together (spec 15.1.4).
@@ -202,8 +208,11 @@ class MobmDocker {
     bool posm1Only = false;
     std::function<void(std::vector<DockSample>&)> sink;
     Dock9bStats stats;  // result
+    std::optional<Prepared> prepared;  // set by prepareJobs; used (and cleared) by dockPairs
   };
   void dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const;
+  // L1poss and 8.5 quick filter of the jobs ahead of dockPairs (e.g. to count their L2poss).
+  void prepareJobs(std::vector<PairJob>& jobs) const;
   // Pair jobs of several dockers of the same MobM and parameters (e.g. different StaM
   // conformations): as dockPairs of each group in turn, the sinks receiving the same chunks in
   // group and job order. With an evaluator the L2poss of all groups are minimized together, at
@@ -246,13 +255,9 @@ class MobmDocker {
   int transN_ = 0;      // posm3: translations per axis
   std::optional<Pose> posm3Pose(const Conf& c, long long k) const;
   bool fitsBox(const Conf& c, const Pose& pose) const;
-  // Conformation, L1pos and quick-filter statistics of a pair.
-  struct Prepared {
-    Conf c;
-    std::vector<long long> l2;
-    Dock9bStats stats;
-  };
   Prepared prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream, bool posm1Only) const;
+  Dock9bStats dockPrepared(Prepared pr, std::uint64_t stream, std::size_t chunkSize,
+                           const std::function<void(std::vector<DockSample>&)>& sink) const;
   struct BatchItem {
     const MobmDocker* dk;
     int field;  // index of dk in the bound dockers
@@ -282,6 +287,8 @@ class PoseEvaluator {
   // Several StaM conformations at once (spec 15.1.16): up to fields() dockers of the same MobM
   // bound together, PoseRequest::field selecting one of them.
   virtual int fields() const { return 1; }
+  // Poses of dk evaluated at the same time (e.g. resident on a GPU); 0: unknown.
+  virtual int residentPoses(const MobmDocker& /*dk*/) const { return 0; }
   virtual void bindAll(std::span<const MobmDocker* const> dks) { bind(*dks[0]); }
   // grad: n × (6 + torsions), as MobmDocker::evaluate.
   virtual void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) = 0;

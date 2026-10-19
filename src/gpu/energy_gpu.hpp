@@ -83,6 +83,8 @@ class GpuEnergy {
   void submit(int lane, const double* angles, int n, bool grad, bool fp32 = false);
   void complete(int lane, FlatTerms* terms, double* grad);
   std::size_t bytesPerSampleDock() const;
+  // 9b poses (with gradients, several fields) evaluated at the same time on the device.
+  int residentSamplesDock(int probeCount) const;
   // Device work memory per sample of evaluate (bytes).
   std::size_t bytesPerSample(bool fp64, bool grad) const;
   // Frees the work memory (it is allocated again by the next evaluate).

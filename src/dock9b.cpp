@@ -133,13 +133,24 @@ void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) co
   dockPairs(std::span<const PairGroup>(&g, 1), chunkSize);
 }
 
+void MobmDocker::prepareJobs(std::vector<PairJob>& jobs) const {
+  for (PairJob& j : jobs) {
+    j.prepared = prepare(j.mobAnglesDeg, j.stream, j.posm1Only);
+    j.stats = j.prepared->stats;
+  }
+}
+
 void MobmDocker::dockPairs(std::span<const PairGroup> groups, std::size_t chunkSize) {
   chunkSize = std::max<std::size_t>(chunkSize, 1);
   if (groups.empty()) return;
   PoseEvaluator* pev = groups[0].dk->p_.evaluator;
   if (!pev) {
     for (const PairGroup& g : groups)
-      for (PairJob& j : *g.jobs) j.stats = g.dk->dockPair(j.mobAnglesDeg, j.stream, chunkSize, j.sink, j.posm1Only);
+      for (PairJob& j : *g.jobs) {
+        Prepared pr = j.prepared ? std::move(*j.prepared) : g.dk->prepare(j.mobAnglesDeg, j.stream, j.posm1Only);
+        j.prepared.reset();
+        j.stats = g.dk->dockPrepared(std::move(pr), j.stream, chunkSize, j.sink);
+      }
     return;
   }
   if (static_cast<int>(groups.size()) > std::max(1, pev->fields()))
@@ -170,7 +181,8 @@ void MobmDocker::dockPairs(std::span<const PairGroup> groups, std::size_t chunkS
   std::vector<std::pair<std::size_t, std::size_t>> order;  // (job, L2pos)
   for (std::size_t j = 0; j < st.size(); ++j) {
     PairJob& job = *st[j].job;
-    st[j].pr = dks[st[j].group]->prepare(job.mobAnglesDeg, job.stream, job.posm1Only);
+    st[j].pr = job.prepared ? std::move(*job.prepared) : dks[st[j].group]->prepare(job.mobAnglesDeg, job.stream, job.posm1Only);
+    job.prepared.reset();
     job.stats = st[j].pr.stats;
     const std::size_t n = st[j].pr.l2.size();
     st[j].res.resize(n);
@@ -947,7 +959,11 @@ MobmDocker::Prepared MobmDocker::prepare(std::span<const double> mobAnglesDeg, s
 
 Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint64_t stream, std::size_t chunkSize,
                                  const std::function<void(std::vector<DockSample>&)>& sink, bool posm1Only) const {
-  Prepared pr = prepare(mobAnglesDeg, stream, posm1Only);
+  return dockPrepared(prepare(mobAnglesDeg, stream, posm1Only), stream, chunkSize, sink);
+}
+
+Dock9bStats MobmDocker::dockPrepared(Prepared pr, std::uint64_t stream, std::size_t chunkSize,
+                                     const std::function<void(std::vector<DockSample>&)>& sink) const {
   const Conf& c = pr.c;
   const std::vector<long long>& l2 = pr.l2;
   Dock9bStats& total = pr.stats;

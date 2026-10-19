@@ -131,6 +131,7 @@ struct Options {
   int confMinMaxStep = 100;
   double confMinDeltaE = 10.0;
   double confMaxDihedralStep = 10.0;
+  double confPreCloseFactor = 1.0;
   std::optional<std::uint64_t> seed;  // random when not given
 
   bool showHelp = false;

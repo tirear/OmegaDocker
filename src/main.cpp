@@ -228,6 +228,7 @@ class ConfSet {
     p_.maxL1Total = csgm_.maxL1TotalNum;
     p_.Emax = opt.Emax;
     p_.maxBreakDist = opt.maxBreakDist;
+    p_.preCloseFactor = opt.confPreCloseFactor;
     p_.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep, od::parseMinMethod(opt.confMinMethod)};
     p_.seed = seed;
     p_.stream = stream;
@@ -397,11 +398,12 @@ class ConfSet {
     const auto st = od::fillL2Pool(sys_, gen, l1, p_, counter_, pool_);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     nextL1_ = st.nextL1;
-    const long long minimized = st.l1 - st.growFailed - st.closeFailed - st.sideGrowFailed;
+    const long long minimized = st.l1 - st.growFailed - st.closeFailed - st.sideGrowFailed - st.preNotClosed;
     od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, closure {}, "
-                            "grow after closure {}, E >= Emax {}, not closed {})  steps/sample {:.1f}  {:.2f} s",
+                            "grow after closure {}, not closed before minimization {}, E >= Emax {}, not closed {})  "
+                            "steps/sample {:.1f}  {:.2f} s",
                             name_, pe ? "csgm3" : ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(),
-                            st.growFailed, st.closeFailed, st.sideGrowFailed, st.overEmax, st.notClosed,
+                            st.growFailed, st.closeFailed, st.sideGrowFailed, st.preNotClosed, st.overEmax, st.notClosed,
                             minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
   }
 
@@ -922,6 +924,9 @@ void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::u
                           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
 }
 
+// gpu.dock9bStamNum = auto (spec 15.1.16): L2poss of a window per pose evaluated at the same time on the GPU.
+constexpr long long kWindowPosesPerResident = 48;
+
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
 void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const od::Options& opt,
                const od::FeParams& fp, std::uint64_t seed, const Checkpointing& ck, bool gpu) {
@@ -1135,17 +1140,90 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     double sepaCutSum = 0;
     // 9b of a window of StaM conformations (spec 15.1.16): per MobM, the pairs of all of them
     // docked together; sinks run in StaM conformation and pair order.
+    // Pairs of one StaM conformation and one MobM, prepared (L1poss, 8.5) when the conformation
+    // joins the window.
+    struct Group {
+      int sid = 0;
+      float stamRel = 0;
+      std::unique_ptr<od::MobmDocker> dk;
+      std::vector<int> mids;
+      std::vector<std::vector<double>> mobAngles;
+      std::vector<char> posm1Only;
+      std::vector<float> lowest;
+      std::vector<od::MobmDocker::PairJob> jobs;
+    };
     struct WindowItem {
       int sid;
       std::unique_ptr<od::StamField> field;
       std::vector<od::StamSepa> sepas;
       std::shared_ptr<const od::FftStam> fft;
+      std::vector<std::unique_ptr<Group>> groups;  // per MobM; null: no pair
     };
     std::vector<WindowItem> window;
+    // The pairs of the StaM conformation that joined the window (its last item), prepared per MobM
+    // (L1poss, 8.5); windowPoses: L2poss of the window per MobM.
+    std::vector<long long> windowPoses(ms.size(), 0);
+    // gpu.dock9bStamNum = auto: L2poss of a full window per MobM (0: unknown, e.g. without a GPU).
+    std::vector<long long> poseTarget(ms.size(), -1);
+    const auto prepareItem = [&] {
+      WindowItem& w = window.back();
+      gpuFieldSlots(static_cast<int>(window.size()));
+      w.groups.resize(ms.size());
+      const int sid = w.sid;
+      for (std::size_t i = 0; i < ms.size(); ++i) {
+        const ConfSet& mob = *mobSets[i];
+        od::Dock9bParams dpi = dp;
+        dpi.evaluator = poseEval[i].get();
+        if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
+        auto gp = std::make_unique<Group>();
+        Group& g = *gp;
+        g.sid = sid;
+        for (int mid : ms[i].mobDcss) {
+          const std::uint64_t key = pairKey(sid, mid);
+          if (deterministic && ms[i].pairLowest.contains(key)) {
+            ++skipped[i];
+            continue;
+          }
+          // posm4: the posm3 part of a pair docked before is not redone (spec 9).
+          g.posm1Only.push_back(dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key));
+          const auto& ma = mob.sample(mid).angles;
+          g.mobAngles.push_back(mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles());
+          g.mids.push_back(mid);
+        }
+        if (g.mids.empty()) continue;
+        g.dk = std::make_unique<od::MobmDocker>(mob.sys(), *w.field, dpi, &w.sepas, w.fft.get());
+        g.stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
+        g.lowest.assign(g.mids.size(), std::numeric_limits<float>::infinity());
+        g.jobs.resize(g.mids.size());
+        for (std::size_t j = 0; j < g.mids.size(); ++j) {
+          g.jobs[j].mobAnglesDeg = g.mobAngles[j];
+          g.jobs[j].stream = od::dockStream(round, i, sid, g.mids[j]);
+          g.jobs[j].posm1Only = g.posm1Only[j];
+          g.jobs[j].sink = [&, i, j, gr = &g](std::vector<od::DockSample>& chunk) {
+            sampleNum[i] += static_cast<long long>(chunk.size());
+            for (auto& s : chunk) {
+              od::RoundSample r{gr->sid, gr->mids[j], std::move(s), gr->stamRel};
+              gr->lowest[j] = std::min(gr->lowest[j], r.rank());
+              buffer[i].push_back(std::move(r));
+            }
+            if (buffer[i].size() >= ms[i].bufferNum) {
+              select(i, false);
+              ++partial[i];
+            }
+          };
+        }
+        g.dk->prepareJobs(g.jobs);
+        for (const auto& j : g.jobs) windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
+        if (poseTarget[i] < 0)
+          poseTarget[i] = dpi.evaluator ? kWindowPosesPerResident * static_cast<long long>(dpi.evaluator->residentPoses(*g.dk)) : 0;
+        w.groups[i] = std::move(gp);
+      }
+    };
+
     std::size_t windowBytes = 0, windows = 0, largestWindow = 0;
     const std::size_t fieldBudget = gpuFieldBudget();
     const std::size_t roundResident = od::residentBytes();
-    long long endByCount = 0, endByGpu = 0, endByHost = 0;
+    long long endByPoses = 0, endByCount = 0, endByGpu = 0, endByHost = 0;
     // Device memory of a field (estimate): the stored delta blocks, or the maps of a full field of
     // a StaM with torsions (the other fields share the reference maps).
     const auto fieldBytes = [&](const od::StamField& f) -> std::size_t {
@@ -1162,66 +1240,13 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       ++windows;
       largestWindow = std::max(largestWindow, window.size());
       for (std::size_t i = 0; i < ms.size(); ++i) {
-        const ConfSet& mob = *mobSets[i];
-        od::Dock9bParams dpi = dp;
-        dpi.evaluator = poseEval[i].get();
-        struct Group {
-          int sid = 0;
-          float stamRel = 0;
-          std::unique_ptr<od::MobmDocker> dk;
-          std::vector<int> mids;
-          std::vector<std::vector<double>> mobAngles;
-          std::vector<char> posm1Only;
-          std::vector<float> lowest;
-          std::vector<od::MobmDocker::PairJob> jobs;
-        };
-        std::vector<std::unique_ptr<Group>> groups;
-        for (WindowItem& w : window) {
-          const int sid = w.sid;
-          if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
-          auto gp = std::make_unique<Group>();
-          Group& g = *gp;
-          g.sid = sid;
-          for (int mid : ms[i].mobDcss) {
-            const std::uint64_t key = pairKey(sid, mid);
-            if (deterministic && ms[i].pairLowest.contains(key)) {
-              ++skipped[i];
-              continue;
-            }
-            // posm4: the posm3 part of a pair docked before is not redone (spec 9).
-            g.posm1Only.push_back(dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key));
-            const auto& ma = mob.sample(mid).angles;
-            g.mobAngles.push_back(mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles());
-            g.mids.push_back(mid);
-          }
-          if (g.mids.empty()) continue;
-          g.dk = std::make_unique<od::MobmDocker>(mob.sys(), *w.field, dpi, &w.sepas, w.fft.get());
-          g.stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
-          g.lowest.assign(g.mids.size(), std::numeric_limits<float>::infinity());
-          g.jobs.resize(g.mids.size());
-          for (std::size_t j = 0; j < g.mids.size(); ++j) {
-            g.jobs[j].mobAnglesDeg = g.mobAngles[j];
-            g.jobs[j].stream = od::dockStream(round, i, sid, g.mids[j]);
-            g.jobs[j].posm1Only = g.posm1Only[j];
-            g.jobs[j].sink = [&, i, j, gr = &g](std::vector<od::DockSample>& chunk) {
-              sampleNum[i] += static_cast<long long>(chunk.size());
-              for (auto& s : chunk) {
-                od::RoundSample r{gr->sid, gr->mids[j], std::move(s), gr->stamRel};
-                gr->lowest[j] = std::min(gr->lowest[j], r.rank());
-                buffer[i].push_back(std::move(r));
-              }
-              if (buffer[i].size() >= ms[i].bufferNum) {
-                select(i, false);
-                ++partial[i];
-              }
-            };
-          }
-          groups.push_back(std::move(gp));
-        }
+        std::vector<Group*> groups;
+        for (WindowItem& w : window)
+          if (w.groups[i]) groups.push_back(w.groups[i].get());
         std::vector<od::MobmDocker::PairGroup> pg;
-        for (auto& g : groups) pg.push_back({g->dk.get(), &g->jobs});
+        for (Group* g : groups) pg.push_back({g->dk.get(), &g->jobs});
         od::MobmDocker::dockPairs(pg, ms[i].bufferNum);
-        for (const auto& gp : groups) {
+        for (const Group* gp : groups) {
           const Group& g = *gp;
           for (std::size_t j = 0; j < g.mids.size(); ++j) {
             const std::uint64_t key = pairKey(g.sid, g.mids[j]);
@@ -1323,17 +1348,28 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       hostPerField = ++fieldsBuilt == 2 ? grown : std::max(hostPerField, grown);
       gpuPerField = std::max(gpuPerField, bytes);
       windowBytes += bytes;
-      window.push_back({sid, std::move(fieldPtr), std::move(sepas), std::move(fft)});
-      const bool byCount = window.size() >= static_cast<std::size_t>(stamWindow);
-      const bool byGpu = !byCount && windowBytes + gpuPerField > fieldBudget;
-      const bool byHost = !byCount && !byGpu && resident + hostPerField > hostBudget;
-      if (byCount || byGpu || byHost) {
+      window.push_back({sid, std::move(fieldPtr), std::move(sepas), std::move(fft), {}});
+      prepareItem();
+      // auto: full when every MobM with L2poss in the window has poseTarget of them.
+      bool byPoses = opt.gpuDock9bStamNum == 0, anyPoses = false;
+      for (std::size_t i = 0; i < ms.size() && byPoses; ++i) {
+        if (windowPoses[i] == 0) continue;
+        anyPoses = true;
+        byPoses = poseTarget[i] > 0 && windowPoses[i] >= poseTarget[i];
+      }
+      byPoses = byPoses && anyPoses;
+      const bool byCount = !byPoses && window.size() >= static_cast<std::size_t>(stamWindow);
+      const bool byGpu = !byPoses && !byCount && windowBytes + gpuPerField > fieldBudget;
+      const bool byHost = !byPoses && !byCount && !byGpu && resident + hostPerField > hostBudget;
+      if (byPoses || byCount || byGpu || byHost) {
+        endByPoses += byPoses;
         endByCount += byCount;
         endByGpu += byGpu;
         endByHost += byHost;
         dockWindow();
         window.clear();
         windowBytes = 0;
+        std::fill(windowPoses.begin(), windowPoses.end(), 0);
         od::trimHeap();
       }
     }
@@ -1418,9 +1454,14 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     if (stamWindow > 1 && windows > 0) {
       // Memory of one window with all StaM conformations of the round (a hint for memory.hostLimit).
       const std::size_t n = stamIds.size();
-      od::logInfo(std::format("  9b windows ended by: gpu.dock9bStamNum {}, device memory {}, host memory {}, last {}; "
-                              "per StaM conformation: host {} MiB, device {} MiB",
-                              endByCount, endByGpu, endByHost, windows - static_cast<std::size_t>(endByCount + endByGpu + endByHost),
+      std::string target;
+      if (opt.gpuDock9bStamNum == 0)
+        for (std::size_t i = 0; i < ms.size(); ++i)
+          if (poseTarget[i] > 0) target += std::format("{}{}", target.empty() ? "" : ", ", poseTarget[i]);
+      od::logInfo(std::format("  9b windows ended by: L2poss {}{}, gpu.dock9bStamNum {}, device memory {}, host memory {}, "
+                              "last {}; per StaM conformation: host {} MiB, device {} MiB",
+                              endByPoses, target.empty() ? "" : " (" + target + " per window)", endByCount, endByGpu,
+                              endByHost, windows - static_cast<std::size_t>(endByPoses + endByCount + endByGpu + endByHost),
                               hostPerField >> 20, gpuPerField >> 20));
       if (endByGpu + endByHost > 0)
         od::logInfo(std::format("  9b one window for all {} StaM conformations would need memory.hostLimit >= about {} MiB "

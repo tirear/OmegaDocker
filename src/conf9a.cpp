@@ -60,6 +60,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
   const int d = sys.torsionCount();
   if (p.fixedL1 > 0) l1 = p.fixedL1;
   if (l1 < 1) l1 = 1;
+  const double preClose = p.preCloseFactor > 0 && sys.hasClosures() ? p.preCloseFactor * p.maxBreakDist : 0.0;
   while (static_cast<long long>(pool.size()) < p.minL2) {
     long long added = 0;
     for (long long done = 0; done < l1;) {
@@ -73,6 +74,8 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
         Rng rng(p.seed, p.stream, counter + done + i);
         std::span<double> a(angles.data() + i * d, d);
         built[i] = gen(rng, GenIndex{counter + done + i, done + i}, a);
+        if (built[i] == GenResult::Built && preClose > 0 && sys.closureDeviation(a) > preClose)
+          built[i] = GenResult::PreNotClosed;
         if (built[i] == GenResult::Built && !p.evaluator) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
       }
       if (p.evaluator) {
@@ -105,6 +108,10 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
           ++st.sideGrowFailed;
           continue;
         }
+        if (built[i] == GenResult::PreNotClosed) {
+          ++st.preNotClosed;
+          continue;
+        }
         st.minSteps += steps[i];
         if (!(e.filterEnergy() < p.Emax)) {
           ++st.overEmax;
@@ -133,8 +140,9 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
     if (st.l1 >= p.maxL1Total)
       fail("9a: {} samples generated (stam.maxL1TotalNum / mobm.maxL1TotalNum) but only {} of {} passed the filters "
            "(discarded while growing: {}, loop closure failed: {}, discarded while growing after the closure: {}, "
+           "closure deviation > conf9a.preCloseFactor x topology.maxBreakDist before minimization: {}, "
            "energy >= energy.Emax: {}, closure deviation > topology.maxBreakDist: {})",
-           st.l1, nowL2, p.minL2, st.growFailed, st.closeFailed, st.sideGrowFailed, st.overEmax, st.notClosed);
+           st.l1, nowL2, p.minL2, st.growFailed, st.closeFailed, st.sideGrowFailed, st.preNotClosed, st.overEmax, st.notClosed);
     l1 = std::min(p.fixedL1 > 0 ? p.fixedL1 : next, p.maxL1Total - st.l1);
   }
   if (p.evaluator) p.evaluator->idle();

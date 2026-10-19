@@ -31,6 +31,9 @@ class GpuPoseEvaluator : public PoseEvaluator {
     batch_ = want_;
   }
   int maxBatch() const override { return batch_; }
+  int residentPoses(const MobmDocker& dk) const override {
+    return gpu_.residentSamplesDock(static_cast<int>(dk.probes().size()));
+  }
   void bind(const MobmDocker& dk) override {
     if (!field_->touch(dk.field().id())) field_->set(dk.field().model());
     if (prep_ && dk.fft()) prep_->setFft(*dk.fft());

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.73 |
+| 文件版本 | 1.74 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -695,6 +695,24 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 **篩選**：最佳化後 `E < E_max` → L2 pool；否則捨棄。
 `E_max` 不再作為停止條件，但仍是 L1 → L2 的篩選條件。
+
+**最小化前的閉合檢查**（1.74，`conf9a.preCloseFactor`，預設 1）：有閉合（4.8）的分子，產生的樣本先只算座標與閉合偏差（`EnergySystem::closureDeviation`，與 `closureMaxDeviation` 相同）；偏差 > `preCloseFactor` × `topology.maxBreakDist` 的樣本不最小化，直接捨棄，計入執行紀錄 9a 行的 `not closed before minimization`。0：不檢查（1.73 以前的行為）。
+- 原因（A：2KJJ StaM，`csgm1a`、`csgmBuild = whole`，L1 39,800 個）：最小化後 97.7% 的樣本 E ≥ `E_max`、1.6% 未閉合，只有 266 個（0.67%）通過。逐一記錄最小化前後的能量項後：
+  - 73.0%（29,043 個）的樣本最小化前閉合偏差就 > 0.5 Å（`maxBreakDist`）：雙硫鍵（A:6–A:11、A:20–B:19）的 Cys χ1 可轉，隨機取樣幾乎都把雙硫鍵拉開；閉合的連結自由度 < 6，RCD 只做一次盡力閉合（7.11），最小化也拉不回來（閉合約束的能量梯度只靠 χ1 無法滿足三對約束）。這些樣本最小化後沒有一個通過；通過的 266 個在最小化前的偏差都 ≤ 0.43 Å。
+  - 其餘 E ≥ `E_max` 的樣本（約 10,500 個）：全部側鏈各自隨機取樣，緊密的蛋白質中幾乎每個樣本都有大量碰撞（最小化前碰撞原子對中位數 41，通過的樣本中位數也有 29），只用兩面角的最小化無法解開互相卡住的側鏈；最小化後仍有碰撞（中位數 22 對）。最小化前的能量或碰撞數無法區分會不會通過，不適合作為門檻。放寬停止條件（`minDeltaE` 0.1、`minMaxStep` 1000、`maxDihedralStep` 30°）通過率只由 0.67% 升到 1.2%，9a 時間不變。
+  - `csgmBuild = grow`（7.8，建構時逐段檢查碰撞並重試）就是針對這種情形：同一個例子 L1 只要 4,506 個、最小化 2,149 個，通過 356 個（最小化的 17%），9a 15.0 s → 0.64 s。
+- 結果（A）：
+
+| 設定 | L1 | 最小化 | L2 | 9a |
+|---|---|---|---|---|
+| `whole`，不檢查（1.73） | 39,800 | 39,800 | 266 | 15.0 s |
+| `whole`，檢查 | 39,800 | 10,757 | 266（相同） | 7.3 s |
+| `grow`，不檢查 | 4,506 | 2,149 | 356 | 0.64 s |
+| `grow`，檢查 | 4,506 | 497 | 355 | 0.49 s |
+
+  `grow` 檢查時少的 1 個是最小化前偏差 > 0.5 Å、最小化後閉合的樣本。每個樣本的亂數只由序號決定（7.3），未被捨棄的樣本最小化結果不變（單元測試確認；GPU 上另有 atomic 加總順序的差異）。
+- 檢查只用 CPU 算座標（每個樣本一次，與產生樣本一起平行計算），不需 GPU。
+- 測試：`9a: closure deviation checked before the minimization (2KJJ)`（`closureDeviation` 與 `evaluate` 的 `closureMaxDeviation` 相同；檢查時有樣本在最小化前被捨棄，計數相加等於 L1；通過的樣本與不檢查時相同）。
 
 **最佳化方法**：`conf9a.minMethod`，預設 L-BFGS（第 12 節；1.56 前為 FIRE）；每步每個兩面角變化上限 `confMaxDihedralStep`（預設 10°）。
 - 最佳化的目標函數為含閉合約束的總能量；篩選用的能量（比較 `E_max`）不含閉合約束（4.5）。
@@ -1559,7 +1577,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
-| `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：只受記憶體限制；整數 n：最多 n 個，仍受記憶體限制） |
+| `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：視窗的 L2poss 達 48 × GPU 同時計算的姿勢數為止；整數 n：最多 n 個；都受記憶體限制） |
 | `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
@@ -1603,6 +1621,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
 | `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
+| `conf9a.preCloseFactor` | `--conf9a_preCloseFactor` | 1 | 7.9（最小化前閉合偏差 > f × `topology.maxBreakDist` 的樣本不最小化，直接捨棄；0：不檢查） |
 | `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4（`posm1`、`posm2`、`posm2_fft`、`posm3`、`posm4`） |
 | `dock9b.posStep` | `--dock9b_posStep` | 1 Å | 8.4 |
 | `dock9b.posm1SampleNum` | `--dock9b_posm1SampleNum` | 1000 | 8.4.1、8.4.5 |
@@ -2019,6 +2038,20 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 整個執行時間：A 52.4–53.1 s → 37.1–37.4 s（16），B 19.1–19.9 s → 16.0–16.3 s（16）。
   - nsys（B）：9b 核心呼叫 49,000 次 → 9,000 次（8），≤16 個姿勢的呼叫時間 2.5 s → 0.4 s。
 - **記憶體**：A、B 的每個 `delta` 場約 115 MB（GPU），視窗中的場同時存在主機記憶體；posm2_fft 時各構形的頻譜也同時存在主機記憶體。預設 16 在 A 節省的時間約為上限（46）的 95%。
+- **1.74：`auto` 依姿勢數決定視窗**：
+  - 原因：把多個 StaM 構形一起最小化，是為了減少批次尾端（只剩少數姿勢在算、GPU 閒置）的次數；所需的構形數取決於每個構形的 L2poss 與 GPU 的大小，固定的構形數不適用所有例子（A 每個構形約 54 個 L2poss，B 約 1,070 個）。
+  - 量測（A、B，TITAN V；每個視窗最小化的時間）：一個視窗的時間 ≈ 尾端 + 姿勢數 × 每個姿勢的時間；A：0.21 s + 0.34 ms × 姿勢數，B：0.23 s + 0.30 ms × 姿勢數。尾端（約 2,000–3,500 次核心呼叫，最後只剩最慢的姿勢）幾乎與姿勢數無關。尾端佔一個視窗 10% 時的姿勢數：A 6,200、B 7,900。
+  - 做法：GPU 同時計算的姿勢數 S ＝ 多處理器數 × 每個多處理器可同時存放的 block 數（`GpuEnergy::residentSamplesDock`，與 9b 核心配置 block 的方式相同；1L2Y 在 TITAN V 為 160）。`auto` 時，視窗中每個有 L2poss 的 MobM 都累積到 48 × S 個 L2poss（1L2Y 在 TITAN V 為 7,680）就處理視窗；仍受 GPU 與主機記憶體限制。整數 n 時同 1.73（最多 n 個構形）。
+  - 為了在處理視窗前知道 L2poss，構形加入視窗時就產生 L1poss 並做 8.5 快速篩選（`MobmDocker::prepareJobs`，結果存在 `PairJob::prepared`，`dockPairs` 直接使用）；順序與結果與之前相同（測試：`dock9b: dockPairs over several StaM fields delivers the chunks of sequential calls` 加上事先準備的情形，含無 evaluator）。
+  - 結果（`auto`）：
+
+| 例子 | 構形數 | 每個構形的 L2poss | 視窗（姿勢數／構形數） | 9b docking |
+|---|---|---|---|---|
+| A | 100 | 54 | 2,528／46、2,412／46、431／8（GPU 記憶體限制） | 5.1 s |
+| B | 20 | 1,070 | 8,569／8、8,571／8、4,269／4 | 7.8 s（一個視窗 20 個構形時 7.0 s；8 個時 7.8 s） |
+| C（A 但 `posm1SampleNum` 300、60 個構形） | 60 | 320 | 7,742／24、7,680／24、3,839／12 | 8.0 s |
+
+  - log 的 `windows ended by` 加上 `L2poss`（因姿勢數結束的視窗數與每個視窗的目標）。
 - **1.73：預設 `auto` 與 `memory.hostLimit`**：
   - 量測（A，TITAN V 12 GB）：
 
@@ -2349,3 +2382,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.71 | 2026-10-19 | GPU 核心最佳化（三）：原子對的資料與運算精簡、每個 block 計算多個樣本、兩面角轉換（pointer jumping）平行化；9a 約快 19%、9b 約快 30%（15.1.15） |
 | 1.72 | 2026-10-20 | 9b 多個 StaM 構形一起最小化：新增 `gpu.dock9bStamNum`（預設 16）、`GpuField` 同時存放多個場、`dockPairs` 的 `PairGroup` 版、多場核心；A 的 9b 約快 3.5 倍、B 約快 1.4 倍（15.1.16） |
 | 1.73 | 2026-10-20 | `gpu.dock9bStamNum` 預設改為 `auto`；新增 `memory.hostLimit`（預設 auto：cgroup 上限），9b 視窗受主機記憶體 90% 限制；log 寫出每個構形的記憶體與一個視窗所需的記憶體（13、15.1.16） |
+| 1.74 | 2026-10-21 | `gpu.dock9bStamNum = auto` 改依姿勢數（48 × GPU 同時計算的姿勢數）決定視窗，構形加入視窗時先做快速篩選（15.1.16）；9a 最小化前的閉合檢查 `conf9a.preCloseFactor`，與 9a 大量樣本 E ≥ `E_max` 的原因分析（7.9） |

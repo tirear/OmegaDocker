@@ -311,8 +311,9 @@ const std::vector<Param>& params() {
     t.push_back(integer("gpu.dock9bBatchNum", "<n>", "8192",
                         "9b: poses minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuDock9bBatchNum)));
     t.push_back(intAuto("gpu.dock9bStamNum", "auto|<n>",
-                        "9b: StaM conformations whose poses are minimized together on the GPU (auto: as many as "
-                        "memory.hostLimit and half of the free device memory allow; <n>: at most n, within these limits)",
+                        "9b: StaM conformations whose poses are minimized together on the GPU (auto: until their L2poss "
+                        "reach 48 x the poses the GPU evaluates at the same time; <n>: at most n; both within "
+                        "memory.hostLimit and half of the free device memory)",
                         1, OD_ACC(gpuDock9bStamNum)));
     t.push_back(intAuto("memory.hostLimit", "auto|<MiB>",
                         "Host memory limit (MiB) for 9b (gpu.dock9bStamNum); auto: the cgroup memory limit, otherwise "
@@ -360,6 +361,10 @@ const std::vector<Param>& params() {
                      OD_ACC(confMinDeltaE)));
     t.push_back(real("conf9a.maxDihedralStep", "<deg>", "10", "9a minimization: largest change of one torsion per step",
                      OD_ACC(confMaxDihedralStep)));
+    t.push_back(real("conf9a.preCloseFactor", "<f>", "1",
+                     "9a: samples whose closure deviation exceeds f x topology.maxBreakDist before the minimization are "
+                     "discarded without minimizing them; 0: off",
+                     OD_ACC(confPreCloseFactor)));
 
     t.push_back({"dock9b.posm", Type::Str, "posm1|posm2|posm2_fft|posm3|posm4", "required", "9b: position and orientation sampling method",
                  [](Options& o, const Tokens& v) {
@@ -857,6 +862,7 @@ void validateOptions(const Options& o) {
   check(o.confMinMaxStep >= 0, "conf9a.minMaxStep", ">= 0");
   check(o.confMinDeltaE >= 0, "conf9a.minDeltaE", ">= 0");
   check(o.confMaxDihedralStep > 0, "conf9a.maxDihedralStep", "> 0");
+  check(o.confPreCloseFactor >= 0, "conf9a.preCloseFactor", ">= 0");
   check(o.fe.temperature > 0, "od_0100.temperature", "> 0");
   check(o.fe.unboundCandidateNum >= 1, "od_0100.unboundCandidateNum", ">= 1");
   check(o.fe.shakingRadius > 0, "od_0100.shaking.radius", "> 0");
