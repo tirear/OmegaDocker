@@ -5,9 +5,11 @@
 #pragma once
 #include <algorithm>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "dock9b.hpp"
+#include "error.hpp"
 #include "energy_gpu.hpp"
 #include "prep_gpu.hpp"
 
@@ -30,17 +32,28 @@ class GpuPoseEvaluator : public PoseEvaluator {
   }
   int maxBatch() const override { return batch_; }
   void bind(const MobmDocker& dk) override {
-    if (field_->id() != dk.field().id()) field_->set(dk.field().model());
+    if (!field_->touch(dk.field().id())) field_->set(dk.field().model());
     if (prep_ && dk.fft()) prep_->setFft(*dk.fft());
-    const Dock9bParams& p = dk.params();
-    gpu_.setProbes(dk.probes(), p.clashDistance, p.clashBase, p.clashK);
-    if (sized_ == field_->id()) return;
-    // Sized once per field, with this evaluator's work memory freed.
-    gpu_.releaseScratch();
-    const std::size_t per = gpu_.bytesPerSampleDock();
-    const std::size_t fit = static_cast<std::size_t>(0.9 * static_cast<double>(gpuFreeMem(device_))) / per;
-    batch_ = static_cast<int>(std::clamp<std::size_t>(fit, 1, static_cast<std::size_t>(want_)));
-    sized_ = field_->id();
+    slot_.assign(1, std::max(0, field_->slotOf(dk.field().id())));
+    setup(dk, dk.field().id());
+  }
+  // Resident fields: GpuField::slots() (spec 15.1.16).
+  int fields() const override { return field_->slots(); }
+  void bindAll(std::span<const MobmDocker* const> dks) override {
+    if (static_cast<int>(dks.size()) > field_->slots()) throw Error("bindAll: more fields than GpuField slots");
+    std::uint64_t key = 0;
+    std::vector<char> have(dks.size());
+    for (std::size_t i = 0; i < dks.size(); ++i) have[i] = field_->touch(dks[i]->field().id());
+    for (std::size_t i = 0; i < dks.size(); ++i)
+      if (!have[i]) field_->set(dks[i]->field().model());
+    slot_.clear();
+    for (const MobmDocker* dk : dks) {
+      const int s = field_->slotOf(dk->field().id());
+      if (s < 0) throw Error("bindAll: field not resident");
+      slot_.push_back(s);
+      key = key * 0x9e3779b97f4a7c15ULL + dk->field().id();
+    }
+    setup(*dks[0], key);
   }
   void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) override {
     submit(0, n, req);
@@ -68,6 +81,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
       ps.q[1] = static_cast<float>(r.pose.q.x);
       ps.q[2] = static_cast<float>(r.pose.q.y);
       ps.q[3] = static_cast<float>(r.pose.q.z);
+      ps.field = slot_[static_cast<std::size_t>(r.field)];
     }
     gpu_.submitDock(lane, *field_, w.angles.data(), w.poses.data(), n, true);
   }
@@ -180,11 +194,25 @@ class GpuPoseEvaluator : public PoseEvaluator {
   }
 
  private:
+  // Probe atoms of dk; the batch is sized once per set of fields (key), with this evaluator's
+  // work memory freed.
+  void setup(const MobmDocker& dk, std::uint64_t key) {
+    const Dock9bParams& p = dk.params();
+    gpu_.setProbes(dk.probes(), p.clashDistance, p.clashBase, p.clashK);
+    if (sized_ == key) return;
+    gpu_.releaseScratch();
+    const std::size_t per = gpu_.bytesPerSampleDock();
+    const std::size_t fit = static_cast<std::size_t>(0.9 * static_cast<double>(gpuFreeMem(device_))) / per;
+    batch_ = static_cast<int>(std::clamp<std::size_t>(fit, 1, static_cast<std::size_t>(want_)));
+    sized_ = key;
+  }
+
   GpuEnergy gpu_;
   std::shared_ptr<GpuField> field_;
   std::shared_ptr<GpuDockPrep> prep_;
   int nt_, device_, want_, batch_;
   std::uint64_t sized_ = 0;
+  std::vector<int> slot_{0};  // GpuField slot of each bound docker
   // Host data of each lane.
   struct Work {
     int n = 0;

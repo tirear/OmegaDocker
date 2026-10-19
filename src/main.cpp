@@ -948,6 +948,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   std::function<od::DistanceGrid(const od::GridAtoms&)> distanceGrid = [&](const od::GridAtoms& a) {
     return od::buildDistanceGrid(geom, a, distCap);
   };
+  // StaM conformations docked together (spec 15.1.16) and the device memory for their fields.
+  int stamWindow = 1;
+  std::function<std::size_t()> gpuFieldBudget = [] { return std::numeric_limits<std::size_t>::max(); };
+  std::function<void(int)> gpuFieldSlots = [](int) {};
 #ifdef OD_HAVE_CUDA
   // Grids on the GPU (spec 15.1.10): the same values as the CPU.
   std::shared_ptr<od::GpuGridBuilder> gpuGrid;
@@ -975,6 +979,13 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       return g;
     };
     auto gpuField = std::make_shared<od::GpuField>(opt.gpuDevice);
+    stamWindow = opt.gpuDock9bStamNum;
+    // Resident fields: those of the window (the fields of the previous window are dropped).
+    gpuFieldSlots = [gpuField](int n) { gpuField->setSlots(n); };
+    // Half of the free device memory and the memory of the resident fields.
+    gpuFieldBudget = [&opt, gpuField] {
+      return (od::gpuFreeMem(opt.gpuDevice) + gpuField->deviceBytes()) / 2;
+    };
     auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevice);
     for (std::size_t i = 0; i < mobSets.size(); ++i)
       poseEval[i] = std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuField, opt.gpuDevice,
@@ -1108,6 +1119,104 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     long long movedSum = 0, blockSum = 0, blockTotal = 0;
     long long sepaShell = 0, sepaSelected = 0, sepaRegions = 0, sepaPos = 0;
     double sepaCutSum = 0;
+    // 9b of a window of StaM conformations (spec 15.1.16): per MobM, the pairs of all of them
+    // docked together; sinks run in StaM conformation and pair order.
+    struct WindowItem {
+      int sid;
+      std::unique_ptr<od::StamField> field;
+      std::vector<od::StamSepa> sepas;
+      std::shared_ptr<const od::FftStam> fft;
+    };
+    std::vector<WindowItem> window;
+    std::size_t windowBytes = 0, windows = 0, largestWindow = 0;
+    const std::size_t fieldBudget = gpuFieldBudget();
+    // Device memory of a field (estimate): the stored delta blocks, or the maps of a full field of
+    // a StaM with torsions (the other fields share the reference maps).
+    const auto fieldBytes = [&](const od::StamField& f) -> std::size_t {
+      const std::size_t maps = static_cast<std::size_t>(f.typeMapCount()) + 4;
+      if (f.mode() == od::GridMode::Delta)
+        return f.deltaBlockCount() * maps * od::kDeltaBlock * od::kDeltaBlock * od::kDeltaBlock * sizeof(float) +
+               f.blockCount() * sizeof(int);
+      if (f.mode() == od::GridMode::Full && stamSet.movable()) return f.geom().size() * maps * sizeof(float);
+      return 0;
+    };
+    const auto dockWindow = [&] {
+      if (window.empty()) return;
+      gpuFieldSlots(static_cast<int>(window.size()));
+      ++windows;
+      largestWindow = std::max(largestWindow, window.size());
+      for (std::size_t i = 0; i < ms.size(); ++i) {
+        const ConfSet& mob = *mobSets[i];
+        od::Dock9bParams dpi = dp;
+        dpi.evaluator = poseEval[i].get();
+        struct Group {
+          int sid = 0;
+          float stamRel = 0;
+          std::unique_ptr<od::MobmDocker> dk;
+          std::vector<int> mids;
+          std::vector<std::vector<double>> mobAngles;
+          std::vector<char> posm1Only;
+          std::vector<float> lowest;
+          std::vector<od::MobmDocker::PairJob> jobs;
+        };
+        std::vector<std::unique_ptr<Group>> groups;
+        for (WindowItem& w : window) {
+          const int sid = w.sid;
+          if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
+          auto gp = std::make_unique<Group>();
+          Group& g = *gp;
+          g.sid = sid;
+          for (int mid : ms[i].mobDcss) {
+            const std::uint64_t key = pairKey(sid, mid);
+            if (deterministic && ms[i].pairLowest.contains(key)) {
+              ++skipped[i];
+              continue;
+            }
+            // posm4: the posm3 part of a pair docked before is not redone (spec 9).
+            g.posm1Only.push_back(dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key));
+            const auto& ma = mob.sample(mid).angles;
+            g.mobAngles.push_back(mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles());
+            g.mids.push_back(mid);
+          }
+          if (g.mids.empty()) continue;
+          g.dk = std::make_unique<od::MobmDocker>(mob.sys(), *w.field, dpi, &w.sepas, w.fft.get());
+          g.stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
+          g.lowest.assign(g.mids.size(), std::numeric_limits<float>::infinity());
+          g.jobs.resize(g.mids.size());
+          for (std::size_t j = 0; j < g.mids.size(); ++j) {
+            g.jobs[j].mobAnglesDeg = g.mobAngles[j];
+            g.jobs[j].stream = od::dockStream(round, i, sid, g.mids[j]);
+            g.jobs[j].posm1Only = g.posm1Only[j];
+            g.jobs[j].sink = [&, i, j, gr = &g](std::vector<od::DockSample>& chunk) {
+              sampleNum[i] += static_cast<long long>(chunk.size());
+              for (auto& s : chunk) {
+                od::RoundSample r{gr->sid, gr->mids[j], std::move(s), gr->stamRel};
+                gr->lowest[j] = std::min(gr->lowest[j], r.rank());
+                buffer[i].push_back(std::move(r));
+              }
+              if (buffer[i].size() >= ms[i].bufferNum) {
+                select(i, false);
+                ++partial[i];
+              }
+            };
+          }
+          groups.push_back(std::move(gp));
+        }
+        std::vector<od::MobmDocker::PairGroup> pg;
+        for (auto& g : groups) pg.push_back({g->dk.get(), &g->jobs});
+        od::MobmDocker::dockPairs(pg, ms[i].bufferNum);
+        for (const auto& gp : groups) {
+          const Group& g = *gp;
+          for (std::size_t j = 0; j < g.mids.size(); ++j) {
+            const std::uint64_t key = pairKey(g.sid, g.mids[j]);
+            st[i] += g.jobs[j].stats;
+            ++docked[i];
+            if (usesSepas && !g.posm1Only[j]) ++posm3Docked[i];
+            ms[i].pairLowest[key] = g.posm1Only[j] ? std::min(g.lowest[j], ms[i].pairLowest[key]) : g.lowest[j];
+          }
+        }
+      }
+    };
     for (int sid : stamIds) {
       const auto g0 = std::chrono::steady_clock::now();
       auto stamAtoms = [&](bool input) {
@@ -1123,7 +1232,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                          std::make_shared<const od::DistanceGrid>(distanceGrid(a))};
       };
       const bool firstBuild = !fixedGrids;
-      od::StamField field;
+      auto fieldPtr = std::make_unique<od::StamField>();
+      od::StamField& field = *fieldPtr;
       if (gridMode == od::GridMode::Flexres) {
         if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(od::subset(stamAtoms(true), movedMask, false));
         od::GridAtoms moved = od::subset(stamAtoms(false), movedMask, true);
@@ -1189,58 +1299,18 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         fftSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count();
       }
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
-      for (std::size_t i = 0; i < ms.size(); ++i) {
-        if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
-        const ConfSet& mob = *mobSets[i];
-        od::Dock9bParams dpi = dp;
-        dpi.evaluator = poseEval[i].get();
-        const od::MobmDocker dk(mob.sys(), field, dpi, &sepas, fft.get());
-        // The pairs of this StaM conformation, docked together (spec 15.1.4); sinks run in pair order.
-        std::vector<int> mids;
-        std::vector<std::vector<double>> mobAngles;
-        std::vector<char> posm1Only;
-        for (int mid : ms[i].mobDcss) {
-          const std::uint64_t key = pairKey(sid, mid);
-          if (deterministic && ms[i].pairLowest.contains(key)) {
-            ++skipped[i];
-            continue;
-          }
-          // posm4: the posm3 part of a pair docked before is not redone (spec 9).
-          posm1Only.push_back(dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key));
-          const auto& ma = mob.sample(mid).angles;
-          mobAngles.push_back(mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles());
-          mids.push_back(mid);
-        }
-        const float stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
-        std::vector<float> lowest(mids.size(), std::numeric_limits<float>::infinity());
-        std::vector<od::MobmDocker::PairJob> jobs(mids.size());
-        for (std::size_t j = 0; j < mids.size(); ++j) {
-          jobs[j].mobAnglesDeg = mobAngles[j];
-          jobs[j].stream = od::dockStream(round, i, sid, mids[j]);
-          jobs[j].posm1Only = posm1Only[j];
-          jobs[j].sink = [&, j](std::vector<od::DockSample>& chunk) {
-            sampleNum[i] += static_cast<long long>(chunk.size());
-            for (auto& s : chunk) {
-              od::RoundSample r{sid, mids[j], std::move(s), stamRel};
-              lowest[j] = std::min(lowest[j], r.rank());
-              buffer[i].push_back(std::move(r));
-            }
-            if (buffer[i].size() >= ms[i].bufferNum) {
-              select(i, false);
-              ++partial[i];
-            }
-          };
-        }
-        dk.dockPairs(jobs, ms[i].bufferNum);
-        for (std::size_t j = 0; j < mids.size(); ++j) {
-          const std::uint64_t key = pairKey(sid, mids[j]);
-          st[i] += jobs[j].stats;
-          ++docked[i];
-          if (usesSepas && !posm1Only[j]) ++posm3Docked[i];
-          ms[i].pairLowest[key] = posm1Only[j] ? std::min(lowest[j], ms[i].pairLowest[key]) : lowest[j];
-        }
+      // Docked together with the following StaM conformations (spec 15.1.16).
+      const std::size_t bytes = fieldBytes(field);
+      if (!window.empty() && (static_cast<int>(window.size()) >= stamWindow || windowBytes + bytes > fieldBudget)) {
+        dockWindow();
+        window.clear();
+        windowBytes = 0;
       }
+      windowBytes += bytes;
+      window.push_back({sid, std::move(fieldPtr), std::move(sepas), std::move(fft)});
     }
+    dockWindow();
+    window.clear();
     double partialSec = 0;
     for (double s : selectSec) partialSec += s;
     const double dockSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count() - gridSec - partialSec;
@@ -1314,7 +1384,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     }
     for (auto& e : poseEval)
       if (e) e->idle();
-    od::logInfo(std::format("  9b docking: {:.2f} s", dockSec));
+    od::logInfo(std::format("  9b docking: {:.2f} s ({} window(s) of StaM conformations docked together, largest {})",
+                            dockSec, windows, largestWindow));
     writeCheckpoint(round, stamSet, mobSets, ms, stamRef, opt, ck, shift);
   }
 
@@ -1401,6 +1472,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuConf9aBatchNum = stored.gpuConf9aBatchNum;
   cmp.gpuConf9aPrecision = stored.gpuConf9aPrecision;
   cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
+  cmp.gpuDock9bStamNum = stored.gpuDock9bStamNum;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {
     auto lines = [](const std::string& s) {

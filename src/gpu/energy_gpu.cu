@@ -152,6 +152,24 @@ __device__ inline bool pairTermGpu(const EnergyModelView& m, const GpuPair& pr, 
   return true;
 }
 
+// 9b probe atoms of one pose against field f (inlined: f may be a kernel parameter); adds to
+// v[8..16] (inter, interClash, outside, translation and rotation gradient) and g.
+template <int kThreads>
+__device__ __forceinline__ void probeTerms(const DockView& dv, const FieldView& f, const float* x, const DockPose& ps,
+                                           double* g, int cc, double* v) {
+  for (int k = threadIdx.x; k < dv.probeCount; k += kThreads) {
+    float gw[3], r[3], gy[3];
+    if (!dock::probeTerm(dv, f, k, x, ps, v[8], v[9], g ? gw : nullptr, r)) {
+      v[10] += 1;
+      continue;
+    }
+    if (!g) continue;
+    dock::probeGrad(ps, gw, r, v + 11, v + 14, gy);
+    const int c = dv.probes[k].coord;
+    for (int i = 0; i < 3; ++i) atomicAdd(g + i * cc + c, static_cast<double>(gy[i]));
+  }
+}
+
 // Torsion transforms (spec 15.1.15). When the axis atoms of each torsion are moved only by
 // torsions applied after it (lower index) and the torsions moving each coordinate are the chain
 // of the last of them and its parents, coordinate a ends at M_deep[a] (x_ref) with M_t =
@@ -175,8 +193,9 @@ struct TorsionData {
 // emulated on sm_70); xs is then only used to return the coordinates (keepX). The gradient (per
 // block in gs) is stored by component (x of all coordinates, then y, then z): the atomics of a
 // warp on consecutive atoms then share memory sectors. Tor: torsion transforms (TorsionData);
-// otherwise the torsions are applied one by one.
-template <class T, bool Dock, int NT, bool Tor>
+// otherwise the torsions are applied one by one. Dock: 0 energies only, 1 9b poses against
+// dv.field, 2 9b poses against dv.fields[DockPose::field].
+template <class T, int Dock, int NT, bool Tor>
 __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, PairData<T> pd, TorsionData<T> td,
                                                      const T* angles, T* xs, double* gs, FlatTerms* terms,
                                                      double* grad, DockView dv, const DockPose* poses, DockTerms* dterms,
@@ -358,17 +377,11 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, PairData
     if constexpr (Dock) {
       // 8: inter, 9: interClash, 10: outside, 11–13: translation, 14–16: rotation gradient.
       const DockPose ps = poses[s];
-      for (int k = tid; k < dv.probeCount; k += kThreads) {
-        float gw[3], r[3], gy[3];
-        if (!dock::probeTerm(dv, k, x, ps, v[8], v[9], g ? gw : nullptr, r)) {
-          v[10] += 1;
-          continue;
-        }
-        if (!g) continue;
-        dock::probeGrad(ps, gw, r, v + 11, v + 14, gy);
-        const int c = dv.probes[k].coord;
-        for (int i = 0; i < 3; ++i) atomicAdd(g + i * cc + c, static_cast<double>(gy[i]));
-      }
+      // The field of this sample (spec 15.1.16): the kernel parameter, or of DockView::fields.
+      if constexpr (Dock == 2)
+        probeTerms<kThreads>(dv, dv.fields[ps.field], x, ps, g, cc, v);
+      else
+        probeTerms<kThreads>(dv, dv.field, x, ps, g, cc, v);
     }
     __shared__ double red[kWarps][kVals];
     for (int k = 0; k < kVals; ++k) {
@@ -456,79 +469,179 @@ std::size_t gpuFreeMem(int device) {
   return freeMem;
 }
 
-struct GpuField::Impl {
-  int device = 0;
-  std::uint64_t id = 0;
-  std::shared_ptr<const void> base, baseDist;  // grids of the uploaded reference maps
-  DevBuf<float> maps, data;
+// Reference maps of a field, shared by the slots with the same grids (FieldModel::base).
+struct FieldMaps {
+  std::shared_ptr<const void> base, baseDist;
+  DevBuf<float> maps;
+};
+
+// One resident field.
+struct FieldSlot {
+  std::uint64_t id = 0, used = 0;
+  std::shared_ptr<FieldMaps> maps;
+  DevBuf<float> data;
   DevBuf<int> block, movedHeavy, cellStart, cellAtoms, heavyStart, heavyAtoms, pairM, pairN;
   DevBuf<FieldMoved> moved;
   DevBuf<double> solT, volT, pairAC, pairBD, pairReqm;
   FieldView view{};
+  std::size_t bytes() const {
+    return data.n * sizeof(float) + block.n * sizeof(int) + moved.n * sizeof(FieldMoved);
+  }
 };
 
-GpuField::GpuField(int device) : impl_(std::make_unique<Impl>()) { impl_->device = device; }
+struct GpuField::Impl {
+  int device = 0;
+  std::vector<std::unique_ptr<FieldSlot>> slots;  // capacity: slots.size()
+  int current = -1;
+  std::uint64_t clock = 0;
+  DevBuf<FieldView> views;  // view of each slot
+
+  void refreshViews() {
+    std::vector<FieldView> v(slots.size(), FieldView{});
+    for (std::size_t i = 0; i < v.size(); ++i)
+      if (slots[i]) v[i] = slots[i]->view;
+    views.upload(v);
+  }
+};
+
+GpuField::GpuField(int device) : impl_(std::make_unique<Impl>()) {
+  impl_->device = device;
+  impl_->slots.resize(1);
+}
 GpuField::~GpuField() = default;
-std::uint64_t GpuField::id() const { return impl_->id; }
-const FieldView& GpuField::deviceView() const { return impl_->view; }
+std::uint64_t GpuField::id() const {
+  const Impl& d = *impl_;
+  return d.current >= 0 ? d.slots[d.current]->id : 0;
+}
+const FieldView& GpuField::deviceView() const { return impl_->slots[impl_->current]->view; }
 
 std::size_t GpuField::deviceBytes() const {
   const Impl& d = *impl_;
-  return d.maps.n * sizeof(float) + d.data.n * sizeof(float) + d.block.n * sizeof(int) + d.moved.n * sizeof(FieldMoved);
+  std::size_t b = 0;
+  std::vector<const FieldMaps*> seen;
+  for (const auto& s : d.slots) {
+    if (!s || !s->id) continue;
+    b += s->bytes();
+    if (s->maps && std::find(seen.begin(), seen.end(), s->maps.get()) == seen.end()) {
+      seen.push_back(s->maps.get());
+      b += s->maps->maps.n * sizeof(float);
+    }
+  }
+  return b;
+}
+
+int GpuField::slots() const { return static_cast<int>(impl_->slots.size()); }
+
+void GpuField::setSlots(int n) {
+  Impl& d = *impl_;
+  n = std::max(n, 1);
+  if (n == static_cast<int>(d.slots.size())) return;
+  check(cudaSetDevice(d.device), "cudaSetDevice");
+  // Keeps the most recently used fields.
+  std::stable_sort(d.slots.begin(), d.slots.end(), [](const auto& a, const auto& b) {
+    return (a ? a->used : 0) > (b ? b->used : 0);
+  });
+  d.slots.resize(static_cast<std::size_t>(n));
+  d.current = -1;
+  std::uint64_t best = 0;
+  for (int i = 0; i < n; ++i)
+    if (d.slots[i] && d.slots[i]->id && d.slots[i]->used > best) {
+      best = d.slots[i]->used;
+      d.current = i;
+    }
+  d.views.release();
+  d.refreshViews();
+}
+
+int GpuField::slotOf(std::uint64_t id) const {
+  const Impl& d = *impl_;
+  if (id == 0) return -1;
+  for (std::size_t i = 0; i < d.slots.size(); ++i)
+    if (d.slots[i] && d.slots[i]->id == id) return static_cast<int>(i);
+  return -1;
+}
+
+const FieldView* GpuField::deviceViews() const { return impl_->views.p; }
+
+bool GpuField::touch(std::uint64_t id) {
+  Impl& d = *impl_;
+  const int have = slotOf(id);
+  if (have < 0) return false;
+  d.current = have;
+  d.slots[have]->used = ++d.clock;
+  return true;
 }
 
 void GpuField::set(const FieldModel& fm) {
   Impl& d = *impl_;
-  if (fm.id != 0 && fm.id == d.id) return;
+  if (touch(fm.id)) return;
   check(cudaSetDevice(d.device), "cudaSetDevice");
+  // An empty slot, otherwise the least recently used one.
+  int k = 0;
+  for (int i = 0; i < static_cast<int>(d.slots.size()); ++i) {
+    if (!d.slots[i] || !d.slots[i]->id) {
+      k = i;
+      break;
+    }
+    if (d.slots[i]->used < d.slots[k]->used) k = i;
+  }
   const int nm = fm.view.typeMapCount + 3;
-  if (fm.base != d.base || fm.baseDist != d.baseDist) {
-    d.base.reset();
-    d.baseDist.reset();
-    d.maps.release();
-    d.maps.reserve(static_cast<std::size_t>(nm) * fm.points);
+  std::shared_ptr<FieldMaps> maps;
+  for (const auto& s : d.slots)
+    if (s && s->maps && s->maps->base == fm.base && s->maps->baseDist == fm.baseDist) maps = s->maps;
+  d.slots[k].reset();
+  d.current = -1;
+  if (!maps) {
+    maps = std::make_shared<FieldMaps>();
+    maps->maps.reserve(static_cast<std::size_t>(nm) * fm.points);
     for (int m = 0; m < nm; ++m)
-      check(cudaMemcpy(d.maps.p + static_cast<std::size_t>(m) * fm.points, fm.view.maps[m], fm.points * sizeof(float),
+      check(cudaMemcpy(maps->maps.p + static_cast<std::size_t>(m) * fm.points, fm.view.maps[m], fm.points * sizeof(float),
                        cudaMemcpyHostToDevice),
             "upload map");
-    d.base = fm.base;
-    d.baseDist = fm.baseDist;
+    maps->base = fm.base;
+    maps->baseDist = fm.baseDist;
   }
-  d.data.release();
-  d.data.upload(fm.data);
-  d.block.upload(fm.block);
-  d.moved.upload(fm.moved);
-  d.movedHeavy.upload(fm.movedHeavy);
-  d.cellStart.upload(fm.cellStart);
-  d.cellAtoms.upload(fm.cellAtoms);
-  d.heavyStart.upload(fm.heavyStart);
-  d.heavyAtoms.upload(fm.heavyAtoms);
-  d.solT.upload(fm.solT);
-  d.volT.upload(fm.volT);
-  d.pairAC.upload(fm.pairAC);
-  d.pairBD.upload(fm.pairBD);
-  d.pairReqm.upload(fm.pairReqm);
-  d.pairM.upload(fm.pairM);
-  d.pairN.upload(fm.pairN);
+  auto sp = std::make_unique<FieldSlot>();
+  FieldSlot& s = *sp;
+  s.maps = std::move(maps);
+  s.data.upload(fm.data);
+  s.block.upload(fm.block);
+  s.moved.upload(fm.moved);
+  s.movedHeavy.upload(fm.movedHeavy);
+  s.cellStart.upload(fm.cellStart);
+  s.cellAtoms.upload(fm.cellAtoms);
+  s.heavyStart.upload(fm.heavyStart);
+  s.heavyAtoms.upload(fm.heavyAtoms);
+  s.solT.upload(fm.solT);
+  s.volT.upload(fm.volT);
+  s.pairAC.upload(fm.pairAC);
+  s.pairBD.upload(fm.pairBD);
+  s.pairReqm.upload(fm.pairReqm);
+  s.pairM.upload(fm.pairM);
+  s.pairN.upload(fm.pairN);
   FieldView v = fm.view;
-  for (int m = 0; m < nm; ++m) v.maps[m] = d.maps.p + static_cast<std::size_t>(m) * fm.points;
-  v.data = d.data.p;
-  v.block = d.block.p;
-  v.moved = d.moved.p;
-  v.movedHeavy = d.movedHeavy.p;
-  v.cells.start = d.cellStart.p;
-  v.cells.atoms = d.cellAtoms.p;
-  v.heavyCells.start = d.heavyStart.p;
-  v.heavyCells.atoms = d.heavyAtoms.p;
-  v.solT = d.solT.p;
-  v.volT = d.volT.p;
-  v.pairAC = d.pairAC.p;
-  v.pairBD = d.pairBD.p;
-  v.pairReqm = d.pairReqm.p;
-  v.pairM = d.pairM.p;
-  v.pairN = d.pairN.p;
-  d.view = v;
-  d.id = fm.id;
+  for (int m = 0; m < nm; ++m) v.maps[m] = s.maps->maps.p + static_cast<std::size_t>(m) * fm.points;
+  v.data = s.data.p;
+  v.block = s.block.p;
+  v.moved = s.moved.p;
+  v.movedHeavy = s.movedHeavy.p;
+  v.cells.start = s.cellStart.p;
+  v.cells.atoms = s.cellAtoms.p;
+  v.heavyCells.start = s.heavyStart.p;
+  v.heavyCells.atoms = s.heavyAtoms.p;
+  v.solT = s.solT.p;
+  v.volT = s.volT.p;
+  v.pairAC = s.pairAC.p;
+  v.pairBD = s.pairBD.p;
+  v.pairReqm = s.pairReqm.p;
+  v.pairM = s.pairM.p;
+  v.pairN = s.pairN.p;
+  s.view = v;
+  s.id = fm.id;
+  s.used = ++d.clock;
+  d.slots[k] = std::move(sp);
+  d.current = k;
+  d.refreshViews();
 }
 
 namespace {
@@ -588,7 +701,7 @@ std::size_t sharedBytes(const EnergyModelView& m) {
   return b <= static_cast<std::size_t>(sharedLimit()) - 4096 ? b : 0;  // the kernel's own shared memory
 }
 
-template <class T, bool Dock, int NT>
+template <class T, int Dock, int NT>
 void launchNT(cudaStream_t st, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const PairData<T>& pd, const TorsionData<T>& td, const T* angles, T* xs,
               double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses, DockTerms* dterms,
               double* grad6) {
@@ -638,7 +751,7 @@ void launchNT(cudaStream_t st, int n, std::size_t shm, bool keepX, const EnergyM
                                                         n, shm ? 1 : 0, keepX ? 1 : 0);
 }
 
-template <class T, bool Dock>
+template <class T, int Dock>
 void launch(cudaStream_t st, int threads, int n, std::size_t shm, bool keepX, const EnergyModelView& m, const PairData<T>& pd, const TorsionData<T>& td, const T* angles,
             T* xs, double* gs, FlatTerms* terms, double* grad, const DockView& dv, const DockPose* poses,
             DockTerms* dterms, double* grad6) {
@@ -835,7 +948,7 @@ struct GpuEnergy::Impl {
       std::copy_n(hAngles, nn * nt, reinterpret_cast<T*>(L.hIn.p));
       check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
     }
-    launch<T, false>(L.stream, blockThreads(view, 0), n, shm, hCoords != nullptr, view, pairData<T>(), torsionData<T>(L, nn),
+    launch<T, 0>(L.stream, blockThreads(view, 0), n, shm, hCoords != nullptr, view, pairData<T>(), torsionData<T>(L, nn),
                      reinterpret_cast<const T*>(L.in.p), reinterpret_cast<T*>(L.xs.p), hGrad ? L.gs.p : nullptr,
                      reinterpret_cast<FlatTerms*>(L.out.p + oTerms),
                      hGrad ? reinterpret_cast<double*>(L.out.p + oGrad) : nullptr, DockView{}, nullptr, nullptr, nullptr);
@@ -872,7 +985,7 @@ struct GpuEnergy::Impl {
       for (long long s = 0; s < static_cast<long long>(nn * nt); ++s) ha[s] = static_cast<T>(hAngles[s]);
       check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
     }
-    launch<T, false>(L.stream, blockThreads(view, 0), n, shm, false, view, pairData<T>(), torsionData<T>(L, nn),
+    launch<T, 0>(L.stream, blockThreads(view, 0), n, shm, false, view, pairData<T>(), torsionData<T>(L, nn),
                           reinterpret_cast<const T*>(L.in.p), reinterpret_cast<T*>(L.xs.p),
                           wantGrad ? L.gs.p : nullptr, reinterpret_cast<FlatTerms*>(L.out.p),
                           wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad) : nullptr, DockView{}, nullptr,
@@ -903,7 +1016,7 @@ struct GpuEnergy::Impl {
     if (L.pending) throw Error("submitDock: lane busy");
     L.n = 0;
     if (n <= 0) return;
-    if (f.id == 0) throw Error("evaluateDock: no field");
+    if (f.current < 0) throw Error("evaluateDock: no field");
     check(cudaSetDevice(device), "cudaSetDevice");
     const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
     const std::size_t nn = static_cast<std::size_t>(n);
@@ -921,21 +1034,31 @@ struct GpuEnergy::Impl {
     L.hOut.reserve(L.outBytes);
     float* ha = reinterpret_cast<float*>(L.hIn.p);
     DockPose* hp = reinterpret_cast<DockPose*>(L.hIn.p + iPoses);
-#pragma omp parallel for schedule(static)
+    // Poses of other resident fields than the current one: DockView::fields (spec 15.1.16).
+    int other = 0;
+#pragma omp parallel for schedule(static) reduction(| : other)
     for (long long s = 0; s < static_cast<long long>(nn); ++s) {
       std::copy_n(hAngles + s * nt, nt, ha + s * nt);
       hp[s] = hPoses[s];
+      other |= hp[s].field != f.current;
     }
     check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
     DockView dv = dock;
-    dv.field = f.view;
-    launch<float, true>(L.stream, blockThreads(view, dv.probeCount), n, shm, false, view, pairData<float>(), torsionData<float>(L, nn),
-                        reinterpret_cast<const float*>(L.in.p), reinterpret_cast<float*>(L.xs.p),
-                        wantGrad ? L.gs.p : nullptr, reinterpret_cast<FlatTerms*>(L.out.p),
-                        wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad) : nullptr, dv,
-                        reinterpret_cast<const DockPose*>(L.in.p + iPoses),
-                        reinterpret_cast<DockTerms*>(L.out.p + L.oDterms),
-                        wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad6) : nullptr);
+    dv.field = f.slots[f.current]->view;
+    dv.fields = other ? f.views.p : nullptr;
+    const auto run = [&]<int D>() {
+      launch<float, D>(L.stream, blockThreads(view, dv.probeCount), n, shm, false, view, pairData<float>(), torsionData<float>(L, nn),
+                       reinterpret_cast<const float*>(L.in.p), reinterpret_cast<float*>(L.xs.p),
+                       wantGrad ? L.gs.p : nullptr, reinterpret_cast<FlatTerms*>(L.out.p),
+                       wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad) : nullptr, dv,
+                       reinterpret_cast<const DockPose*>(L.in.p + iPoses),
+                       reinterpret_cast<DockTerms*>(L.out.p + L.oDterms),
+                       wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad6) : nullptr);
+    };
+    // A separate kernel for several fields: the single-field kernel reads its field from the
+    // kernel parameters (spec 15.1.16).
+    if (other) run.template operator()<2>();
+    else run.template operator()<1>();
     check(cudaGetLastError(), "evaluateKernel (dock) launch");
     check(cudaMemcpyAsync(L.hOut.p, L.out.p, L.outBytes, cudaMemcpyDeviceToHost, L.stream), "download");
     L.n = nn;

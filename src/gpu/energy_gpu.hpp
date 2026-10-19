@@ -27,17 +27,24 @@ GpuDeviceInfo gpuDeviceInfo(int device);
 // Free device memory (bytes).
 std::size_t gpuFreeMem(int device);
 
-// A StaM field (spec 8.1, 8.2) on the device. The reference maps are kept while the
-// next field uses the same grids (FieldModel::base).
+// StaM fields (spec 8.1, 8.2) on the device: up to slots() fields stay resident (spec 15.1.16);
+// fields with the same grids (FieldModel::base) share the reference maps.
 class GpuField {
  public:
   explicit GpuField(int device = 0);
   ~GpuField();
   GpuField(const GpuField&) = delete;
   std::uint64_t id() const;  // FieldModel::id of the current field; 0: none
+  // Makes fm the current field, uploading it unless resident (replacing the least recently used).
   void set(const FieldModel& fm);
+  // Makes the resident field id current (most recently used); false when it is not resident.
+  bool touch(std::uint64_t id);
+  int slots() const;
+  void setSlots(int n);  // resident fields (>= 1); keeps the most recently used
+  int slotOf(std::uint64_t id) const;  // slot of a resident field; -1: none
   std::size_t deviceBytes() const;
-  const FieldView& deviceView() const;  // arrays in device memory
+  const FieldView& deviceView() const;  // current field, arrays in device memory
+  const FieldView* deviceViews() const;  // device array: the view of each slot
 
  private:
   friend class GpuEnergy;
@@ -60,7 +67,8 @@ class GpuEnergy {
   // Single precision (spec 12.1): coordinates and per-item terms in float, sums in double.
   void evaluate(const float* angles, int n, FlatTerms* terms, double* grad, float* coords);
   // 9b pose energies (dock::evaluate, spec 15.1.4) against field with the probe atoms of
-  // setProbes; angles: n × torsionCount; grad (optional): n × (6 + torsionCount).
+  // setProbes; angles: n × torsionCount; grad (optional): n × (6 + torsionCount). Each pose is
+  // evaluated against the resident field of slot DockPose::field (spec 15.1.16).
   void setProbes(const std::vector<DockProbe>& probes, double clashDistance, double clashBase, double clashK);
   void evaluateDock(const GpuField& field, const float* angles, const DockPose* poses, int n, FlatTerms* terms,
                     DockTerms* dterms, double* grad);

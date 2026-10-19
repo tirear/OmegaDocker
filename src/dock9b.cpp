@@ -11,6 +11,7 @@
 #include <numbers>
 #include <type_traits>
 
+#include "error.hpp"
 #include "fiber_batch.hpp"
 #include "log.hpp"
 #include "rng.hpp"
@@ -58,20 +59,23 @@ Dock9bStats& Dock9bStats::operator+=(const Dock9bStats& o) {
   return *this;
 }
 
-void MobmDocker::minimizeBatched(std::span<const BatchItem> items, std::vector<DockSample>& res, std::vector<char>& ok,
-                                 std::vector<Dock9bStats>& stats) const {
-  PoseEvaluator& pev = *p_.evaluator;
-  pev.bind(*this);
+void MobmDocker::minimizeBatched(PoseEvaluator& pev, std::span<const MobmDocker* const> dks,
+                                 std::span<const BatchItem> items, std::vector<DockSample>& res, std::vector<char>& ok,
+                                 std::vector<Dock9bStats>& stats) {
+  if (dks.size() == 1) pev.bind(*dks[0]);
+  else pev.bindAll(dks);
   const int m = static_cast<int>(items.size());
   const int nf = std::max(1, std::min(pev.maxBatch(), m));
-  const std::size_t ng = 6 + static_cast<std::size_t>(sys_.torsionCount());
+  const std::size_t ng = 6 + static_cast<std::size_t>(dks[0]->sys_.torsionCount());
   std::vector<PoseRequest> req(nf);
   std::vector<PoseEnergy> pe(nf);
   std::vector<double> grad(nf * ng);
   const auto task = [&](int i, int slot) {
     const Conf& c = *items[i].conf;
-    const PoseEval ev = [&, slot](const Pose& pose, std::span<const double> a, std::vector<double>* g) {
-      req[slot] = {pose, c.center, a.data()};
+    const MobmDocker& dk = *items[i].dk;
+    const int field = items[i].field;
+    const PoseEval ev = [&, slot, field](const Pose& pose, std::span<const double> a, std::vector<double>* g) {
+      req[slot] = {pose, c.center, a.data(), field};
       batchWait();
       if (g) {
         const auto b = grad.begin() + static_cast<std::ptrdiff_t>(slot * ng);
@@ -79,7 +83,7 @@ void MobmDocker::minimizeBatched(std::span<const BatchItem> items, std::vector<D
       }
       return pe[slot];
     };
-    ok[i] = minimize(c, *l1Pose(c, items[i].stream, items[i].k), res[i], stats[i], ev);
+    ok[i] = dk.minimize(c, *dk.l1Pose(c, items[i].stream, items[i].k), res[i], stats[i], ev);
   };
   const int lanes = std::max(1, pev.lanes());
   std::vector<std::vector<PoseRequest>> breq(lanes);
@@ -125,52 +129,78 @@ void MobmDocker::minimizeBatched(std::span<const BatchItem> items, std::vector<D
 }
 
 void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const {
+  const PairGroup g{this, &jobs};
+  dockPairs(std::span<const PairGroup>(&g, 1), chunkSize);
+}
+
+void MobmDocker::dockPairs(std::span<const PairGroup> groups, std::size_t chunkSize) {
   chunkSize = std::max<std::size_t>(chunkSize, 1);
-  if (!p_.evaluator) {
-    for (PairJob& j : jobs) j.stats = dockPair(j.mobAnglesDeg, j.stream, chunkSize, j.sink, j.posm1Only);
+  if (groups.empty()) return;
+  PoseEvaluator* pev = groups[0].dk->p_.evaluator;
+  if (!pev) {
+    for (const PairGroup& g : groups)
+      for (PairJob& j : *g.jobs) j.stats = g.dk->dockPair(j.mobAnglesDeg, j.stream, chunkSize, j.sink, j.posm1Only);
     return;
   }
-  // The L2poss of all jobs in job order, minimized in global chunks; each job's sink receives
-  // the same chunks as from dockPair, in job order.
+  if (static_cast<int>(groups.size()) > std::max(1, pev->fields()))
+    throw Error("dockPairs: more StaM conformations than the evaluator binds together");
+  std::vector<const MobmDocker*> dks;
+  for (const PairGroup& g : groups) {
+    if (g.dk->p_.evaluator != pev || &g.dk->sys_ != &groups[0].dk->sys_)
+      throw Error("dockPairs: groups of different MobMs or evaluators");
+    dks.push_back(g.dk);
+  }
+  // The L2poss of all jobs in group and job order, minimized in global chunks; each job's sink
+  // receives the same chunks as from dockPair, in group and job order.
   struct State {
+    int group = 0;
+    PairJob* job = nullptr;
     Prepared pr;
     std::vector<DockSample> res;
     std::vector<char> ok;
     std::size_t done = 0, delivered = 0;
   };
-  std::vector<State> st(jobs.size());
+  std::vector<State> st;
+  for (std::size_t g = 0; g < groups.size(); ++g)
+    for (PairJob& j : *groups[g].jobs) {
+      State& s = st.emplace_back();
+      s.group = static_cast<int>(g);
+      s.job = &j;
+    }
   std::vector<std::pair<std::size_t, std::size_t>> order;  // (job, L2pos)
-  for (std::size_t j = 0; j < jobs.size(); ++j) {
-    st[j].pr = prepare(jobs[j].mobAnglesDeg, jobs[j].stream, jobs[j].posm1Only);
-    jobs[j].stats = st[j].pr.stats;
+  for (std::size_t j = 0; j < st.size(); ++j) {
+    PairJob& job = *st[j].job;
+    st[j].pr = dks[st[j].group]->prepare(job.mobAnglesDeg, job.stream, job.posm1Only);
+    job.stats = st[j].pr.stats;
     const std::size_t n = st[j].pr.l2.size();
     st[j].res.resize(n);
     st[j].ok.assign(n, 0);
     for (std::size_t k = 0; k < n; ++k) order.emplace_back(j, k);
   }
-  const std::size_t global = std::max<std::size_t>(chunkSize, static_cast<std::size_t>(std::max(1, p_.evaluator->maxBatch())));
+  const std::size_t global = std::max<std::size_t>(chunkSize, static_cast<std::size_t>(std::max(1, pev->maxBatch())));
   std::size_t next = 0;  // first job not fully delivered
   for (std::size_t begin = 0; begin < order.size(); begin += global) {
     const std::size_t m = std::min(global, order.size() - begin);
     std::vector<BatchItem> items(m);
     for (std::size_t i = 0; i < m; ++i) {
       const auto [j, k] = order[begin + i];
-      items[i] = {&st[j].pr.c, jobs[j].stream, st[j].pr.l2[k]};
+      items[i] = {dks[st[j].group], st[j].group, &st[j].pr.c, st[j].job->stream, st[j].pr.l2[k]};
     }
     std::vector<DockSample> res(m);
     std::vector<char> ok(m, 0);
     std::vector<Dock9bStats> ist(m);
-    minimizeBatched(items, res, ok, ist);
+    minimizeBatched(*pev, dks, items, res, ok, ist);
     for (std::size_t i = 0; i < m; ++i) {
       const auto [j, k] = order[begin + i];
       st[j].res[k] = std::move(res[i]);
       st[j].ok[k] = ok[i];
       ++st[j].done;
-      jobs[j].stats.leftGrid += ist[i].leftGrid;
-      jobs[j].stats.steps += ist[i].steps;
-      jobs[j].stats.evaluations += ist[i].evaluations;
+      PairJob& job = *st[j].job;
+      job.stats.leftGrid += ist[i].leftGrid;
+      job.stats.steps += ist[i].steps;
+      job.stats.evaluations += ist[i].evaluations;
     }
-    for (; next < jobs.size(); ++next) {
+    for (; next < st.size(); ++next) {
       State& s = st[next];
       const std::size_t n = s.pr.l2.size();
       while (s.delivered < n && (s.done == n || s.done - s.delivered >= chunkSize)) {
@@ -178,7 +208,7 @@ void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) co
         std::vector<DockSample> chunk;
         for (std::size_t k = s.delivered; k < e; ++k)
           if (s.ok[k]) chunk.push_back(std::move(s.res[k]));
-        jobs[next].sink(chunk);
+        s.job->sink(chunk);
         s.delivered = e;
       }
       if (s.delivered < n) break;
@@ -780,7 +810,7 @@ std::vector<DockProbe> MobmDocker::probes() const {
 }
 
 DockView MobmDocker::dockView(const std::vector<DockProbe>& probes, const FieldView& field) const {
-  return {static_cast<int>(probes.size()), probes.data(), p_.clashDistance, p_.clashBase, p_.clashK, field};
+  return {static_cast<int>(probes.size()), probes.data(), p_.clashDistance, p_.clashBase, p_.clashK, field, nullptr};
 }
 
 bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const {
@@ -928,9 +958,10 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
     std::vector<char> ok(m, 0);
     if (p_.evaluator) {
       std::vector<BatchItem> items(m);
-      for (std::size_t i = 0; i < m; ++i) items[i] = {&c, stream, l2[begin + i]};
+      for (std::size_t i = 0; i < m; ++i) items[i] = {this, 0, &c, stream, l2[begin + i]};
       std::vector<Dock9bStats> st(m);
-      minimizeBatched(items, res, ok, st);
+      const MobmDocker* self = this;
+      minimizeBatched(*p_.evaluator, std::span<const MobmDocker* const>(&self, 1), items, res, ok, st);
       for (const auto& s : st) {
         total.leftGrid += s.leftGrid;
         total.steps += s.steps;

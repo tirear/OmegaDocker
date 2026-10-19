@@ -23,6 +23,7 @@ struct DockView {
   const DockProbe* probes;
   double clashDistance, clashBase, clashK;
   FieldView field;
+  const FieldView* fields;  // several fields (device array, DockPose::field); nullptr: field
 };
 
 // World x = R(q) (y − center) + t.
@@ -30,6 +31,7 @@ struct DockPose {
   float t[3];
   float q[4];  // w, x, y, z
   float center[3];
+  int field;  // index into DockView::fields
 };
 
 struct DockTerms {
@@ -49,16 +51,15 @@ OD_HD inline void rotate(const float q[4], const float v[3], float out[3]) {
 }
 
 // Probe atom k at the coordinates x (torsion-tree frame): adds its grid energy and clash
-// penalty; gw (optional): dE/dw at the world position; r: R(q) (y − center).
+// penalty against the field f; gw (optional): dE/dw at the world position; r: R(q) (y − center).
 // Returns false when the atom is outside the grid (nothing added).
-OD_HD inline bool probeTerm(const DockView& d, int k, const float* x, const DockPose& ps, double& inter,
-                            double& interClash, float gw[3], float r[3]) {
+OD_HD inline bool probeTerm(const DockView& d, const FieldView& f, int k, const float* x, const DockPose& ps,
+                            double& inter, double& interClash, float gw[3], float r[3]) {
   const DockProbe& pr = d.probes[k];
   const float* y = x + 3 * pr.coord;
   const float v[3] = {y[0] - ps.center[0], y[1] - ps.center[1], y[2] - ps.center[2]};
   rotate(ps.q, v, r);
   const float w[3] = {r[0] + ps.t[0], r[1] + ps.t[1], r[2] + ps.t[2]};
-  const FieldView& f = d.field;
   bool in = true;
   for (int c = 0; c < 3; ++c) {
     const float lo = static_cast<float>(f.origin[c]), hi = static_cast<float>(f.origin[c] + (f.n[c] - 1) * f.spacing);
@@ -103,7 +104,7 @@ inline FlatTerms evaluate(const EnergyModelView& m, const DockView& d, const flo
   const FlatTerms t = flat::evaluate(m, angles, x, g, grad ? grad + 6 : nullptr, [&](const float* xc, double* gc) {
     for (int k = 0; k < d.probeCount; ++k) {
       float gw[3], r[3], gy[3];
-      if (!probeTerm(d, k, xc, ps, dt.inter, dt.interClash, gc ? gw : nullptr, r)) {
+      if (!probeTerm(d, d.field, k, xc, ps, dt.inter, dt.interClash, gc ? gw : nullptr, r)) {
         ++dt.outside;
         continue;
       }

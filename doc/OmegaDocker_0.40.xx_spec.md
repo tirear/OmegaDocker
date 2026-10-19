@@ -2,8 +2,8 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.71 |
-| 日期 | 2026-10-19 |
+| 文件版本 | 1.72 |
+| 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
 | 狀態 | 定案（1.0）；實作中需修正時遞增版本，修訂紀錄見第 19 節 |
@@ -1558,6 +1558,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
+| `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | 16 | 15.1.16（一起最小化的 StaM 構形數；受可用 GPU 記憶體一半限制） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
 | `output.minPerRank` | `--output_minPerRank` | 40 | 10.3 |
@@ -1725,9 +1726,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - **共用計算函式**：
   - `field_kernel.hpp`：StaM 場（`StamField`，8.1、8.2）的平面形式 `FieldView`（`StamField::model()`），涵蓋 `full`、`flexres`（移動原子以 cell list 逐對加總）、`delta`（區塊表）三種模式；`field::energy`、`field::distance` 與 `StamField::energy`、`StamField::distance` 逐運算相同（CPU 上 float、double 都逐位元相同，測試）。
   - `dock_kernel.hpp`：探針原子的格點能量、StaM–MobM 碰撞懲罰、平移與旋轉梯度（`dock::probeTerm`、`dock::probeGrad`）；CPU 的 `dock::evaluate` 與 `MobmDocker::evaluate` 逐位元相同（測試）。MobM 分子內能量沿用 15.1.2 的核心，外部項在閉合項之後、扭轉角梯度之前加入（與 `EnergySystem::evaluate` 相同）。
-- **GPU 資料**：`GpuField` 存放目前的 StaM 構型的場，由所有 MobM 共用；換構型時只上傳差異部分：參考格點（`delta` 的參考、`flexres` 的固定原子格點、StaM 無可轉扭轉角時的格點）在相同時沿用，`delta` 的區塊與 `flexres` 的移動原子每次上傳。每個 MobM 一個 `GpuPoseEvaluator`（`src/gpu/dock9b_gpu.hpp`）。
+- **GPU 資料**：`GpuField` 存放目前的 StaM 構型的場（1.72 起可同時存放多個，15.1.16），由所有 MobM 共用；換構型時只上傳差異部分：參考格點（`delta` 的參考、`flexres` 的固定原子格點、StaM 無可轉扭轉角時的格點）在相同時沿用，`delta` 的區塊與 `flexres` 的移動原子每次上傳。每個 MobM 一個 `GpuPoseEvaluator`（`src/gpu/dock9b_gpu.hpp`）。
 - **批次**：
-  - `MobmDocker::dockPairs`：同一個 StaM 構型、同一個 MobM 的所有構型配對一起處理：各配對先在 CPU 產生 L1poss 並篩選，所有配對的 L2poss 依配對順序合併，以 max(`dock9c.sampleBufferNum`, `gpu.dock9bBatchNum`) 個為一批最小化；同時進行的姿勢數為 `gpu.dock9bBatchNum`（受可用 GPU 記憶體 90% 限制）。
+  - `MobmDocker::dockPairs`：同一個 StaM 構型（1.72 起為一組 StaM 構形，15.1.16）、同一個 MobM 的所有構型配對一起處理：各配對先在 CPU 產生 L1poss 並篩選，所有配對的 L2poss 依配對順序合併，以 max(`dock9c.sampleBufferNum`, `gpu.dock9bBatchNum`) 個為一批最小化；同時進行的姿勢數為 `gpu.dock9bBatchNum`（受可用 GPU 記憶體 90% 限制）。
   - 交給 9c 的方式不變：每個配對的對接樣本仍以 `sampleBufferNum` 個為一段、依配對順序交出，因此 9c 的部分選擇時機與逐一呼叫 `dockPair` 相同（測試）。
   - CPU 版（`gpu.enable = false` 或未以 CUDA 建置）仍逐一呼叫 `dockPair`，輸出與 1.58 逐位元相同（已比對 `state.bin` 與所有輸出檔）。
 - **核心**：每個姿勢一個 thread block，block 大小依系統選 32–256 個執行緒（約每執行緒 8 個原子對，且不少於探針原子數；9a 也適用）。每次呼叫輸入、輸出各一次傳輸（page-locked 主機記憶體）。
@@ -1987,6 +1988,36 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - **結果的差異**：GPU float 的捨入改變後，9b 各樣本的最小化路徑不同，topSampleSet 隨之改變。B 以 `--seed=3` 時 1.71 的前 10 個平均能量較高（1.70：−44.1～−44.3，1.71：−43.5～−43.8，各 6 次）；但中間版本在同一 seed 下反而較低（−44.7～−45.2），同一程式的重複執行差異小、不同程式之間差異大，表示差異來自捨入造成的路徑改變，而非系統性的偏差。以 8 個 seed（11–18）比較 B 的前 10 個平均能量：1.71 較低 5 個、較高 3 個，平均差 +0.02 kcal/mol（1.71 − 1.70），無明顯差異。
 
+### 15.1.16 CUDA 版：多個 StaM 構形一起最小化（1.72）
+
+15.1.14 的另一個瓶頸：9b 依 StaM 構形分批，每個 StaM 構形的 L2poss 少，批次尾端只剩少數姿勢，GPU 多半閒置。改為把連續多個 StaM 構形的姿勢一起最小化。
+
+- **視窗**（`src/main.cpp`）：依序建立 StaM 構形的場（格點、posm3 區域、posm2_fft 頻譜，與原本相同），累積成一個視窗；視窗中的構形數達到 `gpu.dock9bStamNum`（預設 16），或加入下一個場後所估計的 GPU 記憶體超過上限時，先處理目前的視窗。上限＝(9b 開始時的可用 GPU 記憶體 + 已存放的場) ÷ 2；估計值為 `delta` 的區塊資料，或 StaM 有可轉兩面角時 `full` 的全部格點（其他情形共用參考格點，計為 0）。處理視窗時，對每個 MobM：視窗中各 StaM 構形的構形配對依 StaM 構形、配對的順序合併為 `MobmDocker::dockPairs`（`PairGroup` 版）的一次呼叫。CPU 版（無 GPU）視窗固定為 1 個構形，流程與之前相同。
+- **dockPairs**：各組（一個 StaM 構形的 `MobmDocker` 與其配對）依序準備 L1poss 與快速篩選；所有組的 L2poss 依組、配對順序合併，以 max(`sampleBufferNum`, `gpu.dock9bBatchNum`) 個為一批最小化；每個配對的 sink 收到的段落與順序和逐一呼叫 `dockPair` 相同（測試）。每個 MobM 的 9c 狀態（sampleBuffer、部分選擇）只由該 MobM 的 sink 更新，因此依 MobM 分開處理視窗不改變結果的順序。
+- **PoseEvaluator**：新增 `fields()`（可同時綁定的 StaM 構形數）與 `bindAll()`；`PoseRequest::field` 指定所用的構形。
+- **GpuField**：可同時存放 `slots()` 個場（`setSlots`；處理每個視窗前設為視窗的構形數，前一個視窗的場因此釋放）；不在其中的場上傳時取代最久未用的場；參考格點相同的場共用一份。各場的 `FieldView` 另存一份陣列於 GPU。
+- **GPU 核心**：`DockPose` 新增場的序號，`DockView` 新增場的陣列。`evaluateKernel` 的 Dock 樣板參數改為 0（只算能量）、1（一個場：場由核心參數讀取，與之前相同）、2（多個場：每個樣本由陣列讀取其場）；一次呼叫的姿勢都屬於目前的場時用 1，否則用 2。嘗試過只用一個版本、以執行期分支選擇：即使不走多場的分支，單場時每次呼叫也慢 6–10%（暫存器限制在 128 個，多出的程式碼影響配置），因此分成兩個版本。
+- **正確性**：
+  - `dock9b: dockPairs over several StaM fields delivers the chunks of sequential calls`：3 個場（full、flexres、delta）、各 3 個配對，CPU 的 PoseEvaluator（1、2 lanes）：段落、能量、統計與逐一 `dockPair` 相同；組數超過 `fields()` 時拋出錯誤。
+  - `gpu: 9b poses of several resident fields in one call`：96 個姿勢分屬 3 個場，一次呼叫（核心版本 2）與每個場各自呼叫（版本 1）比較：能量差 0，梯度相對差 1.3×10⁻¹⁵（atomic 加總順序）。
+  - 整個執行：L2poss、各項篩選數與 `gpu.dock9bStamNum` 無關（A：L2poss 5,371）；left grid、steps/pose 與最終能量的差異與重複執行（GPU atomic 加總順序）同級。
+  - 接續執行時可改變 `gpu.dock9bStamNum`（測試：3 輪後以 4 接續第 4 輪）。
+- **速度**（15.1.14 的 A、B；9b docking，不含格點；1.71 為原本逐一 StaM 構形）：
+
+| `gpu.dock9bStamNum` | A（100 個 StaM 構形） | B（20 個 StaM 構形） |
+|---|---|---|
+| 1.71 | 21.5–22.1 s | 10.7–11.2 s |
+| 1 | 22.2–22.5 s | 10.1–10.9 s |
+| 4 | — | 8.2–9.1 s |
+| 8 | 7.1–8.0 s | 7.6–8.3 s |
+| 16（預設） | 6.1–6.5 s | 7.4–7.6 s |
+| 32 | 5.2–5.8 s | 6.9–7.0 s（20 個構形一個視窗） |
+| 100 | 5.4 s（受記憶體上限限制，最大視窗 46 個） | — |
+
+  - 整個執行時間：A 52.4–53.1 s → 37.1–37.4 s（16），B 19.1–19.9 s → 16.0–16.3 s（16）。
+  - nsys（B）：9b 核心呼叫 49,000 次 → 9,000 次（8），≤16 個姿勢的呼叫時間 2.5 s → 0.4 s。
+- **記憶體**：A、B 的每個 `delta` 場約 115 MB（GPU），視窗中的場同時存在主機記憶體；posm2_fft 時各構形的頻譜也同時存在主機記憶體。預設 16 在 A 節省的時間約為上限（46）的 95%。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2118,7 +2149,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
-  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.dock9bBatchNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
+  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpu.*`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -2298,3 +2329,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.69 | 2026-10-19 | 記錄 1.68 之後 `gpu.conf9aPrecision` double／float 的對照量測與各階段時間；預設維持 `double`（15.1.13） |
 | 1.70 | 2026-10-19 | 記錄效能瓶頸量測：量測穩定度、9b 小批次與單一樣本延遲、每 block 執行緒數、Nsight Compute、9d（15.1.14） |
 | 1.71 | 2026-10-19 | GPU 核心最佳化（三）：原子對的資料與運算精簡、每個 block 計算多個樣本、兩面角轉換（pointer jumping）平行化；9a 約快 19%、9b 約快 30%（15.1.15） |
+| 1.72 | 2026-10-20 | 9b 多個 StaM 構形一起最小化：新增 `gpu.dock9bStamNum`（預設 16）、`GpuField` 同時存放多個場、`dockPairs` 的 `PairGroup` 版、多場核心；A 的 9b 約快 3.5 倍、B 約快 1.4 倍（15.1.16） |

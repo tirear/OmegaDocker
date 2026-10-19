@@ -19,6 +19,7 @@
 #include <random>
 #include <set>
 #include <span>
+#include <tuple>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -2990,8 +2991,9 @@ struct FieldSet {
 // the asynchronous form (submit evaluates, complete returns the stored results).
 struct CpuPoseEvaluator : od::PoseEvaluator {
   const od::MobmDocker* dk = nullptr;
+  std::vector<const od::MobmDocker*> dks;  // bindAll; PoseRequest::field
   const od::MobmDocker::Conf* conf = nullptr;
-  int batch, nLanes, largest = 0, binds = 0;
+  int batch, nLanes, largest = 0, binds = 0, nFields = 1;
   struct Done {
     bool pending = false;
     std::vector<od::MobmDocker::PoseEnergy> out;
@@ -3018,6 +3020,14 @@ struct CpuPoseEvaluator : od::PoseEvaluator {
   }
   void bind(const od::MobmDocker& d) override {
     dk = &d;
+    dks.assign(1, &d);
+    ++binds;
+  }
+  int fields() const override { return nFields; }
+  void bindAll(std::span<const od::MobmDocker* const> d) override {
+    REQUIRE(static_cast<int>(d.size()) <= nFields);
+    dk = d[0];
+    dks.assign(d.begin(), d.end());
     ++binds;
   }
   void evaluate(int n, const od::PoseRequest* req, od::MobmDocker::PoseEnergy* out, double* grad) override {
@@ -3028,7 +3038,7 @@ struct CpuPoseEvaluator : od::PoseEvaluator {
       od::MobmDocker::Conf c;
       c.center = req[i].center;
       const std::span<const double> a(req[i].anglesDeg, dk->sys().torsionCount());
-      out[i] = dk->evaluate(c, req[i].pose, a, &g);
+      out[i] = dks[static_cast<std::size_t>(req[i].field)]->evaluate(c, req[i].pose, a, &g);
       std::copy(g.begin(), g.end(), grad + i * ng);
     }
   }
@@ -3184,6 +3194,62 @@ TEST_CASE("dock9b: dockPairs delivers the chunks of sequential dockPair calls") 
       CHECK(jobs[j].stats.overlap == refStats[j].overlap);
     }
     CHECK(ev.largest == (9 + lanes - 1) / lanes);
+  }
+}
+
+TEST_CASE("dock9b: dockPairs over several StaM fields delivers the chunks of sequential calls") {
+  FieldSet fs;
+  fs.p.posm1SampleNum = 120;
+  std::vector<std::vector<double>> angles;
+  for (unsigned j = 0; j < 3; ++j) angles.push_back(perturbed(fs.x.mobSys->inputAngles(), j == 1 ? 0 : 10, 70 + j));
+  // (field, job, chunk) sequence: sizes and energies.
+  using Seq = std::vector<std::tuple<int, int, std::vector<float>>>;
+  auto record = [](Seq& s, int f, int j) {
+    return [&s, f, j](std::vector<od::DockSample>& ch) {
+      std::vector<float> e;
+      for (const auto& d : ch) e.push_back(d.energy);
+      s.emplace_back(f, j, std::move(e));
+    };
+  };
+  const int nf = static_cast<int>(fs.fields.size());
+  Seq ref, got;
+  std::vector<od::Dock9bStats> refStats;
+  for (int f = 0; f < nf; ++f) {
+    const od::MobmDocker dk(*fs.x.mobSys, fs.fields[f].second, fs.p);
+    for (int j = 0; j < 3; ++j) refStats.push_back(dk.dockPair(angles[j], 21 + j + 3 * f, 4, record(ref, f, j)));
+  }
+  for (int lanes : {1, 2}) {
+    INFO("lanes ", lanes);
+    got.clear();
+    CpuPoseEvaluator ev(11, lanes);
+    ev.nFields = nf;
+    od::Dock9bParams pe = fs.p;
+    pe.evaluator = &ev;
+    std::vector<std::unique_ptr<od::MobmDocker>> dks;
+    std::vector<std::vector<od::MobmDocker::PairJob>> jobs(nf, std::vector<od::MobmDocker::PairJob>(3));
+    std::vector<od::MobmDocker::PairGroup> groups;
+    for (int f = 0; f < nf; ++f) {
+      dks.push_back(std::make_unique<od::MobmDocker>(*fs.x.mobSys, fs.fields[f].second, pe));
+      for (int j = 0; j < 3; ++j) {
+        jobs[f][j].mobAnglesDeg = angles[j];
+        jobs[f][j].stream = 21 + j + 3 * f;
+        jobs[f][j].sink = record(got, f, j);
+      }
+      groups.push_back({dks.back().get(), &jobs[f]});
+    }
+    od::MobmDocker::dockPairs(groups, 4);
+    CHECK(ref.size() > 9);
+    CHECK(got == ref);
+    for (int f = 0; f < nf; ++f)
+      for (int j = 0; j < 3; ++j) {
+        CHECK(jobs[f][j].stats.l2 == refStats[3 * f + j].l2);
+        CHECK(jobs[f][j].stats.steps == refStats[3 * f + j].steps);
+        CHECK(jobs[f][j].stats.leftGrid == refStats[3 * f + j].leftGrid);
+      }
+    CHECK(ev.largest == (11 + lanes - 1) / lanes);
+    // More groups than the evaluator binds together.
+    ev.nFields = nf - 1;
+    CHECK_THROWS_AS(od::MobmDocker::dockPairs(groups, 4), od::Error);
   }
 }
 
@@ -4666,6 +4732,76 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
                         name, n, agree, ctlAgree, gpuMin, cpuMin));
     CHECK(agree >= ctlAgree - n / 10);
   }
+  ev.idle();
+}
+
+TEST_CASE("gpu: 9b poses of several resident fields in one call") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FieldSet fs;
+  const int nf = static_cast<int>(fs.fields.size());
+  auto gfield = std::make_shared<od::GpuField>(0);
+  gfield->setSlots(nf);
+  od::GpuPoseEvaluator ev(fs.x.mobSys->model(), gfield, 0, 4096);
+  CHECK(ev.fields() == nf);
+  const int nt = fs.x.mobSys->torsionCount();
+  const std::size_t ng = 6 + static_cast<std::size_t>(nt);
+  std::vector<std::unique_ptr<od::MobmDocker>> dks;
+  std::vector<const od::MobmDocker*> ptr;
+  for (const auto& [name, field] : fs.fields) {
+    dks.push_back(std::make_unique<od::MobmDocker>(*fs.x.mobSys, field, fs.p));
+    ptr.push_back(dks.back().get());
+  }
+  const auto c = dks[0]->conformation(fs.x.mobSys->inputAngles());
+  const auto poses = filteredPoses(*dks[0], c, 96);
+  REQUIRE(poses.size() == 96);
+  std::vector<std::vector<double>> angles;
+  for (std::size_t i = 0; i < poses.size(); ++i) {
+    auto a = perturbed(fs.x.mobSys->inputAngles(), 20, 140 + static_cast<unsigned>(i));
+    for (double& v : a) v = static_cast<float>(v);
+    angles.push_back(std::move(a));
+  }
+  // Each field alone (one-field kernel).
+  const std::size_t n = poses.size();
+  std::vector<std::vector<od::MobmDocker::PoseEnergy>> single(nf, std::vector<od::MobmDocker::PoseEnergy>(n));
+  std::vector<std::vector<double>> singleGrad(nf, std::vector<double>(n * ng));
+  for (int f = 0; f < nf; ++f) {
+    std::vector<od::PoseRequest> req;
+    for (std::size_t i = 0; i < n; ++i) req.push_back({poses[i], c.center, angles[i].data()});
+    ev.bind(*dks[f]);
+    ev.evaluate(static_cast<int>(n), req.data(), single[f].data(), singleGrad[f].data());
+  }
+  CHECK(gfield->slotOf(fs.fields[0].second.id()) >= 0);  // all still resident
+  // All fields in one call, pose i against field i % nf.
+  ev.bindAll(ptr);
+  std::vector<od::PoseRequest> req;
+  for (std::size_t i = 0; i < n; ++i) req.push_back({poses[i], c.center, angles[i].data(), static_cast<int>(i % nf)});
+  std::vector<od::MobmDocker::PoseEnergy> out(n);
+  std::vector<double> grad(n * ng);
+  ev.evaluate(static_cast<int>(n), req.data(), out.data(), grad.data());
+  double worstE = 0, worstG = 0;
+  int outsideDiff = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto& s = single[i % nf][i];
+    outsideDiff += out[i].outside != s.outside;
+    worstE = std::max(worstE, std::abs(out[i].objective() - s.objective()) / std::max(1.0, std::abs(s.objective())));
+    double gmax = 1;
+    for (std::size_t k = 0; k < ng; ++k) gmax = std::max(gmax, std::abs(singleGrad[i % nf][i * ng + k]));
+    for (std::size_t k = 0; k < ng; ++k)
+      worstG = std::max(worstG, std::abs(grad[i * ng + k] - singleGrad[i % nf][i * ng + k]) / gmax);
+  }
+  MESSAGE(std::format("{} fields: worst relative difference to one field per call: energy {:.2e}, gradient {:.2e}", nf,
+                      worstE, worstG));
+  CHECK(outsideDiff == 0);
+  // Same computation; only the order of the gradient atomics differs.
+  CHECK(worstE < 1e-9);
+  CHECK(worstG < 1e-6);
+  // The fields differ: the poses against another field give other energies.
+  int differ = 0;
+  for (std::size_t i = 0; i < n; ++i) differ += single[(i + 1) % nf][i].objective() != out[i].objective();
+  CHECK(differ > 0);
   ev.idle();
 }
 

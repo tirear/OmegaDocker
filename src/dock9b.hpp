@@ -204,6 +204,15 @@ class MobmDocker {
     Dock9bStats stats;  // result
   };
   void dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const;
+  // Pair jobs of several dockers of the same MobM and parameters (e.g. different StaM
+  // conformations): as dockPairs of each group in turn, the sinks receiving the same chunks in
+  // group and job order. With an evaluator the L2poss of all groups are minimized together, at
+  // most evaluator->fields() groups (spec 15.1.16).
+  struct PairGroup {
+    const MobmDocker* dk;
+    std::vector<PairJob>* jobs;
+  };
+  static void dockPairs(std::span<const PairGroup> groups, std::size_t chunkSize);
 
   long long l1Count(const Conf& c) const;  // L1poss per conformation pair
 
@@ -245,12 +254,14 @@ class MobmDocker {
   };
   Prepared prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream, bool posm1Only) const;
   struct BatchItem {
+    const MobmDocker* dk;
+    int field;  // index of dk in the bound dockers
     const Conf* conf;
     std::uint64_t stream;
     long long k;  // L1pos
   };
-  void minimizeBatched(std::span<const BatchItem> items, std::vector<DockSample>& res, std::vector<char>& ok,
-                       std::vector<Dock9bStats>& stats) const;
+  static void minimizeBatched(PoseEvaluator& pev, std::span<const MobmDocker* const> dks, std::span<const BatchItem> items,
+                              std::vector<DockSample>& res, std::vector<char>& ok, std::vector<Dock9bStats>& stats);
 };
 
 // A pose energy request of the batched 9b minimization (spec 15.1.4).
@@ -258,6 +269,7 @@ struct PoseRequest {
   Pose pose;                 // float values
   Vec3 center{};             // the Pose frame
   const double* anglesDeg;   // torsion angles (float values)
+  int field = 0;             // bound docker (PoseEvaluator::bindAll)
 };
 
 // Batched 9b pose energies, e.g. on a GPU (spec 15.1.4).
@@ -267,6 +279,10 @@ class PoseEvaluator {
   virtual int maxBatch() const = 0;  // most poses per call
   // Selects the StaM conformation and probe atoms of dk for the following calls.
   virtual void bind(const MobmDocker& dk) = 0;
+  // Several StaM conformations at once (spec 15.1.16): up to fields() dockers of the same MobM
+  // bound together, PoseRequest::field selecting one of them.
+  virtual int fields() const { return 1; }
+  virtual void bindAll(std::span<const MobmDocker* const> dks) { bind(*dks[0]); }
   // grad: n × (6 + torsions), as MobmDocker::evaluate.
   virtual void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) = 0;
   // Called when 9b of a round ends (e.g. to free work memory).
