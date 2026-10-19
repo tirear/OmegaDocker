@@ -304,6 +304,11 @@ const std::vector<Param>& params() {
     t.push_back(integer("gpu.device", "<n>", "0", "CUDA device number", OD_ACC(gpuDevice)));
     t.push_back(integer("gpu.conf9aBatchNum", "<n>", "8192",
                         "9a: samples minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuConf9aBatchNum)));
+    t.push_back(boolean("gpu.conf9aRcd", "true",
+                        "9a: RCD loop closure attempts on the GPU (without rcdClash and metal distances)", OD_ACC(gpuConf9aRcd)));
+    t.push_back(integer("gpu.conf9aRcdMinBatch", "<n>", "1024",
+                        "9a: gpu.conf9aRcd only for L1 batches of at least this many samples (smaller ones on the CPU)",
+                        OD_ACC(gpuConf9aRcdMinBatch)));
     t.push_back({"gpu.conf9aPrecision", Type::Str, "double|float", "double",
                  "9a: precision of the GPU evaluations during minimization (final energies in double)",
                  [](Options& o, const Tokens& v) {
@@ -800,6 +805,7 @@ void validateOptions(const Options& o) {
   check(o.gridDeltaThreshold >= 0, "grid.deltaThreshold", ">= 0");
   check(o.gpuDevice >= 0, "gpu.device", ">= 0");
   check(o.gpuConf9aBatchNum >= 1, "gpu.conf9aBatchNum", ">= 1");
+  check(o.gpuConf9aRcdMinBatch >= 1, "gpu.conf9aRcdMinBatch", ">= 1");
   check(o.gpuDock9bBatchNum >= 1, "gpu.dock9bBatchNum", ">= 1");
   check(o.maxNearDistance > 0, "dock9b.maxNearDistance", "> 0");
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");

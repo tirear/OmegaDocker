@@ -47,6 +47,7 @@
 #ifdef OD_HAVE_CUDA
 #include "conf9a_gpu.hpp"
 #include "dock9b_gpu.hpp"
+#include "rcd_gpu.hpp"
 #include "energy_gpu.hpp"
 #include "grid_gpu.hpp"
 #include "shake_gpu.hpp"
@@ -1850,6 +1851,41 @@ TEST_CASE("9a: L2 pool refill with a ConfEvaluator equals the CPU path (1L2Y)") 
     CHECK(a[i].angles == b[i].angles);
     CHECK(a[i].energy == b[i].energy);
   }
+  // GenBatch: the generators run as coroutines that wait for a flush; the same samples. Batches
+  // smaller than genBatchMin run on OpenMP threads.
+  struct Batch : od::GenBatch {
+    int flushes = 0, waits = 0;
+    int slots() const override { return 3; }
+    void flush(std::span<const int> s) override {
+      ++flushes;
+      waits += static_cast<int>(s.size());
+    }
+  } gb;
+  const od::ConfGenerator waiting = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
+    if (idx.slot >= 0) {
+      CHECK(idx.slot < gb.slots());
+      od::batchWait();
+    }
+    return gen(r, idx, a);
+  };
+  for (long long minBatch : {1LL, 7LL}) {
+    std::vector<od::ConfSample> c;
+    std::uint64_t cc = 0;
+    p.evaluator = nullptr;
+    p.genBatch = &gb;
+    p.genBatchMin = minBatch;
+    gb.flushes = gb.waits = 0;
+    const auto sc = od::fillL2Pool(sys, waiting, 6, p, cc, c);
+    CHECK(cc == ca);
+    CHECK(sc.l1 == sa.l1);
+    CHECK(sc.growFailed == sa.growFailed);
+    REQUIRE(c.size() == a.size());
+    for (std::size_t i = 0; i < a.size(); ++i) CHECK(c[i].angles == a[i].angles);
+    // L1 batches: 6, then batches of at most 10 (maxL1Batch).
+    if (minBatch == 1) CHECK(gb.waits == sa.l1);
+    else CHECK(gb.waits == sa.l1 - 6);
+    CHECK(gb.flushes > 0);
+  }
 }
 
 TEST_CASE("9a: L2 pool refill (1L2Y)") {
@@ -2375,6 +2411,69 @@ TEST_CASE("closure: coupled links closed together (2KJJ A:8-15 with the disulfid
     CHECK(closed >= (clash == 0 ? total * 3 / 4 : 0));
   }
 }
+
+#ifdef OD_HAVE_CUDA
+TEST_CASE("closure: RCD on the GPU (2KJJ A:8-15 with the disulfide A:6-A:11)") {
+  if (od::gpuDeviceCount() == 0) return;
+  StaFixture f;
+  const auto cfg = f.ok(freeResidues(f.text, "A", 8, 15));
+  const od::MolSettings& s = cfg.molecules[0];
+  const od::TorsionTree& tree = s.tree;
+  const std::vector<od::EnergyPart> parts{{&f.mols[0], &tree}};
+  const od::EnergySystem sys(parts, {});
+  const od::Csgm1Sampler smp(f.mols[0], s, cfg, {});
+  const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { smp.sampleSegment(r, seg, a); };
+  std::vector<bool> freeMask(sys.torsionCount());
+  for (int g = 0; g < sys.torsionCount(); ++g) freeMask[g] = !smp.cisTrans(g);
+  od::ClosureParams cp;
+  cp.clashDistance = 0.0;
+  const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
+  od::GpuRcd gpu(closer, 0, 64);
+  REQUIRE(gpu.active());
+  // Both links can be closed on the GPU (no clash term, no metal distance).
+  const od::RcdFlat fl = closer.flat();
+  REQUIRE(fl.eligible.size() == 2);
+  CHECK(fl.eligible[0] == 1);
+  CHECK(fl.eligible[1] == 1);
+  const int total = 200;
+  std::vector<std::vector<double>> ac(total), ag(total);
+  std::vector<char> okC(total), okG(total);
+  for (int k = 0; k < total; ++k) {
+    od::Rng r(7, 0, k);
+    ac[k] = sys.inputAngles();
+    smp.sample(r, ac[k]);
+    ag[k] = ac[k];
+    okC[k] = closer.close(r, ac[k], resample);
+  }
+  od::runBatched(total, gpu.slots(), [&](int k, int slot) {
+    od::Rng r(7, 0, k);
+    std::vector<double> a = sys.inputAngles();
+    smp.sample(r, a);
+    okG[k] = closer.close(r, a, resample, {&gpu, slot});
+    ag[k] = a;
+  }, [&](std::span<const int> sl) { gpu.flush(sl); });
+  int closedC = 0, closedG = 0;
+  double devC = 0, devG = 0;
+  for (int k = 0; k < total; ++k) {
+    const auto x0 = sys.coordinates(std::span<const double>(ag[k]));
+    if (okG[k]) {
+      ++closedG;
+      for (int li : {0, 1}) CHECK(linkDeviation(tree, tree.links[li], x0) <= cp.rcdTolerance * std::sqrt(3.0) + 1e-9);
+      devG += linkDeviation(tree, tree.links[2], x0);
+    }
+    if (okC[k]) {
+      ++closedC;
+      devC += linkDeviation(tree, tree.links[2], sys.coordinates(std::span<const double>(ac[k])));
+    }
+  }
+  MESSAGE(std::format("closed CPU {} GPU {} of {}; mean best-effort deviation of A:20-B:19 CPU {:.4f} GPU {:.4f} Å; "
+                      "GPU {} attempts, {} updates in {} launches",
+                      closedC, closedG, total, devC / std::max(1, closedC), devG / std::max(1, closedG), gpu.attempts(),
+                      gpu.updates(), gpu.kernels()));
+  CHECK(std::abs(closedC - closedG) <= total / 10);
+  CHECK(devG / std::max(1, closedG) <= devC / std::max(1, closedC) * 1.1 + 0.01);
+}
+#endif
 
 TEST_CASE("closure: coupling is transitive (2KJJ A:3-6 + A:8-15)") {
   // Loops A:3-6 (break A:6:C-A:7:N) and A:8-15 (break A:15:C-A:16:N) share no torsion, but each shares

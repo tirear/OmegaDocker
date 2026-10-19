@@ -24,6 +24,9 @@ class Rng {
   double uniform(double lo, double hi) { return lo + (hi - lo) * uniform(); }
   // [0, n)
   std::uint64_t below(std::uint64_t n) { return static_cast<std::uint64_t>(uniform() * static_cast<double>(n)); }
+  // Internal state, e.g. to continue the stream on a GPU (spec 15.1.18).
+  std::uint64_t state() const { return s_; }
+  void setState(std::uint64_t s) { s_ = s; }
 
  private:
   static std::uint64_t mix(std::uint64_t z) {  // SplitMix64 finalizer

@@ -386,7 +386,47 @@ void LoopCloser::resampleLink(Rng& rng, const Link& l, std::span<double> a, cons
     if (!contains(covered, g)) a[g] = rng.uniform(-180.0, 180.0);
 }
 
-bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const SegmentSampler& resample) const {
+bool LoopCloser::rcdEligible(const Link& l) const {
+  const bool clashTerm = p_.rcdClash != RcdClash::None && p_.clashDistance > 0 && p_.rcdClashWeight > 0 && !l.partial &&
+                         !l.clashPairs.empty();
+  return !l.dof.empty() && !l.pairEnd.empty() && l.restraints.empty() && !clashTerm;
+}
+
+RcdFlat LoopCloser::flat() const {
+  RcdFlat f;
+  for (const Link& l : links_) {
+    f.eligible.push_back(rcdEligible(l) ? 1 : 0);
+    f.pointNum.push_back(static_cast<int>(l.points.size()));
+    f.dofOff.push_back(static_cast<int>(f.movesOff.size()));
+    f.dofNum.push_back(static_cast<int>(l.dof.size()));
+    f.pairOff.push_back(static_cast<int>(f.pairPoint.size() / 2));
+    f.pairNum.push_back(static_cast<int>(l.pairPoint.size() / 2));
+    f.copyOff.push_back(static_cast<int>(f.pairEnd.size()));
+    f.copyNum.push_back(static_cast<int>(l.pairEnd.size()));
+    f.members.push_back(static_cast<int>(l.members.size()));
+    f.pairPoint.insert(f.pairPoint.end(), l.pairPoint.begin(), l.pairPoint.end());
+    f.pairEnd.insert(f.pairEnd.end(), l.pairEnd.begin(), l.pairEnd.end());
+    std::vector<char> mv(l.points.size(), 0);
+    for (std::size_t d = 0; d < l.dof.size(); ++d) {
+      f.movesOff.push_back(static_cast<int>(f.moves.size()));
+      f.moves.insert(f.moves.end(), l.moves[d].begin(), l.moves[d].end());
+      f.axisFixed.push_back(l.axisFixed[d]);
+      f.axisMoving.push_back(l.axisMoving[d]);
+      f.activeOff.push_back(static_cast<int>(f.active.size()));
+      for (int i : l.moves[d]) mv[i] = 1;
+      for (std::size_t q = 0; q < l.pairPoint.size(); q += 2) {
+        const int i1 = l.pairPoint[q], i2 = l.pairPoint[q + 1];
+        if (mv[i1] != mv[i2]) f.active.push_back(static_cast<int>(q) + (mv[i1] ? 0 : 1));
+      }
+      for (int i : l.moves[d]) mv[i] = 0;
+    }
+  }
+  f.movesOff.push_back(static_cast<int>(f.moves.size()));
+  f.activeOff.push_back(static_cast<int>(f.active.size()));
+  return f;
+}
+
+bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const SegmentSampler& resample, RcdSlot rs) const {
   // Best effort: one attempt; the deviation never grows, the result is kept.
   const int restarts = l.partial ? 0 : p_.rcdMaxRestart;
   // A group of coupled links converges more slowly: rcdMaxIter per link.
@@ -442,171 +482,187 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
     }
     const auto x = partCoords(l.part, a);
     for (std::size_t i = 0; i < l.points.size(); ++i) P[i] = x[l.points[i]];
-    bool useClash = clashTerm && p_.rcdClash == RcdClash::Full;
-    if (clashTerm) {
-      X = sys_.coordinates(std::span<const double>(a.data(), a.size()));
-      buildNl();
-    }
-    // Converged: closed, and with the clash term also clash free.
-    auto converged = [&]() {
-      if (dev() > tol) return false;
-      if (!clashTerm) return true;
-      if (!clashes()) return true;
-      if (!useClash) {
-        useClash = true;
+    bool conv = false;
+    if (rs.runner && rcdEligible(l)) {
+      RcdJob job;
+      job.link = static_cast<int>(&l - links_.data());
+      job.points.resize(3 * l.points.size());
+      for (std::size_t i = 0; i < l.points.size(); ++i)
+        for (int c = 0; c < 3; ++c) job.points[3 * i + c] = P[i][c];
+      for (int g : l.dof) job.anglesDeg.push_back(a[g]);
+      job.rng = rng.state();
+      job.maxIter = maxIter;
+      rs.runner->run(rs.slot, job);
+      for (int d = 0; d < nd; ++d) a[l.dof[d]] = job.anglesDeg[d];
+      rng.setState(job.rng);
+      conv = job.converged;
+    } else {
+      bool useClash = clashTerm && p_.rcdClash == RcdClash::Full;
+      if (clashTerm) {
+        X = sys_.coordinates(std::span<const double>(a.data(), a.size()));
         buildNl();
       }
-      return false;
-    };
-    bool conv = converged();
-    int prev = -1;
-    // Stall: every torsion updated by at most rcdStallTolerance since the last larger update.
-    std::fill(tried.begin(), tried.end(), 0);
-    int triedNum = 0;
-    for (int it = 0; it < maxIter && !conv; ++it) {
-      int d = static_cast<int>(rng.below(nd));
-      if (nd > 1 && d == prev) d = (d + 1 + static_cast<int>(rng.below(nd - 1))) % nd;
-      prev = d;
-      for (int i : l.moves[d]) mv[i] = 1;
-      const Vec3 o = P[l.axisFixed[d]];
-      const Vec3 k = unit(P[l.axisMoving[d]] - o);
-      // Copy pairs: sum |m - s|^2 = const - 2 (den cos d + num sin d). Metal distance:
-      // |m - s|^2 = A - 2 B cos(d - d0).
-      double num = 0, den = 0;
-      bool copyTerm = false;
-      struct RTerm {
-        double A, B, d0, r0;
+      // Converged: closed, and with the clash term also clash free.
+      auto converged = [&]() {
+        if (dev() > tol) return false;
+        if (!clashTerm) return true;
+        if (!clashes()) return true;
+        if (!useClash) {
+          useClash = true;
+          buildNl();
+        }
+        return false;
       };
-      std::vector<RTerm> rt;
-      for (std::size_t q = 0; q < l.pairPoint.size(); q += 2) {
-        const int i1 = l.pairPoint[q], i2 = l.pairPoint[q + 1];
-        if (mv[i1] == mv[i2]) continue;
-        const int m = mv[i1] ? i1 : i2, s = mv[i1] ? i2 : i1;
-        const Vec3 rp = perp(P[m] - o, k), tp = perp(P[s] - o, k);
-        num += dot(k, cross(rp, tp));
-        den += dot(rp, tp);
-        copyTerm = true;
-      }
-      for (std::size_t q = 0; q < l.restraints.size(); ++q) {
-        const int im = l.restraintPoint[2 * q], is = l.restraintPoint[2 * q + 1];
-        if (mv[im] == mv[is]) continue;
-        const int m = mv[im] ? im : is, s = mv[im] ? is : im;
-        const Vec3 r = P[m] - o, tv = P[s] - o;
-        const Vec3 rp = perp(r, k), tp = perp(tv, k);
-        const double dn = dot(rp, tp), nm = dot(k, cross(rp, tp));
-        const double B = std::hypot(dn, nm);
-        if (B <= 1e-12) continue;
-        rt.push_back({dot(rp, rp) + dot(tp, tp) + std::pow(dot(r, k) - dot(tv, k), 2), B, std::atan2(nm, dn),
-                      l.restraints[q].r0});
-      }
-      // Clash candidates: pairs with one atom moved whose circle comes closer than c to the other atom.
-      struct CTerm {
-        Vec3 m, s;
-      };
-      std::vector<CTerm> ct;
-      if (useClash) {
-        if (++nlAge >= 20) buildNl();
-        const auto& ms = l.movesSys[d];
-        for (const auto& [i, j] : nl) {
-          const bool mi = std::binary_search(ms.begin(), ms.end(), i), mj = std::binary_search(ms.begin(), ms.end(), j);
-          if (mi == mj) continue;
-          const Vec3& m = X[mi ? i : j];
-          const Vec3& s = X[mi ? j : i];
-          const Vec3 rm = m - o, rs = s - o;
-          const double h = dot(rs - rm, k), rho = norm(perp(rm, k)), rad = norm(perp(rs, k));
-          if (h * h + (rad - rho) * (rad - rho) < cd * cd) ct.push_back({m, s});
-        }
-      }
-      double delta = 0;
-      if (!ct.empty()) {
-        // Closure terms plus w (c - d)^2: 1-degree scan, golden-section refinement; kept only when lower than at 0.
-        auto f = [&](double x) {
-          double v = -2 * (den * std::cos(x) + num * std::sin(x));
-          for (const RTerm& r : rt) {
-            const double e = std::sqrt(std::max(0.0, r.A - 2 * r.B * std::cos(x - r.d0))) - r.r0;
-            v += e * e;
-          }
-          const double c = std::cos(x), sn = std::sin(x);
-          for (const CTerm& q : ct) {
-            const double dd = norm(rotateAbout(q.m, o, k, c, sn) - q.s);
-            if (dd < cd) v += w * (cd - dd) * (cd - dd);
-          }
-          return v;
-        };
-        const double f0 = f(0), st = std::numbers::pi / 180;
-        double best = 0, fb = f0;
-        for (int s = -179; s <= 180; ++s)
-          if (const double v = f(s * st); v < fb) {
-            fb = v;
-            best = s * st;
-          }
-        double lo = best - st, hi = best + st;
-        constexpr double g = 0.6180339887498949;
-        for (int i2 = 0; i2 < 40; ++i2) {
-          const double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
-          if (f(x1) < f(x2)) hi = x2;
-          else lo = x1;
-        }
-        if (const double xx = 0.5 * (lo + hi); f(xx) < fb) best = xx;
-        delta = f(best) < f0 ? best : 0;
-      } else if (rt.empty()) {
-        if (copyTerm && (num != 0 || den != 0)) delta = std::atan2(num, den);
-      } else if (!copyTerm && rt.size() == 1) {
-        const RTerm& r = rt[0];
-        const double c = (r.A - r.r0 * r.r0) / (2 * r.B);
-        if (c >= 1) delta = r.d0;
-        else if (c <= -1) delta = r.d0 + std::numbers::pi;
-        else {
-          const double w = std::acos(c);
-          const double x1 = std::remainder(r.d0 + w, 2 * std::numbers::pi), x2 = std::remainder(r.d0 - w, 2 * std::numbers::pi);
-          delta = std::abs(x1) <= std::abs(x2) ? x1 : x2;
-        }
-      } else {
-        // Several terms: 1-degree scan, then golden-section refinement; kept only when lower than at 0.
-        auto f = [&](double x) {
-          double v = -2 * (den * std::cos(x) + num * std::sin(x));
-          for (const RTerm& r : rt) {
-            const double e = std::sqrt(std::max(0.0, r.A - 2 * r.B * std::cos(x - r.d0))) - r.r0;
-            v += e * e;
-          }
-          return v;
-        };
-        const double f0 = f(0), st = std::numbers::pi / 180;
-        double best = 0, fb = f0;
-        for (int s = -179; s <= 180; ++s)
-          if (const double v = f(s * st); v < fb) {
-            fb = v;
-            best = s * st;
-          }
-        double lo = best - st, hi = best + st;
-        constexpr double g = 0.6180339887498949;
-        for (int it = 0; it < 40; ++it) {
-          const double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
-          if (f(x1) < f(x2)) hi = x2;
-          else lo = x1;
-        }
-        if (const double x = 0.5 * (lo + hi); f(x) < fb) best = x;
-        delta = f(best) < f0 ? best : 0;
-      }
-      if (delta != 0) {
-        const double c = std::cos(delta), s = std::sin(delta);
-        for (int i : l.moves[d]) P[i] = rotateAbout(P[i], o, k, c, s);
-        if (clashTerm)
-          for (int i : l.movesSys[d]) X[i] = rotateAbout(X[i], o, k, c, s);
-        a[l.dof[d]] += delta * kDeg;
-      }
-      for (int i : l.moves[d]) mv[i] = 0;
       conv = converged();
-      if (stallTol > 0) {
-        if (std::abs(delta) > stallTol) {
-          std::fill(tried.begin(), tried.end(), 0);
-          triedNum = 0;
+      int prev = -1;
+      // Stall: every torsion updated by at most rcdStallTolerance since the last larger update.
+      std::fill(tried.begin(), tried.end(), 0);
+      int triedNum = 0;
+      for (int it = 0; it < maxIter && !conv; ++it) {
+        int d = static_cast<int>(rng.below(nd));
+        if (nd > 1 && d == prev) d = (d + 1 + static_cast<int>(rng.below(nd - 1))) % nd;
+        prev = d;
+        for (int i : l.moves[d]) mv[i] = 1;
+        const Vec3 o = P[l.axisFixed[d]];
+        const Vec3 k = unit(P[l.axisMoving[d]] - o);
+        // Copy pairs: sum |m - s|^2 = const - 2 (den cos d + num sin d). Metal distance:
+        // |m - s|^2 = A - 2 B cos(d - d0).
+        double num = 0, den = 0;
+        bool copyTerm = false;
+        struct RTerm {
+          double A, B, d0, r0;
+        };
+        std::vector<RTerm> rt;
+        for (std::size_t q = 0; q < l.pairPoint.size(); q += 2) {
+          const int i1 = l.pairPoint[q], i2 = l.pairPoint[q + 1];
+          if (mv[i1] == mv[i2]) continue;
+          const int m = mv[i1] ? i1 : i2, s = mv[i1] ? i2 : i1;
+          const Vec3 rp = perp(P[m] - o, k), tp = perp(P[s] - o, k);
+          num += dot(k, cross(rp, tp));
+          den += dot(rp, tp);
+          copyTerm = true;
         }
-        if (!tried[d]) {
-          tried[d] = 1;
-          ++triedNum;
+        for (std::size_t q = 0; q < l.restraints.size(); ++q) {
+          const int im = l.restraintPoint[2 * q], is = l.restraintPoint[2 * q + 1];
+          if (mv[im] == mv[is]) continue;
+          const int m = mv[im] ? im : is, s = mv[im] ? is : im;
+          const Vec3 r = P[m] - o, tv = P[s] - o;
+          const Vec3 rp = perp(r, k), tp = perp(tv, k);
+          const double dn = dot(rp, tp), nm = dot(k, cross(rp, tp));
+          const double B = std::hypot(dn, nm);
+          if (B <= 1e-12) continue;
+          rt.push_back({dot(rp, rp) + dot(tp, tp) + std::pow(dot(r, k) - dot(tv, k), 2), B, std::atan2(nm, dn),
+                        l.restraints[q].r0});
         }
-        if (triedNum == nd) break;
+        // Clash candidates: pairs with one atom moved whose circle comes closer than c to the other atom.
+        struct CTerm {
+          Vec3 m, s;
+        };
+        std::vector<CTerm> ct;
+        if (useClash) {
+          if (++nlAge >= 20) buildNl();
+          const auto& ms = l.movesSys[d];
+          for (const auto& [i, j] : nl) {
+            const bool mi = std::binary_search(ms.begin(), ms.end(), i), mj = std::binary_search(ms.begin(), ms.end(), j);
+            if (mi == mj) continue;
+            const Vec3& m = X[mi ? i : j];
+            const Vec3& s = X[mi ? j : i];
+            const Vec3 rm = m - o, rs = s - o;
+            const double h = dot(rs - rm, k), rho = norm(perp(rm, k)), rad = norm(perp(rs, k));
+            if (h * h + (rad - rho) * (rad - rho) < cd * cd) ct.push_back({m, s});
+          }
+        }
+        double delta = 0;
+        if (!ct.empty()) {
+          // Closure terms plus w (c - d)^2: 1-degree scan, golden-section refinement; kept only when lower than at 0.
+          auto f = [&](double x) {
+            double v = -2 * (den * std::cos(x) + num * std::sin(x));
+            for (const RTerm& r : rt) {
+              const double e = std::sqrt(std::max(0.0, r.A - 2 * r.B * std::cos(x - r.d0))) - r.r0;
+              v += e * e;
+            }
+            const double c = std::cos(x), sn = std::sin(x);
+            for (const CTerm& q : ct) {
+              const double dd = norm(rotateAbout(q.m, o, k, c, sn) - q.s);
+              if (dd < cd) v += w * (cd - dd) * (cd - dd);
+            }
+            return v;
+          };
+          const double f0 = f(0), st = std::numbers::pi / 180;
+          double best = 0, fb = f0;
+          for (int s = -179; s <= 180; ++s)
+            if (const double v = f(s * st); v < fb) {
+              fb = v;
+              best = s * st;
+            }
+          double lo = best - st, hi = best + st;
+          constexpr double g = 0.6180339887498949;
+          for (int i2 = 0; i2 < 40; ++i2) {
+            const double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
+            if (f(x1) < f(x2)) hi = x2;
+            else lo = x1;
+          }
+          if (const double xx = 0.5 * (lo + hi); f(xx) < fb) best = xx;
+          delta = f(best) < f0 ? best : 0;
+        } else if (rt.empty()) {
+          if (copyTerm && (num != 0 || den != 0)) delta = std::atan2(num, den);
+        } else if (!copyTerm && rt.size() == 1) {
+          const RTerm& r = rt[0];
+          const double c = (r.A - r.r0 * r.r0) / (2 * r.B);
+          if (c >= 1) delta = r.d0;
+          else if (c <= -1) delta = r.d0 + std::numbers::pi;
+          else {
+            const double w = std::acos(c);
+            const double x1 = std::remainder(r.d0 + w, 2 * std::numbers::pi), x2 = std::remainder(r.d0 - w, 2 * std::numbers::pi);
+            delta = std::abs(x1) <= std::abs(x2) ? x1 : x2;
+          }
+        } else {
+          // Several terms: 1-degree scan, then golden-section refinement; kept only when lower than at 0.
+          auto f = [&](double x) {
+            double v = -2 * (den * std::cos(x) + num * std::sin(x));
+            for (const RTerm& r : rt) {
+              const double e = std::sqrt(std::max(0.0, r.A - 2 * r.B * std::cos(x - r.d0))) - r.r0;
+              v += e * e;
+            }
+            return v;
+          };
+          const double f0 = f(0), st = std::numbers::pi / 180;
+          double best = 0, fb = f0;
+          for (int s = -179; s <= 180; ++s)
+            if (const double v = f(s * st); v < fb) {
+              fb = v;
+              best = s * st;
+            }
+          double lo = best - st, hi = best + st;
+          constexpr double g = 0.6180339887498949;
+          for (int it = 0; it < 40; ++it) {
+            const double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
+            if (f(x1) < f(x2)) hi = x2;
+            else lo = x1;
+          }
+          if (const double x = 0.5 * (lo + hi); f(x) < fb) best = x;
+          delta = f(best) < f0 ? best : 0;
+        }
+        if (delta != 0) {
+          const double c = std::cos(delta), s = std::sin(delta);
+          for (int i : l.moves[d]) P[i] = rotateAbout(P[i], o, k, c, s);
+          if (clashTerm)
+            for (int i : l.movesSys[d]) X[i] = rotateAbout(X[i], o, k, c, s);
+          a[l.dof[d]] += delta * kDeg;
+        }
+        for (int i : l.moves[d]) mv[i] = 0;
+        conv = converged();
+        if (stallTol > 0) {
+          if (std::abs(delta) > stallTol) {
+            std::fill(tried.begin(), tried.end(), 0);
+            triedNum = 0;
+          }
+          if (!tried[d]) {
+            tried[d] = 1;
+            ++triedNum;
+          }
+          if (triedNum == nd) break;
+        }
       }
     }
     for (int g : l.dof) a[g] = wrapDeg(a[g]);
@@ -790,11 +846,11 @@ bool LoopCloser::kic(Rng& rng, const Link& l, std::span<double> a, const Segment
   return false;
 }
 
-bool LoopCloser::close(Rng& rng, std::span<double> a, const SegmentSampler& resample) const {
+bool LoopCloser::close(Rng& rng, std::span<double> a, const SegmentSampler& resample, RcdSlot rs) const {
   for (const Link& l : links_) {
     if (l.dof.empty()) continue;
     if (deviation(l, partCoords(l.part, a)) <= p_.rcdTolerance) continue;
-    const bool ok = p_.method == ClosureMethod::Kic && l.kic && !l.partial ? kic(rng, l, a, resample) : rcd(rng, l, a, resample);
+    const bool ok = p_.method == ClosureMethod::Kic && l.kic && !l.partial ? kic(rng, l, a, resample) : rcd(rng, l, a, resample, rs);
     if (!ok) return false;
   }
   return true;

@@ -5,8 +5,10 @@
 #include "conf9a.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
+#include "fiber_batch.hpp"
 #include "log.hpp"
 
 namespace od {
@@ -69,15 +71,24 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
       std::vector<EnergyTerms> terms(n);
       std::vector<int> steps(n);
       std::vector<GenResult> built(n);
-#pragma omp parallel for schedule(dynamic, 1)
-      for (long long i = 0; i < n; ++i) {
+      const auto t0 = std::chrono::steady_clock::now();
+      const auto one = [&](long long i, int slot) {
         Rng rng(p.seed, p.stream, counter + done + i);
         std::span<double> a(angles.data() + i * d, d);
-        built[i] = gen(rng, GenIndex{counter + done + i, done + i}, a);
+        built[i] = gen(rng, GenIndex{counter + done + i, done + i, slot}, a);
         if (built[i] == GenResult::Built && preClose > 0 && sys.closureDeviation(a) > preClose)
           built[i] = GenResult::PreNotClosed;
         if (built[i] == GenResult::Built && !p.evaluator) terms[i] = minimizeConf(sys, a, p.min, &steps[i]);
+      };
+      if (p.genBatch && n >= p.genBatchMin) {
+        runBatched(static_cast<int>(n), std::max(1, std::min(p.genBatch->slots(), static_cast<int>(n))),
+                   [&](int i, int slot) { one(i, slot); }, [&](std::span<const int> s) { p.genBatch->flush(s); });
+      } else {
+#pragma omp parallel for schedule(dynamic, 1)
+        for (long long i = 0; i < n; ++i) one(i, -1);
       }
+      const auto t1 = std::chrono::steady_clock::now();
+      st.genSec += std::chrono::duration<double>(t1 - t0).count();
       if (p.evaluator) {
         std::vector<long long> idx;
         for (long long i = 0; i < n; ++i)
@@ -93,6 +104,7 @@ Fill9aStats fillL2Pool(const EnergySystem& sys, const ConfGenerator& gen, long l
           terms[idx[k]] = t[k];
           steps[idx[k]] = s[k];
         }
+        st.minSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
       }
       for (long long i = 0; i < n; ++i) {
         const EnergyTerms& e = terms[i];

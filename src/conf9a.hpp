@@ -22,10 +22,12 @@ struct ConfSample {
 };
 
 // Index of a generated sample: global numbers the random streams (counter of
-// fillL2Pool); local counts from 0 within the current L1 batch (all of its parts).
+// fillL2Pool); local counts from 0 within the current L1 batch (all of its parts);
+// slot: the coroutine running the generator with a GenBatch, otherwise -1.
 struct GenIndex {
   std::uint64_t global = 0;
   long long local = 0;
+  int slot = -1;
 };
 
 // Outcome of generating one sample; only Built samples are minimized.
@@ -53,6 +55,16 @@ class ConfEvaluator {
   virtual void complete(int /*lane*/, EnergyTerms* /*terms*/, double* /*gradRad*/) {}
 };
 
+// Batched work of the generator, e.g. RCD on a GPU (spec 15.1.18): with a GenBatch, fillL2Pool
+// runs the generator of each sample as a coroutine (runBatched) of up to slots() at a time; the
+// generator stores a request of its slot and calls batchWait(); flush handles the waiting slots.
+class GenBatch {
+ public:
+  virtual ~GenBatch() = default;
+  virtual int slots() const = 0;
+  virtual void flush(std::span<const int> slots) = 0;
+};
+
 struct Fill9aParams {
   int minL2 = 0;                       // minL2confSampleNum
   long long maxL1Batch = 65536;        // --stamMaxL1BatchNum / --mobmMaxL1BatchNum
@@ -67,6 +79,8 @@ struct Fill9aParams {
   std::uint64_t stream = 0;            // one per StaM group / MobM
   long long fixedL1 = 0;               // > 0: every L1 batch has this size (csgm3) instead of spec 7.4
   ConfEvaluator* evaluator = nullptr;  // minimization energies; null: EnergySystem::evaluate on the CPU
+  GenBatch* genBatch = nullptr;        // null: the generators run on OpenMP threads
+  long long genBatchMin = 0;           // genBatch only for L1 batches of at least this many samples
 };
 
 struct Fill9aStats {
@@ -81,6 +95,8 @@ struct Fill9aStats {
   int batches = 0;
   long long minSteps = 0;   // minimization steps over all samples
   long long nextL1 = 0;     // L1 count of a following refill (spec 7.4)
+  double genSec = 0;        // wall time generating (csgm, building, closure, pre-closure check)
+  double minSec = 0;        // wall time minimizing (CPU: included in genSec)
 };
 
 // Generates batches of L1 samples, minimizes them and adds those passing the

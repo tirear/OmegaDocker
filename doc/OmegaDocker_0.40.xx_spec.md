@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.77 |
+| 文件版本 | 1.78 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -757,6 +757,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 每次最多 `rcdMaxIter` ×（組內斷鍵數）次更新（`rcdMaxIter` 預設 20000；1.43 版以前為 1000，見 7.11.1 嘗試 4）；未收斂或碰撞檢查失敗時重新開始，最多 `rcdMaxRestart`（預設 10）次。
     - 依據：耦合的組收斂較慢。2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11（20 個兩面角）40 個樣本、不做碰撞檢查：1000 次 18/40，2000 次 36/40，4000 次 40/40。
   - 停滯（1.76，`rcdStallTolerance`，預設 1×10⁻⁴ rad）：自上一次轉動量 > `rcdStallTolerance` 的更新之後，組內每個兩面角都已更新過且轉動量都 ≤ `rcdStallTolerance` 時，結束這次嘗試（未收斂：與達到上限相同，重新開始；best effort：保留目前的結果）。0：不判斷停滯，做到 `rcdMaxIter`（1.75 以前的行為）。更新次數不同會改變之後使用的亂數，因此結果與 1.75 不逐位元相同。量測見 7.11.1 嘗試 5。
+  - GPU（1.78，`gpu.conf9aRcd`）：無 `rcdClash` 碰撞項、無金屬配位距離的組，RCD 的嘗試可在 GPU 上執行（點座標用 float，以 0.99 × `rcdTolerance` 判斷收斂，結束後同樣在 CPU 檢查）；見 15.1.18。
 - KIC：
   - 只用於只有一個 copy 斷鍵的組。把斷鍵的 A、B 以複製原子的剛體關係（{A′, B, Y} → {A, B′, Y′}）接回，路徑成為一個環；在環上選 3 個樞紐原子（兩側的鍵都是可調整的兩面角，A、B 不可當樞紐），樞紐之間的部分為剛體（其他兩面角保留樣本的值），解 6 個樞紐兩面角使環閉合。
   - 樞紐的選法：沿路徑由 A 到 B 排序，依序隨機選 i1 < i2 < i3，相鄰樞紐至少相隔 2 個鍵（每次都選得到後續樞紐）。
@@ -1609,6 +1610,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.device` | `--gpu_device` | 0 | 15.1.3 |
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
+| `gpu.conf9aRcd` | `--gpu_conf9aRcd` | `true` | 15.1.18（9a 的 RCD 閉合在 GPU 上；不含 `rcdClash` 與金屬配位距離） |
+| `gpu.conf9aRcdMinBatch` | `--gpu_conf9aRcdMinBatch` | 1024 | 15.1.18（≥ 1；L1 批次至少這麼多樣本才用 GPU） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
 | `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：視窗的 L2poss 達 48 × GPU 同時計算的姿勢數為止；整數 n：最多 n 個；都受記憶體限制） |
 | `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
@@ -2116,8 +2119,44 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 重算 50 個樣本 | 8.1 s | 0.25 s |
 
   - 單執行緒（B，`OMP_NUM_THREADS=1`）：G_unbound 21.1 s → 0.08 s，重算 12.1 s → 0.05 s。
-- **9a 的時間組成**（1.75 量測，A，SLURM `-c 1`，GPU 最小化）：9a 47.8 s 中，產生樣本（csgm1、RCD 閉合，CPU）44.4 s，GPU 最小化 2.9 s。9a 的時間隨 CPU 核心數下降（`-c 1`／`2`／`4`：47.8／33.5／18.6 s；16 執行緒 7.4 s），GPU 精度（`gpu.conf9aPrecision`）沒有影響（float 48.2 s）。有閉合的分子，9a 的瓶頸是 CPU 上的閉合，不是 GPU。1.76 的 `rcdStallTolerance` 使 A 的 9a 在 1 核心降為 3.4 s（7.11.1 嘗試 5）。
+- **9a 的時間組成**（1.75 量測，A，SLURM `-c 1`，GPU 最小化）：9a 47.8 s 中，產生樣本（csgm1、RCD 閉合，CPU）44.4 s，GPU 最小化 2.9 s。9a 的時間隨 CPU 核心數下降（`-c 1`／`2`／`4`：47.8／33.5／18.6 s；16 執行緒 7.4 s），GPU 精度（`gpu.conf9aPrecision`）沒有影響（float 48.2 s）。有閉合的分子，9a 的瓶頸是 CPU 上的閉合，不是 GPU。1.76 的 `rcdStallTolerance` 使 A 的 9a 在 1 核心降為 3.4 s（7.11.1 嘗試 5）；1.78 的 GPU RCD 使 C 的 9a 在 1 核心由 156 s 降為 6.8 s（15.1.18）。
 - 測試：`score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)` 加入 GPU 與 CPU 的比較（`shakeLnF`、`complexSumLnF`）。
+
+### 15.1.18 CUDA 版：9a 的 RCD 閉合（1.78）
+
+- 起因：9a 的時間除了最小化（GPU）都在產生樣本（csgm1、建構、閉合，CPU）。1.76 起 best effort 的閉合（A）已不是瓶頸（`rcdStallTolerance`），但耦合組（C：2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11）的 RCD 收斂需要數千至數萬次更新，C 的 9a 在 1 核心 156 s、16 執行緒 16.6 s，幾乎都是 RCD。
+- 範圍：只把 RCD 的一次嘗試（一連串更新，直到收斂、停滯或達到上限）放到 GPU；抽樣、重新抽樣、座標建構、收斂與碰撞的檢查、`grow`／`growClose` 的建構仍在 CPU。適用的組：無 `rcdClash` 碰撞項、無金屬配位距離、組內閉合原子對 ≤ 32；其餘（與 KIC）在 CPU。
+- 流程：
+  - `fillL2Pool` 有 `GenBatch`（`GpuRcd`）且 L1 批次 ≥ `gpu.conf9aRcdMinBatch` 時，每個樣本的產生改在協程上執行（`runBatched`，最多 `gpu.conf9aBatchNum` 個同時進行）；`LoopCloser::rcd` 每次嘗試把起點（路徑上追蹤的點、可調整的兩面角、亂數狀態）交給 `GpuRcd::run` 後等待；所有協程都在等待時，一次 kernel 處理全部等待中的嘗試。
+  - 每次 kernel 每個嘗試最多做 1024 次更新（`kChunk`）；未結束的嘗試狀態（點座標、兩面角、停滯紀錄、亂數狀態、更新數）留在 GPU，下一次 kernel 繼續。長的嘗試不會讓整批等它（一次做完時每次 kernel 都要等最長的 40000 次）。
+  - kernel：每個嘗試一個 G 條執行緒的 tile（G = 8／16／32，≥ 組內閉合原子對數；C 為 6 對，G = 8，一個 warp 4 個嘗試）。每條執行緒負責一對閉合原子；所有執行緒抽相同的亂數；分子與分母、各 copy 的偏差平方和以 tile 內的 shuffle 加總；被轉動的點由各執行緒分擔。點座標、兩面角與停滯紀錄在 shared memory，連結的固定資料（各兩面角移動的點、軸、作用中的原子對位元遮罩）經唯讀快取讀取。同一連結的嘗試排在一起。
+  - 精度：點座標用 float（兩面角的累加用 double）。float 的點座標會與由兩面角重建的座標有微小偏差（約 10⁻⁵ Å），因此 GPU 以 0.99 × `rcdTolerance` 判斷收斂（不加時約 5% 的收斂嘗試在 CPU 的檢查以 0.250003–0.25001 Å 被退回）；結束後 CPU 照原本的規則以 double 檢查偏差與碰撞。
+  - 執行紀錄：使用 GPU 最小化時，9a 行的時間後加上 `(generate <s>, GPU RCD <嘗試數> attempts in <kernel 數> kernels <s>, GPU minimize <s>)`（產生樣本與最小化的牆鐘時間；無 GPU RCD 時省略中間一項）。
+  - 結果不等於 CPU 的逐位元結果（float 與 GPU 的三角函數），但與 `gpu.conf9aBatchNum`、執行緒數、每次 kernel 的更新數無關（1024／4096／16384 的結果相同），重複執行相同。
+- 小批次：GPU 一次更新的延遲（約 1 µs）比 CPU（約 0.2 µs）長，樣本少時 CPU 較快。C 第一批 L1 的時間（s）：
+
+| L1 | CPU 1 執行緒 | GPU（1 執行緒） | CPU 16 執行緒 | GPU（16 執行緒） |
+|---|---|---|---|---|
+| 16 | 0.14 | 0.42 | 0.03 | 0.44 |
+| 64 | 0.60 | 0.52 | 0.07 | 0.57 |
+| 256 | 2.45 | 0.74 | 0.26 | 0.75 |
+| 1024 | 9.65 | 0.97 | 1.02 | 0.85 |
+| 4096 | 39.3 | 2.11 | 4.12 | 1.24 |
+
+  - 因此預設 `gpu.conf9aRcdMinBatch = 1024`：L1 批次 < 1024 在 CPU（OpenMP）。門檻只依批次大小而不依執行緒數，結果才與執行緒數無關。
+- 量測（TITAN V；9a StaM 時間，s；C 為 `growClose`、`rcdMaxIter` 20000 × 2、`maxRound` 1）：
+
+| 資料 | CPU 1 執行緒 | GPU RCD（1 執行緒） | CPU 16 執行緒 | GPU RCD（16 執行緒） |
+|---|---|---|---|---|
+| C（預設，L1 16 + 16384） | 156.3 | 6.8（kernel 2.1） | 16.7 | 3.0（kernel 2.1） |
+| C `whole`（L1 16384） | 164.7（整個執行） | 7.0 | 17.7 | 3.7 |
+| A（best effort 雙硫鍵） | 3.96（產生 0.99） | 3.96（產生 0.97） | 3.08（產生 0.11） | 3.20（產生 0.21） |
+
+  - C：1 核心快 23 倍，16 執行緒快 5.6 倍；GPU 後 9a 的剩餘時間主要是 CPU 上的建構與檢查（16 執行緒約 0.8 s）。A 的閉合都是很快停滯的 best effort，GPU 沒有好處（每批 < 0.01 s 的 kernel，協程的額外時間約 0.1 s）。
+  - kernel（Nsight Compute，C 的一次 8192 個嘗試、每個 ≤ 1024 次更新）：8.4 ms，每次更新約 160 個 warp 指令，issue IPC 2.6，每條執行緒 72 個暫存器（佔用率 37.5%）。約每秒 10⁹ 次更新；CPU 每執行緒約 5.5 × 10⁶ 次。
+  - 開發過程：每個嘗試一個 warp、double、一次做完時比 16 執行緒的 CPU 慢（19.3 s，每次 kernel 等最長的嘗試）；改 float 與分段後 7.3 s；再改為每對原子一條執行緒的 tile（多個嘗試共用一個 warp）、不加 `-fmad=false` 後 2.1 s。
+- 統計上與 CPU 相同：C 以 11 個 seed（L1 16384）比較，L2 平均 GPU 433.7、CPU 435.5，閉合失敗平均 13,003／12,994；每個 seed 的差異（±40）在隨機變動內。
+- 測試：`closure: RCD on the GPU (2KJJ A:8-15 with the disulfide A:6-A:11)`（200 個樣本，CPU 與 GPU 都 200/200 閉合，閉合後兩個連結的偏差都在容許內；best effort 雙硫鍵 A:20–B:19 的平均偏差 CPU 0.793、GPU 0.770 Å）；`9a: L2 pool refill with a ConfEvaluator equals the CPU path (1L2Y)` 加入 `GenBatch` 的協程路徑與 `genBatchMin`（結果與 OpenMP 路徑相同）；`cli: 9a RCD on the GPU`。
 
 ### 15.2 依賴套件
 
@@ -2250,7 +2289,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
-  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
+  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpu.*`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -2439,3 +2478,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.75 | 2026-10-21 | 9d 原子搖動在 GPU 上計算（`GpuShaker`）：A 的 G_unbound 2.54 → 0.08 s、重算 8.1 → 0.25 s；9a 時間組成的量測（產生樣本與 RCD 閉合為 CPU 瓶頸）（15.1.17） |
 | 1.76 | 2026-10-21 | 新增 `{stam,mobm}.rcdStallTolerance`（預設 10⁻⁴ rad）：RCD 停滯時結束嘗試；A 的 9a 1 核心 47.4 → 3.4 s；0.1–10⁻⁹ 的量測（7.11、7.11.1 嘗試 5、14） |
 | 1.77 | 2026-10-21 | 18 節新增未來項目 F3（自由度不足時開放相鄰主鏈兩面角）、F4（抽樣時考慮雙硫鍵幾何）、F5（以 Jacobian 最小平方法同時調整多個兩面角的閉合）；7.11.1 嘗試 5 加入參照 |
+| 1.78 | 2026-10-21 | 9a 的 RCD 閉合在 GPU 上（`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`；`GpuRcd`、`GenBatch`）；C 的 9a 1 核心 156 → 6.8 s、16 執行緒 16.7 → 3.0 s；9a 執行紀錄加入產生與最小化的時間（15.1.18、14、16） |

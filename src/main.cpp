@@ -48,6 +48,7 @@
 #include "version.hpp"
 #ifdef OD_HAVE_CUDA
 #include "conf9a_gpu.hpp"
+#include "rcd_gpu.hpp"
 #include "dock9b_gpu.hpp"
 #include "grid_gpu.hpp"
 #include "shake_gpu.hpp"
@@ -263,6 +264,18 @@ class ConfSet {
     if (clp.method != od::ClosureMethod::None)
       for (const auto& line : closer_->describe()) od::logInfo(std::format("  {:<40} closure: {}", name_, line));
     const bool closing = closer_->active();
+#ifdef OD_HAVE_CUDA
+    if (gpu && opt.gpuConf9aRcd && closing && clp.method != od::ClosureMethod::None) {
+      auto r = std::make_unique<od::GpuRcd>(*closer_, opt.gpuDevice, opt.gpuConf9aBatchNum);
+      if (r->active()) {
+        rcdGpu_ = std::move(r);
+        p_.genBatch = rcdGpu_.get();
+        p_.genBatchMin = opt.gpuConf9aRcdMinBatch;
+        od::logInfo(std::format("  {:<40} closure: RCD attempts on the GPU for L1 batches of at least {} samples", name_,
+                                opt.gpuConf9aRcdMinBatch));
+      }
+    }
+#endif
     if (csgm_.build != "whole") {
       // growClose without a loop closure: grow (spec 7.8).
       growClose_ = csgm_.build == "growClose" && closing;
@@ -372,7 +385,14 @@ class ConfSet {
     }
     const od::SegmentSampler resample = [&](od::Rng& r, int seg, std::span<double> a) { sampler_.sampleSegment(r, seg, a); };
     const bool closing = closer_ && closer_->active();
+    od::RcdRunner* runner = nullptr;
+#ifdef OD_HAVE_CUDA
+    runner = rcdGpu_.get();
+    const long long k0 = rcdGpu_ ? rcdGpu_->kernels() : 0, a0 = rcdGpu_ ? rcdGpu_->attempts() : 0;
+    const double s0 = rcdGpu_ ? rcdGpu_->kernelSec() : 0;
+#endif
     const od::ConfGenerator gen = [&](od::Rng& r, const od::GenIndex& idx, std::span<double> a) {
+      const od::RcdSlot rs{idx.slot >= 0 ? runner : nullptr, idx.slot};
       if (pe) {
         const int m = static_cast<int>(idx.local % pe_.perLine);
         od::csgm3Sample(od::Rng(p_.seed, p_.stream, idx.global - m), ends, idx.local / pe_.perLine, m, cisTrans_, pe_, a);
@@ -385,12 +405,12 @@ class ConfSet {
       const od::SegmentSampler& growResample = pe || ga ? od::SegmentSampler{} : resample;
       if (growClose_) {
         // growClose: closure paths as sampled, closure, then the rest built segment by segment (spec 7.8).
-        if (!closer_->close(r, a, resample)) return od::GenResult::CloseFailed;
+        if (!closer_->close(r, a, resample, rs)) return od::GenResult::CloseFailed;
         if (!grow_->build(r, a, growResample).ok) return od::GenResult::SideGrowFailed;
         return od::GenResult::Built;
       }
       if (grow_ && !grow_->build(r, a, growResample).ok) return od::GenResult::GrowFailed;
-      if (closing && !closer_->close(r, a, resample)) return od::GenResult::CloseFailed;
+      if (closing && !closer_->close(r, a, resample, rs)) return od::GenResult::CloseFailed;
       return od::GenResult::Built;
     };
     const long long l1 = first_ ? n_.initL1 : nextL1_;
@@ -400,13 +420,20 @@ class ConfSet {
     const auto st = od::fillL2Pool(sys_, gen, l1, p_, counter_, pool_);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     nextL1_ = st.nextL1;
+    std::string rcdInfo;
+#ifdef OD_HAVE_CUDA
+    if (rcdGpu_)
+      rcdInfo = std::format(", GPU RCD {} attempts in {} kernels {:.2f} s", rcdGpu_->attempts() - a0, rcdGpu_->kernels() - k0,
+                            rcdGpu_->kernelSec() - s0);
+#endif
     const long long minimized = st.l1 - st.growFailed - st.closeFailed - st.sideGrowFailed - st.preNotClosed;
     od::logInfo(std::format("  9a {:<37} {} L1 {:>9} in {} batch(es)  -> L2 +{} = {}  (rejected: grow {}, closure {}, "
                             "grow after closure {}, not closed before minimization {}, E >= Emax {}, not closed {})  "
-                            "steps/sample {:.1f}  {:.2f} s",
+                            "steps/sample {:.1f}  {:.2f} s{}",
                             name_, pe ? "csgm3" : ga ? "csgm2" : "csgm1", st.l1, st.batches, st.added, pool_.size(),
                             st.growFailed, st.closeFailed, st.sideGrowFailed, st.preNotClosed, st.overEmax, st.notClosed,
-                            minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec));
+                            minimized > 0 ? static_cast<double>(st.minSteps) / static_cast<double>(minimized) : 0.0, sec,
+                            p_.evaluator ? std::format(" (generate {:.2f} s{}, GPU minimize {:.2f} s)", st.genSec, rcdInfo, st.minSec) : ""));
   }
 
   std::string name_;
@@ -424,6 +451,9 @@ class ConfSet {
   std::optional<od::LoopCloser> closer_;
   od::ConfSampleNums n_;
   std::unique_ptr<od::ConfEvaluator> gpu_;
+#ifdef OD_HAVE_CUDA
+  std::unique_ptr<od::GpuRcd> rcdGpu_;
+#endif
   od::Fill9aParams p_;
   std::uint64_t counter_ = 0;
   bool first_ = true;
@@ -1567,6 +1597,8 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuDevice = stored.gpuDevice;
   cmp.gpuConf9aBatchNum = stored.gpuConf9aBatchNum;
   cmp.gpuConf9aPrecision = stored.gpuConf9aPrecision;
+  cmp.gpuConf9aRcd = stored.gpuConf9aRcd;
+  cmp.gpuConf9aRcdMinBatch = stored.gpuConf9aRcdMinBatch;
   cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
   cmp.gpuDock9bStamNum = stored.gpuDock9bStamNum;
   cmp.memHostLimit = stored.memHostLimit;

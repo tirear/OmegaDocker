@@ -433,6 +433,17 @@ TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
   CHECK_THROWS_AS(parse({file.c_str(), file.c_str()}), od::Error);
 }
 
+TEST_CASE("cli: 9a RCD on the GPU (gpu.conf9aRcd, gpu.conf9aRcdMinBatch)") {
+  const od::Options d = parse({});
+  CHECK(d.gpuConf9aRcd);
+  CHECK(d.gpuConf9aRcdMinBatch == 1024);
+  const auto o = parse({"--gpu_conf9aRcd=false", "--gpu_conf9aRcdMinBatch=1"});
+  CHECK_FALSE(o.gpuConf9aRcd);
+  CHECK(o.gpuConf9aRcdMinBatch == 1);
+  auto bad = parse({"--gpu_conf9aRcdMinBatch=0"});
+  CHECK_THROWS_AS(od::validateOptions(bad), od::Error);
+}
+
 TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)") {
   const od::Options d = parse({});
   CHECK(d.gpuDock9bStamNum == 0);

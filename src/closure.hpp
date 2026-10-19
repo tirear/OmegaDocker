@@ -40,6 +40,40 @@ struct ClosureParams {
   bool growClose = false;
 };
 
+// Flat form of the RCD links for a GPU (spec 15.1.18). Indices are per link: points of the link,
+// its pairs; per adjustable torsion (dof, flat over the links): the points it moves, its axis and
+// the pairs with exactly one point moved (active: pair index × 2 + 1 when the second point moves).
+struct RcdFlat {
+  std::vector<char> eligible;  // per link: closed by RCD without the clash term or metal distances
+  std::vector<int> pointNum, dofOff, dofNum, pairOff, pairNum, copyOff, copyNum, members;  // per link
+  std::vector<int> movesOff, moves, axisFixed, axisMoving, activeOff, active;               // per dof
+  std::vector<int> pairPoint;  // per pair: moving, target (points)
+  std::vector<int> pairEnd;    // per copy link: end of its pairs within the link
+};
+
+// One RCD attempt of an eligible link run elsewhere (spec 15.1.18): the points and the adjustable
+// angles (degrees) at the start; afterwards the angles, the random state and whether it converged.
+struct RcdJob {
+  int link = 0;
+  std::vector<double> points;  // pointNum × 3
+  std::vector<double> anglesDeg;  // dofNum, in the order of the link's dof
+  std::uint64_t rng = 0;
+  int maxIter = 0;
+  bool converged = false;
+  int iterations = 0;
+};
+
+// Runs a job of the coroutine `slot`: stores it and waits (batchWait) until it is done.
+class RcdRunner {
+ public:
+  virtual ~RcdRunner() = default;
+  virtual void run(int slot, RcdJob& job) = 0;
+};
+struct RcdSlot {
+  RcdRunner* runner = nullptr;
+  int slot = -1;
+};
+
 class LoopCloser {
  public:
   // freeMask: per concatenated torsion, a freely rotatable (not cisTrans) torsion.
@@ -57,7 +91,11 @@ class LoopCloser {
 
   // Closes every group of links in turn (spec 7.11); false: a group could not be closed.
   // resample: csgm1 segment sampler (empty: uniform angles).
-  bool close(Rng& rng, std::span<double> anglesDeg, const SegmentSampler& resample) const;
+  // rs: RCD attempts of eligible links run by rs.runner (spec 15.1.18).
+  bool close(Rng& rng, std::span<double> anglesDeg, const SegmentSampler& resample, RcdSlot rs = {}) const;
+  // The links in flat form for a GPU.
+  RcdFlat flat() const;
+  const ClosureParams& params() const { return p_; }
 
  private:
   struct Pair {
@@ -95,7 +133,8 @@ class LoopCloser {
   double deviation(const Link& l, const std::vector<Vec3>& x) const;  // part-local coordinates
   bool clashFree(const Link& l, std::span<const double> anglesDeg) const;
   void resampleLink(Rng& rng, const Link& l, std::span<double> anglesDeg, const SegmentSampler& resample) const;
-  bool rcd(Rng& rng, const Link& l, std::span<double> anglesDeg, const SegmentSampler& resample) const;
+  bool rcd(Rng& rng, const Link& l, std::span<double> anglesDeg, const SegmentSampler& resample, RcdSlot rs) const;
+  bool rcdEligible(const Link& l) const;
   bool kic(Rng& rng, const Link& l, std::span<double> anglesDeg, const SegmentSampler& resample) const;
   std::vector<Vec3> partCoords(int part, std::span<const double> anglesDeg) const;
 

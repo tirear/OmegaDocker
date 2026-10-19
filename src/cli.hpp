@@ -88,6 +88,8 @@ struct Options {
   int gpuDevice = 0;
   int gpuConf9aBatchNum = 8192;
   std::string gpuConf9aPrecision = "double";  // double | float
+  bool gpuConf9aRcd = true;
+  int gpuConf9aRcdMinBatch = 1024;
   int gpuDock9bBatchNum = 8192;
   int gpuDock9bStamNum = 0;  // 0: auto
   long long memHostLimit = 0;  // MiB; 0: auto
