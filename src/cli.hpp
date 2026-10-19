@@ -44,6 +44,7 @@ struct CsgmOpts {
   std::string closure = "rcd";  // none | rcd | kic
   double rcdTolerance = 0.25;
   int rcdMaxIter = 20000;
+  double rcdStallTolerance = 1e-4;  // rad
   int rcdMaxRestart = 10;
   int kicMaxTrial = 100;
   std::string rcdClash = "none";  // none | repair | full

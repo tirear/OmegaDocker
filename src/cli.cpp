@@ -238,6 +238,10 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                    [csgm](auto& o) -> auto& { return csgm(o).rcdTolerance; }));
   t.push_back(integer(set + ".rcdMaxIter", "<n>", "20000", who + "RCD: torsion updates per attempt",
                       [csgm](auto& o) -> auto& { return csgm(o).rcdMaxIter; }));
+  t.push_back(real(set + ".rcdStallTolerance", "<rad>", "0.0001",
+                   who + "RCD: end an attempt when every torsion was updated by at most this since the last larger update "
+                         "(0: up to rcdMaxIter)",
+                   [csgm](auto& o) -> auto& { return csgm(o).rcdStallTolerance; }));
   t.push_back(integer(set + ".rcdMaxRestart", "<n>", "10", who + "RCD: restarts from resampled torsions before discarding the sample",
                       [csgm](auto& o) -> auto& { return csgm(o).rcdMaxRestart; }));
   t.push_back(integer(set + ".kicMaxTrial", "<n>", "100", who + "KIC: pivot choices before discarding the sample",
@@ -855,6 +859,7 @@ void validateOptions(const Options& o) {
     check(c->rcdTolerance > 0 && c->rcdTolerance <= o.maxBreakDist, set + ".rcdTolerance",
           "within (0, topology.maxBreakDist]");
     check(c->rcdMaxIter >= 1, set + ".rcdMaxIter", ">= 1");
+    check(c->rcdStallTolerance >= 0, set + ".rcdStallTolerance", ">= 0");
     check(c->rcdMaxRestart >= 0, set + ".rcdMaxRestart", ">= 0");
     check(c->kicMaxTrial >= 1, set + ".kicMaxTrial", ">= 1");
     check(c->rcdClashWeight > 0, set + ".rcdClashWeight", "> 0");

@@ -27,6 +27,9 @@ struct ClosureParams {
   ClosureMethod method = ClosureMethod::Rcd;
   double rcdTolerance = 0.25;  // Å, RMSD of the closure atom pairs
   int rcdMaxIter = 20000;
+  // rad; stop an attempt once every torsion of the link was updated by at most this since the
+  // last larger update (a stall); 0: run up to rcdMaxIter.
+  double rcdStallTolerance = 1e-4;
   int rcdMaxRestart = 10;
   int kicMaxTrial = 100;
   double clashDistance = 1.8;

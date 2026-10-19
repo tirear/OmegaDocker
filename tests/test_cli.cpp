@@ -290,6 +290,12 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(rc.stamCsgm.growMaxBacktrack == 2);
   CHECK(rc.mobmCsgm.growMaxBacktrack == 4);
   CHECK_THROWS_AS(parse({"--stam_rcdClash=always"}), od::Error);
+  CHECK(rc.stamCsgm.rcdStallTolerance == 1e-4);
+  auto st = parse({"--stam_rcdStallTolerance=0", "--mobm_rcdStallTolerance=0.01"});
+  CHECK(st.stamCsgm.rcdStallTolerance == 0);
+  CHECK(st.mobmCsgm.rcdStallTolerance == 0.01);
+  st.mobmCsgm.rcdStallTolerance = -1;
+  CHECK_THROWS_AS(od::validateOptions(st), od::Error);
   CHECK(rc.gridMode == "auto");
   CHECK(rc.gridDeltaThreshold == doctest::Approx(1e-4));
   auto gm = parse({"--grid_mode=flexres", "--grid_deltaThreshold=0.01"});

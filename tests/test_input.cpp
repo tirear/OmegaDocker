@@ -2242,6 +2242,42 @@ TEST_CASE("closure: RCD and KIC close a loop (2KJJ A:12-17)") {
     MESSAGE(std::format("closed {} of {}", closed, total));
     CHECK(closed >= (clash > 0 ? total / 4 : total * 9 / 10));
   }
+  // rcdStallTolerance: a best-effort disulfide stops at a stall; the deviation reached equals
+  // that of rcdMaxIter updates, in a fraction of the time. Compared for the first disulfide when
+  // the loop ended alike (fewer updates draw fewer random numbers, so later links differ).
+  {
+    od::ClosureParams cs, c0;
+    cs.clashDistance = c0.clashDistance = 0.0;
+    c0.rcdStallTolerance = 0.0;
+    CHECK(cs.rcdStallTolerance == 1e-4);
+    const od::LoopCloser stall(sys, parts, freeMask, smp.segments(), cs), full(sys, parts, freeMask, smp.segments(), c0);
+    double tStall = 0, tFull = 0, worst = 0;
+    int compared = 0;
+    for (int k = 0; k < 20; ++k) {
+      od::Rng r(11, 0, k);
+      std::vector<double> a = sys.inputAngles();
+      smp.sample(r, a);
+      std::vector<double> as = a, af = a;
+      od::Rng rs = r, rf = r;
+      auto t0 = std::chrono::steady_clock::now();
+      const bool okS = stall.close(rs, as, resample);
+      auto t1 = std::chrono::steady_clock::now();
+      const bool okF = full.close(rf, af, resample);
+      auto t2 = std::chrono::steady_clock::now();
+      tStall += std::chrono::duration<double>(t1 - t0).count();
+      tFull += std::chrono::duration<double>(t2 - t1).count();
+      if (!okS || !okF) continue;
+      const auto xs = sys.coordinates(std::span<const double>(as)), xf = sys.coordinates(std::span<const double>(af));
+      if (std::abs(linkDeviation(tree, loop, xs) - linkDeviation(tree, loop, xf)) > 1e-9) continue;
+      ++compared;
+      worst = std::max(worst, std::abs(linkDeviation(tree, tree.links[1], xs) - linkDeviation(tree, tree.links[1], xf)));
+    }
+    MESSAGE(std::format("rcdStallTolerance 1e-4: {:.3f} s, 0: {:.3f} s; {} compared, largest disulfide deviation difference {:.2e} Å",
+                        tStall, tFull, compared, worst));
+    CHECK(compared >= 5);
+    CHECK(worst < 1e-3);
+    CHECK(tStall < tFull);
+  }
   // Same random stream: same result.
   od::ClosureParams cp;
   cp.method = od::ClosureMethod::Kic;

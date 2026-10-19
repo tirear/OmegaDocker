@@ -433,6 +433,8 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
       if (dot(X[i] - X[j], X[i] - X[j]) < c2) return true;
     return false;
   };
+  const double stallTol = p_.rcdStallTolerance;
+  std::vector<char> tried(nd, 0);
   for (int att = 0; att <= restarts; ++att) {
     if (att > 0) {
       std::copy(orig.begin(), orig.end(), a.begin());
@@ -458,6 +460,9 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
     };
     bool conv = converged();
     int prev = -1;
+    // Stall: every torsion updated by at most rcdStallTolerance since the last larger update.
+    std::fill(tried.begin(), tried.end(), 0);
+    int triedNum = 0;
     for (int it = 0; it < maxIter && !conv; ++it) {
       int d = static_cast<int>(rng.below(nd));
       if (nd > 1 && d == prev) d = (d + 1 + static_cast<int>(rng.below(nd - 1))) % nd;
@@ -592,6 +597,17 @@ bool LoopCloser::rcd(Rng& rng, const Link& l, std::span<double> a, const Segment
       }
       for (int i : l.moves[d]) mv[i] = 0;
       conv = converged();
+      if (stallTol > 0) {
+        if (std::abs(delta) > stallTol) {
+          std::fill(tried.begin(), tried.end(), 0);
+          triedNum = 0;
+        }
+        if (!tried[d]) {
+          tried[d] = 1;
+          ++triedNum;
+        }
+        if (triedNum == nd) break;
+      }
     }
     for (int g : l.dof) a[g] = wrapDeg(a[g]);
     if (l.partial) return true;

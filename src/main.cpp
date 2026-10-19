@@ -250,6 +250,7 @@ class ConfSet {
                                           : od::ClosureMethod::None;
     clp.rcdTolerance = csgm_.rcdTolerance;
     clp.rcdMaxIter = csgm_.rcdMaxIter;
+    clp.rcdStallTolerance = csgm_.rcdStallTolerance;
     clp.rcdMaxRestart = csgm_.rcdMaxRestart;
     clp.kicMaxTrial = csgm_.kicMaxTrial;
     clp.rcdClash = csgm_.rcdClash == "full" ? od::RcdClash::Full : csgm_.rcdClash == "repair" ? od::RcdClash::Repair : od::RcdClash::None;
