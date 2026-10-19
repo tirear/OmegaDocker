@@ -61,7 +61,9 @@ __device__ inline double warpMax(double v) {
 
 // One block of NT threads per sample. shared: the coordinates and the cos and sin of each torsion
 // are kept in dynamic shared memory (the gradient stays in global memory: double atomics on shared
-// memory are emulated on sm_70); xs is then only used to return the coordinates (keepX).
+// memory are emulated on sm_70); xs is then only used to return the coordinates (keepX). The
+// gradient is stored by component (x of all coordinates, then y, then z): the atomics of a warp
+// on consecutive atoms then share memory sectors.
 template <class T, bool Dock, int NT>
 __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T* angles, T* xs, double* gs,
                                                            FlatTerms* terms, double* grad, DockView dv,
@@ -72,6 +74,7 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
   const int s = blockIdx.x;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const std::size_t nc = 3 * static_cast<std::size_t>(m.coordCount);
+  const int cc = m.coordCount;
   const T* ang = angles + static_cast<std::size_t>(s) * m.torsionCount;
   T* x;
   double* g;
@@ -131,7 +134,7 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
       const int j = m.pairs[p].j;
       for (int c = 0; c < 3; ++c) {
         v[c] = f * d[c];
-        atomicAdd(g + 3 * j + c, -v[c]);
+        atomicAdd(g + c * cc + j, -v[c]);
       }
     }
     for (int o = 1; o < 32; o *= 2) {
@@ -143,7 +146,7 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
     }
     const int prev = __shfl_up_sync(0xffffffffu, key, 1);
     if (key >= 0 && (lane == 0 || prev != key) && (v[0] != 0 || v[1] != 0 || v[2] != 0))
-      for (int c = 0; c < 3; ++c) atomicAdd(g + 3 * key + c, v[c]);
+      for (int c = 0; c < 3; ++c) atomicAdd(g + c * cc + key, v[c]);
   }
   double closure = 0, maxDev = 0;
   for (int c = tid; c < m.closureCount; c += kThreads) {
@@ -153,8 +156,8 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
     const FlatClosure& cl = m.closures[c];
     for (int a = 0; a < 3; ++a) {
       const double v = f * d[a];
-      atomicAdd(g + 3 * cl.i + a, v);
-      atomicAdd(g + 3 * cl.j + a, -v);
+      atomicAdd(g + a * cc + cl.i, v);
+      atomicAdd(g + a * cc + cl.j, -v);
     }
   }
 
@@ -172,7 +175,7 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
       if (!g) continue;
       dock::probeGrad(ps, gw, r, v + 11, v + 14, gy);
       const int c = dv.probes[k].coord;
-      for (int i = 0; i < 3; ++i) atomicAdd(g + 3 * c + i, static_cast<double>(gy[i]));
+      for (int i = 0; i < 3; ++i) atomicAdd(g + i * cc + c, static_cast<double>(gy[i]));
     }
   }
   __shared__ double red[kWarps][kVals];
@@ -213,7 +216,12 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, const T*
     double sum = 0;
     if (flat::torsionUnit(m, t, x, a, u)) {
       const FlatTorsion& tt = m.torsions[t];
-      for (int q = tt.movingBegin + lane; q < tt.movingEnd; q += 32) sum += flat::torsionGradTerm(x, g, m.moving[q], a, u);
+      for (int q = tt.movingBegin + lane; q < tt.movingEnd; q += 32) {
+        const int idx = m.moving[q];
+        const T w[3] = {x[3 * idx] - a[0], x[3 * idx + 1] - a[1], x[3 * idx + 2] - a[2]};
+        sum += g[idx] * (u[1] * w[2] - u[2] * w[1]) + g[cc + idx] * (u[2] * w[0] - u[0] * w[2]) +
+               g[2 * cc + idx] * (u[0] * w[1] - u[1] * w[0]);
+      }
     }
     sum = warpSum(sum);
     if (lane == 0) grad[static_cast<std::size_t>(s) * m.torsionCount + t] = sum;
