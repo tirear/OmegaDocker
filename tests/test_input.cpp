@@ -57,6 +57,7 @@
 #include "orient.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
+#include "sysmem.hpp"
 #include "write_struct.hpp"
 #include "molconfig.hpp"
 #include "rama.hpp"
@@ -3251,6 +3252,50 @@ TEST_CASE("dock9b: dockPairs over several StaM fields delivers the chunks of seq
     ev.nFields = nf - 1;
     CHECK_THROWS_AS(od::MobmDocker::dockPairs(groups, 4), od::Error);
   }
+}
+
+TEST_CASE("sysmem: cgroup memory limit, resident memory and MemAvailable") {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / std::format("od_test_cgroup_{}", ::getpid());
+  fs::remove_all(root);
+  const auto put = [](const fs::path& f, const std::string& s) {
+    fs::create_directories(f.parent_path());
+    std::ofstream(f) << s;
+  };
+  const std::string proc = (root / "proc").string(), cg = (root / "cg").string();
+  std::string src;
+  // cgroup v2: the smallest limit of the cgroup and its ancestors.
+  put(root / "proc/self/cgroup", "0::/job_1/step_0/task_0\n");
+  put(root / "cg/job_1/step_0/task_0/memory.max", "max\n");
+  put(root / "cg/job_1/step_0/memory.max", "3221225472\n");
+  put(root / "cg/job_1/memory.max", "4294967296\n");
+  auto v = od::cgroupMemLimit(&src, proc, cg);
+  REQUIRE(v);
+  CHECK(*v == 3221225472ULL);
+  CHECK(src == cg + "/job_1/step_0/memory.max");
+  // No limit anywhere.
+  put(root / "cg/job_1/step_0/memory.max", "max\n");
+  put(root / "cg/job_1/memory.max", "max\n");
+  CHECK_FALSE(od::cgroupMemLimit(nullptr, proc, cg));
+  // cgroup v1: the memory controller; the huge value means unlimited.
+  put(root / "proc/self/cgroup", "5:cpuacct,cpu:/x\n4:memory:/slurm/uid_1/job_2\n0::/\n");
+  put(root / "cg/memory/slurm/uid_1/job_2/memory.limit_in_bytes", "9223372036854771712\n");
+  put(root / "cg/memory/slurm/uid_1/memory.limit_in_bytes", "2147483648\n");
+  v = od::cgroupMemLimit(&src, proc, cg);
+  REQUIRE(v);
+  CHECK(*v == 2147483648ULL);
+  CHECK(src == cg + "/memory/slurm/uid_1/memory.limit_in_bytes");
+  // No cgroup file.
+  CHECK_FALSE(od::cgroupMemLimit(nullptr, (root / "none").string(), cg));
+  put(root / "proc/meminfo", "MemTotal:       197426540 kB\nMemFree:        1000 kB\nMemAvailable:   185812345 kB\n");
+  CHECK(od::memAvailableBytes(proc) == 185812345ULL * 1024);
+  CHECK(od::memAvailableBytes((root / "none").string()) == 0);
+  // This process.
+  CHECK(od::residentBytes() > 0);
+  CHECK(od::hostMemLimit(2048).bytes == 2048ULL << 20);
+  CHECK(od::hostMemLimit(2048).source == "memory.hostLimit");
+  CHECK(od::hostMemLimit(0).bytes > od::residentBytes());
+  fs::remove_all(root);
 }
 
 TEST_CASE("runBatchedAsync: every task completes; submit and complete alternate per group") {

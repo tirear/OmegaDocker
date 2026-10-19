@@ -41,6 +41,7 @@
 #include "feparams.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
+#include "sysmem.hpp"
 #include "write_struct.hpp"
 #include "molconfig.hpp"
 #include "topology.hpp"
@@ -979,7 +980,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       return g;
     };
     auto gpuField = std::make_shared<od::GpuField>(opt.gpuDevice);
-    stamWindow = opt.gpuDock9bStamNum;
+    stamWindow = opt.gpuDock9bStamNum > 0 ? opt.gpuDock9bStamNum : std::numeric_limits<int>::max();
     // Resident fields: those of the window (the fields of the previous window are dropped).
     gpuFieldSlots = [gpuField](int n) { gpuField->setSlots(n); };
     // Half of the free device memory and the memory of the resident fields.
@@ -994,6 +995,19 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
 #else
   (void)gpu;
 #endif
+  // Host memory for the fields of a window (memory.hostLimit, spec 13, 15.1.16): 90% of the limit.
+  const od::HostMemLimit hostLimit = od::hostMemLimit(opt.memHostLimit);
+  const std::size_t hostBudget = hostLimit.bytes / 10 * 9;
+  if (stamWindow > 1)
+    od::logInfo(std::format("9b memory.hostLimit {} MiB ({}); StaM conformations docked together (gpu.dock9bStamNum {}) "
+                            "use at most 90% of it and half of the free device memory",
+                            hostLimit.bytes >> 20, hostLimit.source,
+                            opt.gpuDock9bStamNum > 0 ? std::to_string(opt.gpuDock9bStamNum) : std::string("auto")));
+  // Largest host (resident) and device memory of the field of a StaM conformation, over all rounds;
+  // the host memory of the first field also holds the reference grids, so it counts only while no
+  // other field has been built.
+  std::size_t hostPerField = 0, gpuPerField = 0;
+  long long fieldsBuilt = 0;
   const bool deterministic = dp.posm == od::Posm::Posm2 || dp.posm == od::Posm::Posm2Fft || dp.posm == od::Posm::Posm3;
   const bool usesFft = dp.posm == od::Posm::Posm2Fft;
   const bool usesSepas = dp.posm == od::Posm::Posm3 || dp.posm == od::Posm::Posm4;
@@ -1130,6 +1144,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<WindowItem> window;
     std::size_t windowBytes = 0, windows = 0, largestWindow = 0;
     const std::size_t fieldBudget = gpuFieldBudget();
+    const std::size_t roundResident = od::residentBytes();
+    long long endByCount = 0, endByGpu = 0, endByHost = 0;
     // Device memory of a field (estimate): the stored delta blocks, or the maps of a full field of
     // a StaM with torsions (the other fields share the reference maps).
     const auto fieldBytes = [&](const od::StamField& f) -> std::size_t {
@@ -1219,6 +1235,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     };
     for (int sid : stamIds) {
       const auto g0 = std::chrono::steady_clock::now();
+      const std::size_t resident0 = od::residentBytes();
       auto stamAtoms = [&](bool input) {
         const auto& sa = stamSet.sample(sid).angles;
         std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end())
@@ -1299,18 +1316,30 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         fftSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count();
       }
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
-      // Docked together with the following StaM conformations (spec 15.1.16).
-      const std::size_t bytes = fieldBytes(field);
-      if (!window.empty() && (static_cast<int>(window.size()) >= stamWindow || windowBytes + bytes > fieldBudget)) {
+      // Docked together with the following StaM conformations (spec 15.1.16): the window is docked
+      // when it is full or when the field of one more conformation could exceed the memory limits.
+      const std::size_t bytes = fieldBytes(field), resident = od::residentBytes();
+      const std::size_t grown = resident > resident0 ? resident - resident0 : 0;
+      hostPerField = ++fieldsBuilt == 2 ? grown : std::max(hostPerField, grown);
+      gpuPerField = std::max(gpuPerField, bytes);
+      windowBytes += bytes;
+      window.push_back({sid, std::move(fieldPtr), std::move(sepas), std::move(fft)});
+      const bool byCount = window.size() >= static_cast<std::size_t>(stamWindow);
+      const bool byGpu = !byCount && windowBytes + gpuPerField > fieldBudget;
+      const bool byHost = !byCount && !byGpu && resident + hostPerField > hostBudget;
+      if (byCount || byGpu || byHost) {
+        endByCount += byCount;
+        endByGpu += byGpu;
+        endByHost += byHost;
         dockWindow();
         window.clear();
         windowBytes = 0;
+        od::trimHeap();
       }
-      windowBytes += bytes;
-      window.push_back({sid, std::move(fieldPtr), std::move(sepas), std::move(fft)});
     }
     dockWindow();
     window.clear();
+    od::trimHeap();
     double partialSec = 0;
     for (double s : selectSec) partialSec += s;
     const double dockSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count() - gridSec - partialSec;
@@ -1386,6 +1415,18 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       if (e) e->idle();
     od::logInfo(std::format("  9b docking: {:.2f} s ({} window(s) of StaM conformations docked together, largest {})",
                             dockSec, windows, largestWindow));
+    if (stamWindow > 1 && windows > 0) {
+      // Memory of one window with all StaM conformations of the round (a hint for memory.hostLimit).
+      const std::size_t n = stamIds.size();
+      od::logInfo(std::format("  9b windows ended by: gpu.dock9bStamNum {}, device memory {}, host memory {}, last {}; "
+                              "per StaM conformation: host {} MiB, device {} MiB",
+                              endByCount, endByGpu, endByHost, windows - static_cast<std::size_t>(endByCount + endByGpu + endByHost),
+                              hostPerField >> 20, gpuPerField >> 20));
+      if (endByGpu + endByHost > 0)
+        od::logInfo(std::format("  9b one window for all {} StaM conformations would need memory.hostLimit >= about {} MiB "
+                                "and about {} MiB of free device memory",
+                                n, (roundResident + n * hostPerField) / 9 * 10 >> 20, 2 * n * gpuPerField >> 20));
+    }
     writeCheckpoint(round, stamSet, mobSets, ms, stamRef, opt, ck, shift);
   }
 
@@ -1438,7 +1479,7 @@ std::vector<od::InputHash> inputHashes(const od::Options& opt) {
 }
 
 // --resume (spec 16.4): parameters of the last checkpoint, then the command line
-// (input files may be given again, e.g. when moved); only dock9c.maxRound and gpu.* may differ.
+// (input files may be given again, e.g. when moved); only dock9c.maxRound, gpu.* and memory.hostLimit may differ.
 od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpointing& ck) {
   if (!cli.paramFile.empty()) od::fail("--paramFile cannot be used with --resume (the checkpoint parameters are used)");
   if (!cli.outPrefix.empty()) od::fail("--outPrefix cannot be used with --resume (the run continues in the --resume directory)");
@@ -1473,6 +1514,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuConf9aPrecision = stored.gpuConf9aPrecision;
   cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
   cmp.gpuDock9bStamNum = stored.gpuDock9bStamNum;
+  cmp.memHostLimit = stored.memHostLimit;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {
     auto lines = [](const std::string& s) {
@@ -1492,7 +1534,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
       const std::string x = k < la.size() ? la[k] : "", y = k < lb.size() ? lb[k] : "";
       if (x != y) diff += std::format("\n  checkpoint: {}\n  now:        {}", x, y);
     }
-    od::fail("--resume: only dock9c.maxRound and gpu.* may differ from the checkpoint parameters:{}", diff);
+    od::fail("--resume: only dock9c.maxRound, gpu.* and memory.hostLimit may differ from the checkpoint parameters:{}", diff);
   }
   ck.resumeDir = dir;
   ck.resumeRound = round;

@@ -426,3 +426,37 @@ TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
   CHECK_THROWS_AS(parse({file.c_str()}), od::Error);
   CHECK_THROWS_AS(parse({file.c_str(), file.c_str()}), od::Error);
 }
+
+TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)") {
+  const od::Options d = parse({});
+  CHECK(d.gpuDock9bStamNum == 0);
+  CHECK(d.memHostLimit == 0);
+  const auto o = parse({"--gpu_dock9bStamNum=32", "--memory_hostLimit=65536"});
+  CHECK(o.gpuDock9bStamNum == 32);
+  CHECK(o.memHostLimit == 65536);
+  CHECK(parse({"--gpu_dock9bStamNum=auto"}).gpuDock9bStamNum == 0);
+  for (const char* bad : {"--gpu_dock9bStamNum=0", "--gpu_dock9bStamNum=Auto", "--memory_hostLimit=-1", "--memory_hostLimit=1.5"})
+    CHECK_THROWS_AS(parse({bad}), od::Error);
+  // TOML: an integer or the string "auto"; params.used.toml writes them back the same way.
+  const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_auto_{}.toml", ::getpid())).string();
+  std::ofstream(path) << "formatVersion = 1\n[gpu]\ndock9bStamNum = \"auto\"\n[memory]\nhostLimit = 4096\n";
+  const auto f = parse({("--paramFile=" + path).c_str()});
+  CHECK(f.gpuDock9bStamNum == 0);
+  CHECK(f.memHostLimit == 4096);
+  const std::string used = od::paramsText(f);
+  CHECK(used.find("dock9bStamNum = \"auto\"\n") != std::string::npos);
+  CHECK(used.find("[memory]\n") != std::string::npos);
+  CHECK(used.find("hostLimit = 4096\n") != std::string::npos);
+  std::ofstream(path) << used;
+  CHECK(od::paramsText(parse({("--paramFile=" + path).c_str()})) == used);
+  std::ofstream(path) << "formatVersion = 1\n[gpu]\ndock9bStamNum = \"many\"\n[memory]\nhostLimit = 1.5\n";
+  try {
+    parse({("--paramFile=" + path).c_str()});
+    FAIL("no error");
+  } catch (const od::Error& e) {
+    const std::string m = e.what();
+    CHECK(m.find("gpu.dock9bStamNum: must be an integer or \"auto\"") != std::string::npos);
+    CHECK(m.find("memory.hostLimit: must be an integer or \"auto\"") != std::string::npos);
+  }
+  std::filesystem::remove(path);
+}

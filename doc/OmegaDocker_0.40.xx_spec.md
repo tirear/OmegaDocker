@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.72 |
+| 文件版本 | 1.73 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1509,6 +1509,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ## 13. 記憶體管理
 
 - `gpu.memLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
+- `memory.hostLimit`（MiB，預設 `auto`）：主機記憶體上限，目前用於 9b 一起最小化的 StaM 構形數（15.1.16）。`auto`：本行程所屬 cgroup 與其上層的最小記憶體上限（cgroup v2 `memory.max`；cgroup v1 memory controller 的 `memory.limit_in_bytes`，SLURM 等工作排程以此限制工作的記憶體）；都沒有上限時為 9b 開始時的常駐記憶體 + `/proc/meminfo` 的 MemAvailable。log 會寫出所用的上限與來源。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
 - L2 pool、topSampleSet 存在主機記憶體；L2 pool 不設容量上限。
 - 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `midTopSampleFactor` × `topSampleNum` 個（使用 `dock9c.midKeepSkipped` 時約 3 × `sampleBufferNum` 個）；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
@@ -1558,7 +1559,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
-| `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | 16 | 15.1.16（一起最小化的 StaM 構形數；受可用 GPU 記憶體一半限制） |
+| `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：只受記憶體限制；整數 n：最多 n 個，仍受記憶體限制） |
+| `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
 | `output.minPerRank` | `--output_minPerRank` | 40 | 10.3 |
@@ -1992,7 +1994,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 15.1.14 的另一個瓶頸：9b 依 StaM 構形分批，每個 StaM 構形的 L2poss 少，批次尾端只剩少數姿勢，GPU 多半閒置。改為把連續多個 StaM 構形的姿勢一起最小化。
 
-- **視窗**（`src/main.cpp`）：依序建立 StaM 構形的場（格點、posm3 區域、posm2_fft 頻譜，與原本相同），累積成一個視窗；視窗中的構形數達到 `gpu.dock9bStamNum`（預設 16），或加入下一個場後所估計的 GPU 記憶體超過上限時，先處理目前的視窗。上限＝(9b 開始時的可用 GPU 記憶體 + 已存放的場) ÷ 2；估計值為 `delta` 的區塊資料，或 StaM 有可轉兩面角時 `full` 的全部格點（其他情形共用參考格點，計為 0）。處理視窗時，對每個 MobM：視窗中各 StaM 構形的構形配對依 StaM 構形、配對的順序合併為 `MobmDocker::dockPairs`（`PairGroup` 版）的一次呼叫。CPU 版（無 GPU）視窗固定為 1 個構形，流程與之前相同。
+- **視窗**（`src/main.cpp`）：依序建立 StaM 構形的場（格點、posm3 區域、posm2_fft 頻譜，與原本相同），累積成一個視窗；視窗中的構形數達到 `gpu.dock9bStamNum`（1.73 起預設 `auto`：不限構形數），或再加入一個場可能超過記憶體上限時，先處理目前的視窗（1.73 起在加入場之後判斷，以免建立超過上限的場）。GPU：視窗的場 + 一個場的最大值 > (9b 開始時的可用 GPU 記憶體 + 已存放的場) ÷ 2；主機（1.73）：目前常駐記憶體 + 一個場的最大值 > `memory.hostLimit` × 90%；處理完視窗後以 `malloc_trim` 歸還釋放的記憶體。一個場的主機記憶體為建立前後常駐記憶體的增加量（全部輪次的最大值；第一個場含共用的參考格點，有其他場後不計）。GPU 的估計值為 `delta` 的區塊資料，或 StaM 有可轉兩面角時 `full` 的全部格點（其他情形共用參考格點，計為 0）。處理視窗時，對每個 MobM：視窗中各 StaM 構形的構形配對依 StaM 構形、配對的順序合併為 `MobmDocker::dockPairs`（`PairGroup` 版）的一次呼叫。CPU 版（無 GPU）視窗固定為 1 個構形，流程與之前相同。
 - **dockPairs**：各組（一個 StaM 構形的 `MobmDocker` 與其配對）依序準備 L1poss 與快速篩選；所有組的 L2poss 依組、配對順序合併，以 max(`sampleBufferNum`, `gpu.dock9bBatchNum`) 個為一批最小化；每個配對的 sink 收到的段落與順序和逐一呼叫 `dockPair` 相同（測試）。每個 MobM 的 9c 狀態（sampleBuffer、部分選擇）只由該 MobM 的 sink 更新，因此依 MobM 分開處理視窗不改變結果的順序。
 - **PoseEvaluator**：新增 `fields()`（可同時綁定的 StaM 構形數）與 `bindAll()`；`PoseRequest::field` 指定所用的構形。
 - **GpuField**：可同時存放 `slots()` 個場（`setSlots`；處理每個視窗前設為視窗的構形數，前一個視窗的場因此釋放）；不在其中的場上傳時取代最久未用的場；參考格點相同的場共用一份。各場的 `FieldView` 另存一份陣列於 GPU。
@@ -2017,6 +2019,22 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 整個執行時間：A 52.4–53.1 s → 37.1–37.4 s（16），B 19.1–19.9 s → 16.0–16.3 s（16）。
   - nsys（B）：9b 核心呼叫 49,000 次 → 9,000 次（8），≤16 個姿勢的呼叫時間 2.5 s → 0.4 s。
 - **記憶體**：A、B 的每個 `delta` 場約 115 MB（GPU），視窗中的場同時存在主機記憶體；posm2_fft 時各構形的頻譜也同時存在主機記憶體。預設 16 在 A 節省的時間約為上限（46）的 95%。
+- **1.73：預設 `auto` 與 `memory.hostLimit`**：
+  - 量測（A，TITAN V 12 GB）：
+
+| `gpu.dock9bStamNum` | 最大視窗 | 9b docking | 整個執行 | 主機記憶體峰值 |
+|---|---|---|---|---|
+| 1 | 1 | 20.9 s | 52.0 s | 0.8 GB |
+| 16 | 16 | 6.3 s | 37.3 s | 2.3 GB |
+| 32 | 32 | 5.6 s | 36.6 s | 3.9 GB |
+| 64、128、auto | 46（GPU 記憶體） | 5.0–5.6 s | 36.1–36.8 s | 5.2–5.3 GB |
+| auto，`memory.hostLimit = 3000` | 22（主機記憶體） | 5.8 s | 36.9 s | 2.7 GB |
+| auto，SLURM `--mem=3G`（cgroup 3072 MiB） | 23（主機記憶體） | 5.2 s | — | 2.8 GB |
+
+  - 每個構形的主機記憶體約 103 MiB（posm1、`delta`）；超過約 32 個構形後 9b 幾乎不再變快。
+  - 主機記憶體峰值都在上限內（SLURM 工作沒有因記憶體被終止）；posm2_fft 的主機記憶體未量測（A 的 posm2_fft 超過 20 分鐘的測試時限）。
+  - log：每輪寫出視窗結束的原因（`gpu.dock9bStamNum`、GPU 記憶體、主機記憶體、最後一個）、一個構形的主機與 GPU 記憶體；有視窗因記憶體結束時，另寫出一輪所有構形一個視窗所需的 `memory.hostLimit` ≈ (該輪 9b 開始時的常駐記憶體 + 構形數 × 一個構形) ÷ 0.9，與可用 GPU 記憶體 ≈ 2 × 構形數 × 一個構形，供 HPC 申請記憶體時參考。
+  - 測試：`cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)`（命令列與 TOML 的整數或 `"auto"`、錯誤、`params.used.toml` 寫回）；`sysmem: cgroup memory limit, resident memory and MemAvailable`（以假的 `/proc`、cgroup 檔案測 cgroup v2、v1、無上限）。接續執行時可改變 `memory.hostLimit`（測試：上限 1500 MiB 跑 2 輪，以 auto 接續第 3 輪）。
 
 ### 15.2 依賴套件
 
@@ -2144,14 +2162,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ### 16.4 接續
 - `--resume=<outPrefix>`（只能在命令列）：從最後一個完整的檢查點的下一輪開始。
   - 「最後一個完整的檢查點」：`checkpoint/` 下有 `manifest.toml` 的 `round_<r>/` 中 r 最大者（不依賴 `last`，因此 rename 之後、更新 `last` 之前中斷也能取得最新一輪）；`.tmp` 目錄忽略。
-  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound` 與 `gpu.*`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
+  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`、`gpu.*` 與 `memory.hostLimit`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
   - 不可同時使用 `--paramFile`、`--outPrefix`（報錯）；輸出寫回 `--resume` 指定的目錄。
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
   - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
-- 參數只允許修改 `maxRound`、`gpu.*`；其他參數不同 → 報錯並結束。
+- 參數只允許修改 `maxRound`、`gpu.*`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
 
 ---
@@ -2330,3 +2348,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.70 | 2026-10-19 | 記錄效能瓶頸量測：量測穩定度、9b 小批次與單一樣本延遲、每 block 執行緒數、Nsight Compute、9d（15.1.14） |
 | 1.71 | 2026-10-19 | GPU 核心最佳化（三）：原子對的資料與運算精簡、每個 block 計算多個樣本、兩面角轉換（pointer jumping）平行化；9a 約快 19%、9b 約快 30%（15.1.15） |
 | 1.72 | 2026-10-20 | 9b 多個 StaM 構形一起最小化：新增 `gpu.dock9bStamNum`（預設 16）、`GpuField` 同時存放多個場、`dockPairs` 的 `PairGroup` 版、多場核心；A 的 9b 約快 3.5 倍、B 約快 1.4 倍（15.1.16） |
+| 1.73 | 2026-10-20 | `gpu.dock9bStamNum` 預設改為 `auto`；新增 `memory.hostLimit`（預設 auto：cgroup 上限），9b 視窗受主機記憶體 90% 限制；log 寫出每個構形的記憶體與一個視窗所需的記憶體（13、15.1.16） |

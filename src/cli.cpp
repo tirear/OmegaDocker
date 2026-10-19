@@ -13,6 +13,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <type_traits>
 
 #include <toml.hpp>
 
@@ -29,7 +30,7 @@ using Tokens = std::vector<std::string>;
 
 // Value type of a parameter: in the file a TOML value of this type; on the
 // command line --<option>=<text>, arrays comma separated.
-enum class Type { Real, Int, Bool, Str, RealArr, StrArr };
+enum class Type { Real, Int, Bool, Str, RealArr, StrArr, IntAuto };  // IntAuto: integer or "auto"
 
 struct Param {
   std::string key;  // "<table>.<name>", or "<name>" at the top level
@@ -89,6 +90,25 @@ Param real(std::string key, std::string hint, std::string def, std::string help,
   return {std::move(key), Type::Real, std::move(hint), std::move(def), std::move(help),
           [acc](Options& o, const Tokens& t) { acc(o) = toReal(one(t)); },
           [acc](const Options& o) -> std::optional<Tokens> { return Tokens{fmtReal(acc(o))}; }};
+}
+
+// Integer >= min or "auto" (stored as 0).
+template <typename Acc>
+Param intAuto(std::string key, std::string hint, std::string help, long long min, Acc acc) {
+  return {std::move(key), Type::IntAuto, std::move(hint), "auto", std::move(help),
+          [acc, min](Options& o, const Tokens& t) {
+            const std::string& s = one(t);
+            if (s == "auto") {
+              acc(o) = 0;
+              return;
+            }
+            const long long v = toInt(s);
+            if (v < min) fail("must be >= {} or auto", min);
+            acc(o) = static_cast<std::remove_reference_t<decltype(acc(o))>>(v);
+          },
+          [acc](const Options& o) -> std::optional<Tokens> {
+            return Tokens{acc(o) == 0 ? std::string("auto") : std::to_string(acc(o))};
+          }};
 }
 
 template <typename Acc>
@@ -290,9 +310,14 @@ const std::vector<Param>& params() {
                  [](const Options& o) -> std::optional<Tokens> { return Tokens{o.gpuConf9aPrecision}; }});
     t.push_back(integer("gpu.dock9bBatchNum", "<n>", "8192",
                         "9b: poses minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuDock9bBatchNum)));
-    t.push_back(integer("gpu.dock9bStamNum", "<n>", "16",
-                        "9b: StaM conformations whose poses are minimized together on the GPU (limited by the free device memory)",
-                        OD_ACC(gpuDock9bStamNum)));
+    t.push_back(intAuto("gpu.dock9bStamNum", "auto|<n>",
+                        "9b: StaM conformations whose poses are minimized together on the GPU (auto: as many as "
+                        "memory.hostLimit and half of the free device memory allow; <n>: at most n, within these limits)",
+                        1, OD_ACC(gpuDock9bStamNum)));
+    t.push_back(intAuto("memory.hostLimit", "auto|<MiB>",
+                        "Host memory limit (MiB) for 9b (gpu.dock9bStamNum); auto: the cgroup memory limit, otherwise "
+                        "the resident memory plus MemAvailable at the start",
+                        1, OD_ACC(memHostLimit)));
 
     t.push_back(boolean("output.pdb", "true", "Write PDB output", OD_ACC(outPdb)));
     t.push_back(boolean("output.cif", "false", "Write mmCIF output", OD_ACC(outCif)));
@@ -504,7 +529,7 @@ const std::vector<CliOption>& cliOptions() {
        [](Options& o, const std::string& v) { o.molConfig = v; }},
       {"outPrefix", "<path>", "Output directory; required", false, [](Options& o, const std::string& v) { o.outPrefix = v; }},
       {"resume", "<path>",
-       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound and gpu.* may change", false,
+       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound, gpu.* and memory.hostLimit may change", false,
        [](Options& o, const std::string& v) {
          if (v.empty()) fail("--resume requires a directory");
          o.resume = v;
@@ -542,6 +567,10 @@ Tokens tomlTokens(const toml::node& v, Type type) {
       case Type::Bool:
         if (n.is_boolean()) return *n.value<bool>() ? "true" : "false";
         fail("must be true or false");
+      case Type::IntAuto:
+        if (n.is_integer()) return std::to_string(*n.value<std::int64_t>());
+        if (n.is_string() && *n.value<std::string>() == "auto") return "auto";
+        fail("must be an integer or \"auto\"");
       default:
         if (n.is_string()) return *n.value<std::string>();
         fail("must be a string");
@@ -601,6 +630,7 @@ std::string tomlString(const std::string& s) {
 std::string tomlValue(const Param& p, const Tokens& t) {
   switch (p.type) {
     case Type::Str: return tomlString(t.front());
+    case Type::IntAuto: return t.front() == "auto" ? tomlString(t.front()) : t.front();
     case Type::RealArr:
     case Type::StrArr: {
       std::string s = "[";
@@ -762,7 +792,6 @@ void validateOptions(const Options& o) {
   check(o.gpuDevice >= 0, "gpu.device", ">= 0");
   check(o.gpuConf9aBatchNum >= 1, "gpu.conf9aBatchNum", ">= 1");
   check(o.gpuDock9bBatchNum >= 1, "gpu.dock9bBatchNum", ">= 1");
-  check(o.gpuDock9bStamNum >= 1, "gpu.dock9bStamNum", ">= 1");
   check(o.maxNearDistance > 0, "dock9b.maxNearDistance", "> 0");
   check(o.rotStep > 0, "dock9b.rotStep", "> 0");
   check(o.posStep > 0, "dock9b.posStep", "> 0");

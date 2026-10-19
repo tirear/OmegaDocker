@@ -88,7 +88,8 @@ struct Options {
   int gpuConf9aBatchNum = 8192;
   std::string gpuConf9aPrecision = "double";  // double | float
   int gpuDock9bBatchNum = 8192;
-  int gpuDock9bStamNum = 16;
+  int gpuDock9bStamNum = 0;  // 0: auto
+  long long memHostLimit = 0;  // MiB; 0: auto
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
   std::string posm;  // posm1 | posm2 | posm3 | posm4

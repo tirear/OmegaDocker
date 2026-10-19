@@ -95,6 +95,7 @@ add_library(od_core STATIC
   src/grow.cpp
   src/grid.cpp
   src/shaking.cpp
+  src/sysmem.cpp
   src/score9d.cpp
   src/write_struct.cpp
   src/orient.cpp
