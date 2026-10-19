@@ -11,11 +11,13 @@
 
 namespace od {
 
-// 9a energies on a GPU in double precision (spec 15.1.3).
+// 9a energies on a GPU (spec 15.1.3). fp32 (gpu.conf9aPrecision = "float", spec 15.1.12): the
+// evaluations with gradients during minimization in single precision; the final energies stay
+// in double precision.
 class GpuConfEvaluator : public ConfEvaluator {
  public:
   // batch: requested samples per call, limited to 90% of the free device memory.
-  GpuConfEvaluator(const EnergyModel& model, int device, int batch) : gpu_(model, device) {
+  GpuConfEvaluator(const EnergyModel& model, int device, int batch, bool fp32 = false) : gpu_(model, device), fp32_(fp32) {
     const std::size_t per = gpu_.bytesPerSample(true, true);
     const std::size_t fit = static_cast<std::size_t>(0.9 * static_cast<double>(gpuDeviceInfo(device).freeMem)) / per;
     batch_ = static_cast<int>(std::clamp<std::size_t>(fit, 1, static_cast<std::size_t>(std::max(1, batch))));
@@ -29,7 +31,7 @@ class GpuConfEvaluator : public ConfEvaluator {
   int lanes() const override { return GpuEnergy::kLanes; }
   void submit(int lane, const double* anglesDeg, int n) override {
     size_[lane] = n;
-    gpu_.submit(lane, anglesDeg, n, true);
+    gpu_.submit(lane, anglesDeg, n, true, fp32_);
   }
   void complete(int lane, EnergyTerms* terms, double* gradRad) override {
     buf_.resize(size_[lane]);
@@ -56,6 +58,7 @@ class GpuConfEvaluator : public ConfEvaluator {
   }
 
   GpuEnergy gpu_;
+  bool fp32_;
   int size_[GpuEnergy::kLanes] = {};
   int batch_ = 1;
   std::vector<FlatTerms> buf_;

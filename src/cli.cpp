@@ -280,6 +280,14 @@ const std::vector<Param>& params() {
     t.push_back(integer("gpu.device", "<n>", "0", "CUDA device number", OD_ACC(gpuDevice)));
     t.push_back(integer("gpu.conf9aBatchNum", "<n>", "8192",
                         "9a: samples minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuConf9aBatchNum)));
+    t.push_back({"gpu.conf9aPrecision", Type::Str, "double|float", "double",
+                 "9a: precision of the GPU evaluations during minimization (final energies in double)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "double" && s != "float") fail("expected double or float but got '{}'", s);
+                   o.gpuConf9aPrecision = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.gpuConf9aPrecision}; }});
     t.push_back(integer("gpu.dock9bBatchNum", "<n>", "8192",
                         "9b: poses minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuDock9bBatchNum)));
 

@@ -484,6 +484,7 @@ struct GpuEnergy::Impl {
     if (hCoords) check(cudaMemcpy(hCoords, L.xs.p, nn * nc * sizeof(T), cudaMemcpyDeviceToHost), "download coordinates");
   }
 
+  template <class T>
   void submitEval(int lane, const double* hAngles, int n, bool wantGrad) {
     Lane& L = lanes[lane];
     if (L.pending) throw Error("submit: lane busy");
@@ -492,24 +493,24 @@ struct GpuEnergy::Impl {
     check(cudaSetDevice(device), "cudaSetDevice");
     const std::size_t nt = static_cast<std::size_t>(view.torsionCount), nc = 3 * static_cast<std::size_t>(view.coordCount);
     const std::size_t nn = static_cast<std::size_t>(n);
-    const std::size_t inBytes = align8(nn * nt * sizeof(double));
+    const std::size_t inBytes = align8(nn * nt * sizeof(T));
     L.oGrad = align8(nn * sizeof(FlatTerms));
     L.outBytes = L.oGrad + (wantGrad ? nn * nt * sizeof(double) : 0);
-    const std::size_t shm = sharedBytes<double>(view);
+    const std::size_t shm = sharedBytes<T>(view);
     L.in.reserve(std::max<std::size_t>(8, inBytes));
     L.out.reserve(L.outBytes);
-    if (!shm) L.xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(double));
+    if (!shm) L.xs.reserve(std::max<std::size_t>(1, nn * nc) * sizeof(T));
     if (wantGrad) L.gs.reserve(std::max<std::size_t>(1, nn * nc));
     L.hIn.reserve(std::max<std::size_t>(8, inBytes));
     L.hOut.reserve(L.outBytes);
     if (nt) {
-      double* ha = reinterpret_cast<double*>(L.hIn.p);
+      T* ha = reinterpret_cast<T*>(L.hIn.p);
 #pragma omp parallel for schedule(static)
-      for (long long s = 0; s < static_cast<long long>(nn); ++s) std::copy_n(hAngles + s * nt, nt, ha + s * nt);
+      for (long long s = 0; s < static_cast<long long>(nn * nt); ++s) ha[s] = static_cast<T>(hAngles[s]);
       check(cudaMemcpyAsync(L.in.p, L.hIn.p, inBytes, cudaMemcpyHostToDevice, L.stream), "upload");
     }
-    launch<double, false>(L.stream, blockThreads(view, 0), n, shm, false, view,
-                          reinterpret_cast<const double*>(L.in.p), reinterpret_cast<double*>(L.xs.p),
+    launch<T, false>(L.stream, blockThreads(view, 0), n, shm, false, view,
+                          reinterpret_cast<const T*>(L.in.p), reinterpret_cast<T*>(L.xs.p),
                           wantGrad ? L.gs.p : nullptr, reinterpret_cast<FlatTerms*>(L.out.p),
                           wantGrad ? reinterpret_cast<double*>(L.out.p + L.oGrad) : nullptr, DockView{}, nullptr,
                           nullptr, nullptr);
@@ -670,7 +671,12 @@ void GpuEnergy::releaseScratch() {
   }
 }
 
-void GpuEnergy::submit(int lane, const double* angles, int n, bool grad) { impl_->submitEval(lane, angles, n, grad); }
+void GpuEnergy::submit(int lane, const double* angles, int n, bool grad, bool fp32) {
+  if (fp32)
+    impl_->submitEval<float>(lane, angles, n, grad);
+  else
+    impl_->submitEval<double>(lane, angles, n, grad);
+}
 
 void GpuEnergy::complete(int lane, FlatTerms* terms, double* grad) { impl_->completeEval(lane, terms, grad); }
 

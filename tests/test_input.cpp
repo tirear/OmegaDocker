@@ -4528,6 +4528,39 @@ TEST_CASE("gpu: 9a minimization matches the CPU path") {
                         c.name, count, sameSteps, close, ctlClose, worst, maxAng));
     INFO(c.name);
     CHECK(close >= ctlClose - count / 20);
+    // gpu.conf9aPrecision = float (spec 15.1.12): final energies in double precision, against the
+    // CPU (ref) and the CPU control (a perturbation of 1e-10 deg) as the scale of trajectory changes.
+    od::GpuConfEvaluator evF(sys.model(), 0, 8192, true);
+    std::vector<double> af = start;
+    std::vector<od::EnergyTerms> termsF(count);
+    std::vector<int> stepsF(count);
+    od::minimizeConfBatch(evF, d, af, mp, termsF.data(), stepsF.data());
+    // Samples below energy.Emax (1000) and, for those below it in both, dE = E - E_ref.
+    auto stats = [&](const std::vector<od::EnergyTerms>& x, const std::vector<int>& st) {
+      constexpr double kEmax = 1000;
+      std::vector<double> dE, absE;
+      int pass = 0, stepSum = 0;
+      for (int i = 0; i < count; ++i) {
+        stepSum += st[i];
+        const double e = x[i].filterEnergy(), r = refTerms[i].filterEnergy();
+        pass += e < kEmax;
+        if (e < kEmax && r < kEmax) {
+          dE.push_back(e - r);
+          absE.push_back(std::abs(e - r));
+        }
+      }
+      std::sort(absE.begin(), absE.end());
+      auto pct = [&](double q) { return absE.empty() ? 0.0 : absE[static_cast<std::size_t>(q * (absE.size() - 1))]; };
+      const int lower = static_cast<int>(std::count_if(dE.begin(), dE.end(), [](double v) { return v < -0.01; }));
+      const int higher = static_cast<int>(std::count_if(dE.begin(), dE.end(), [](double v) { return v > 0.01; }));
+      return std::format("< Emax {}; both {}: mean dE {:+.3f}, |dE| median {:.4f} p90 {:.3f} max {:.2f}, lower/higher by > 0.01 {}/{}; steps/sample {:.1f}",
+                         pass, dE.size(), dE.empty() ? 0.0 : std::accumulate(dE.begin(), dE.end(), 0.0) / dE.size(),
+                         pct(0.5), pct(0.9), pct(1.0), lower, higher, static_cast<double>(stepSum) / count);
+    };
+    const int refPass = static_cast<int>(std::count_if(refTerms.begin(), refTerms.end(), [](const od::EnergyTerms& e) { return e.filterEnergy() < 1000; }));
+    MESSAGE(std::format("{}: CPU double: < Emax {}, steps/sample {:.1f}\n  GPU float:   {}\n  CPU control: {}", c.name,
+                        refPass, std::accumulate(refSteps.begin(), refSteps.end(), 0.0) / count, stats(termsF, stepsF), stats(ctlTerms, ctlSteps)));
+    for (int i = 0; i < count; ++i) REQUIRE(std::isfinite(termsF[i].filterEnergy()));
   }
 }
 #endif

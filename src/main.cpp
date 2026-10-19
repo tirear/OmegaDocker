@@ -232,7 +232,8 @@ class ConfSet {
     p_.stream = stream;
 #ifdef OD_HAVE_CUDA
     if (gpu) {
-      gpu_ = std::make_unique<od::GpuConfEvaluator>(sys_.model(), opt.gpuDevice, opt.gpuConf9aBatchNum);
+      gpu_ = std::make_unique<od::GpuConfEvaluator>(sys_.model(), opt.gpuDevice, opt.gpuConf9aBatchNum,
+                                                     opt.gpuConf9aPrecision == "float");
       p_.evaluator = gpu_.get();
       if (gpu_->maxBatch() < opt.gpuConf9aBatchNum)
         od::logInfo(std::format("  {:<40} 9a GPU batch limited to {} samples by the free device memory", name_, gpu_->maxBatch()));
@@ -1398,6 +1399,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuEnable = stored.gpuEnable;
   cmp.gpuDevice = stored.gpuDevice;
   cmp.gpuConf9aBatchNum = stored.gpuConf9aBatchNum;
+  cmp.gpuConf9aPrecision = stored.gpuConf9aPrecision;
   cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.66 |
+| 文件版本 | 1.67 |
 | 日期 | 2026-10-14 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1556,6 +1556,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.enable` | `--gpu_enable` | true | 15.1.3（以 CUDA 建置且有裝置時使用 GPU） |
 | `gpu.device` | `--gpu_device` | 0 | 15.1.3 |
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
+| `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
@@ -1871,6 +1872,23 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - **結果**：CPU 測試用的 evaluator 以 1、2、3 條 lane 執行，5 種最小化方法的結果都與逐樣本最小化逐位元相同；CPU 版輸出與 1.65 逐位元相同。
 - **速度**（15.1.10 的例子，舊版、新版交替各執行 2 次）：9a 30.2／30.4 s → 28.2／27.5 s。9a 的雙精度核心本身佔 22.9 s（Nsight Systems），所以重疊能省下的時間有限；9b 的單精度核心佔 9b 的 34.5／39.1 s。之後的加速主要取決於核心本身。
 
+### 15.1.12 CUDA 版：9a 的單精度選項（1.67）
+
+- **參數**：`gpu.conf9aPrecision = "double" | "float"`（預設 `double`）。`float`：9a 最小化過程中含梯度的 GPU 計算，座標與每對原子的計算用 float（與 9b 相同的 `evaluateKernel<float>`），加總與梯度維持 double；最後不含梯度的能量（用於 `energy.Emax` 篩選與排序）維持 double。可在 `--resume` 時修改（16）。
+- **結果差異**（單元測試，各 256 個擾動起點，1D3Z 64 個；以 CPU double 為基準，「CPU 對照」為起點加 1×10⁻¹⁰° 的 CPU double，代表軌跡本身的敏感度；dE 只計兩者都 < `Emax` 的樣本）：
+
+| 系統 | CPU double < Emax | float < Emax | float \|dE\| 中位數／p90／最大 | CPU 對照 \|dE\| 最大 |
+|---|---|---|---|---|
+| 1L2Y | 156 | 157 | 0.0001／0.060／37.7 | 0.17 |
+| 2KJJ loop | 204 | 205 | 0.0006／0.027／7.3 | 0.01 |
+| 1ZNF metal break | 202 | 200 | 0.0000／0.003／3.7 | 0.00 |
+| 1D3Z | 7 | 7 | 0.56／2.26／4.6 | 0.00 |
+
+  多數樣本收斂到同一個極小值；少數樣本的軌跡改變，落到另一個極小值（能量高或低都有，平均差 +0.06～+0.2，1D3Z −1.4）。
+- **整個執行**（15.1.10 的例子，100 個 StaM 構形）：9a 27.4／30.0 s → 25.8／28.8 s（約 5%）；通過 9a 的 StaM 樣本 266 → 251，因此之後的結果不同。8 個 StaM 構形、種子 11–14：9a 9.0–9.2 s → 8.6 s；最佳能量在不同種子之間相差 −42～+13，double／float 的差異沒有固定方向（float 在 4 個種子較低、1 個較高，含種子 3），與換一個種子的差異相當。
+- **原因**（Nsight Compute，4096 個樣本的一次呼叫）：double 34.2 ms、float 31.9 ms；兩者 L2 吞吐量都約 61%，來自梯度以 double `atomicAdd` 累加到全域記憶體（15.1.3），與座標精度無關，FP64 運算不是瓶頸。
+- **決定**：預設維持 `double`（與 CPU 參考一致，GPU 結果可與 CPU 對照）；`float` 保留為選項。9a 的進一步加速應減少梯度的全域 atomic 流量。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2002,7 +2020,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
-  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.dock9bBatchNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
+  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.dock9bBatchNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpu.*`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -2177,3 +2195,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.64 | 2026-10-19 | x86-64 的協程切換改用不經系統呼叫的 `odFiberSwitch`（15.1.9） |
 | 1.65 | 2026-10-19 | 能量格點、距離格點與 delta 區塊在 GPU 上計算（`GpuGridBuilder`、共用的 `gridPoint`／`distPoint`），與 CPU 逐位元相同（15.1.10） |
 | 1.66 | 2026-10-19 | 9a 的 CPU／GPU 重疊：`ConfEvaluator` 的非同步介面、`BatchTorsionAsync`、`GpuEnergy::submit`／`complete`（15.1.11） |
+| 1.67 | 2026-10-19 | 新增 `gpu.conf9aPrecision`（`double`／`float`，預設 `double`）；9a 單精度的速度與結果差異測試（15.1.12） |
