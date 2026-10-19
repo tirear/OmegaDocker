@@ -2,8 +2,8 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.70 |
-| 日期 | 2026-10-14 |
+| 文件版本 | 1.71 |
+| 日期 | 2026-10-19 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
 | 狀態 | 定案（1.0）；實作中需修正時遞增版本，修訂紀錄見第 19 節 |
@@ -1680,7 +1680,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - **建置**：CMake 選項 `OD_CUDA`（預設 `OFF`）；`CMAKE_CUDA_ARCHITECTURES` 未指定時為 70；C++20；`OD_STATIC_DEPS=ON` 時連結 `cudart_static` 與 `cufft_static_nocallback`（不需 device link），否則 `cudart` 與 `cufft`。CUDA 程式碼在 `src/gpu/`，啟用時定義 `OD_HAVE_CUDA`。不啟用時程式與 CPU 版完全相同。
 - **共用的計算函式**（`src/energy_kernel.hpp`）：`EnergySystem::model()` 把 9a 能量系統（7.9）轉成扁平的資料（`EnergyModel`：參考座標、兩面角與移動原子、原子對、閉合項、各原子的電荷與溶劑化參數）。座標建構、單一原子對、單一閉合項、單一兩面角梯度項寫成 `__host__ __device__` 函式，CPU 與 GPU 共用；運算順序與 `EnergySystem::evaluate` 相同，CPU 以這些函式逐一計算的結果與 `evaluate` 逐位元相同（double 與 float，測試）。
-- **GPU 計算**（`GpuEnergy`）：一個樣本一個 thread block（256 執行緒）；座標放在 shared memory（放不下時放在 global memory），每原子梯度放在 global memory（sm_70 的 shared memory double atomic 為軟體模擬，較慢），依分量分開存放（1.68 起：所有座標的 x，再 y，再 z；15.1.13）；兩面角依序處理（每個兩面角由多個執行緒旋轉其移動原子）；原子對與閉合項分給各執行緒，每原子梯度以 double `atomicAdd` 累加（原子對依 i 排序，每個 warp 先把同一 i 的貢獻以 shuffle 分段加總，每段只做一次 `atomicAdd`；j 端逐對 `atomicAdd`）；能量各項以 warp 內加總後再加總各 warp；每個兩面角的梯度由一個 warp 加總。精度分工同 12.1（float 版：座標與逐項計算為 float，加總為 double）。原子數與兩面角數不設上限。
+- **GPU 計算**（`GpuEnergy`）：一個樣本一個 thread block（256 執行緒；1.71 起每個 block 依序計算多個樣本，15.1.15）；座標放在 shared memory（放不下時放在 global memory），每原子梯度放在 global memory（sm_70 的 shared memory double atomic 為軟體模擬，較慢），依分量分開存放（1.68 起：所有座標的 x，再 y，再 z；15.1.13）；兩面角依序處理（每個兩面角由多個執行緒旋轉其移動原子；1.71 起條件成立時改用兩面角轉換，15.1.15）；原子對與閉合項分給各執行緒，每原子梯度以 double `atomicAdd` 累加（原子對依 i 排序，每個 warp 先把同一 i 的貢獻以 shuffle 分段加總，每段只做一次 `atomicAdd`；j 端逐對 `atomicAdd`）；能量各項以 warp 內加總後再加總各 warp；每個兩面角的梯度由一個 warp 加總。精度分工同 12.1（float 版：座標與逐項計算為 float，加總為 double）。原子數與兩面角數不設上限。
 - **與 CPU 版的差異來源**：加總順序（`atomicAdd` 的順序每次執行可能不同，因此 GPU 結果不保證每次逐位元相同）、FMA（nvcc 預設合併乘加）、CUDA 的 `sinf`／`cosf` 與 glibc 的捨入不同。關閉 FMA（`--fmad=false`）時差異大小不變，主要來源為 float 三角函數與加總順序。
 - **容許誤差**（測試 `gpu: energy and gradient match the CPU reference`；各 64 組兩面角：輸入值，以及加上寬度 5°、10°、…的均勻隨機擾動）：
   - 能量：各項與 CPU 的差 ÷ max(1, 各項絕對值和)；梯度：差 ÷ max(1, 最大梯度分量)；座標：最大差（Å）。
@@ -1946,6 +1946,46 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - **Nsight Compute**（A，一次 3 個樣本的 9b 呼叫）：269 µs；每執行緒 121 個暫存器；每排程器 2 個 active warp，每週期發出 0.24 個指令，每個指令平均 8.4 週期。延遲不算特別長，主要是每個樣本的指令數多（每執行緒約 66 個原子對）。
 - **9d**：StaM 構形的 shaking（`shakeLnF`，已用 OpenMP）每個約 0.125 s；重算迴圈逐一處理 topSampleSet 的樣本（每個樣本做 `complexSumLnF`）。時間隨 topSampleSet 中不同的 StaM 構形數增加，與取樣量無關。
 - **結論**：之前考慮的「整個最小化移到 GPU」（減少主機端往返）目前不是主要瓶頸，暫不進行。主要瓶頸是每個樣本的核心指令數（9a 的吞吐量與 9b 的延遲都受影響）與 9b 的小批次。
+
+### 15.1.15 CUDA 版：核心最佳化（三）（1.71）
+
+依 15.1.14 的結論，減少每個樣本的核心指令數（原子對）並把兩面角的處理平行化。只改 `src/gpu/energy_gpu.cu`；計算的能量函數不變。
+
+- **原子對**：
+  - 原子對改存為 `GpuPair`（i、j、旗標：參數種類 << 2 | 氫鍵 << 1 | 重原子）；每原子常數 `GpuAtom`（elecCoeff·q、q、desolvCoeff·S、V）與每種類參數 `GpuPairParams`（AC、BD、reqm、m、n）在建立時依 float／double 各準備一份。電荷乘積為 (elecCoeff·qᵢ)·qⱼ，溶劑化為 (desolvCoeff·Sᵢ)·Vⱼ + (desolvCoeff·Sⱼ)·Vᵢ。`EnergyModelView` 的 charge、sv、vol、pairParams、pairs 不再上傳。
+  - 每個函數只做一次倒數（`1/s`、`1/r`、`1/(r + 1.26366)`、溶劑化分母），其餘用乘法；m = 12、n = 6 或 10 的 vdW／氫鍵（全部的 AD4 參數）以展開的式子計算，其他 m、n 仍用 `ad4VdwHb`。
+  - 每個 warp 先讀下一輪的原子對（預取）。同一 warp 的 32 個原子對 i 都相同時，i 端以一般的 warp 加總代替分段加總。
+- **每個 block 計算多個樣本**：block 數 = min(樣本數, SM 數 × 每個 SM 的 block 數)，每個 block 依序計算 blockIdx.x、blockIdx.x + gridDim.x、… 的樣本；每原子梯度的暫存區（3 × 座標數個 double）改為每個 block 一份（原本每個樣本一份），重複使用時留在 L2。每個 SM 的 block 數：計算梯度時取「所有 block 的梯度暫存區放得進 L2」的數目，但至少 24 個 warp，且不超過 `cudaOccupancyMaxActiveBlocksPerMultiprocessor`；不計算梯度時取後者。
+- **兩面角轉換**（`TorsionData`）：
+  - 條件（建立時檢查，`planTorsions`）：每個兩面角的軸原子只被編號較小的兩面角移動（即依序處理時，軸在本兩面角之前不會再變）；每個座標被移動的兩面角集合恰為其中編號最大者（deep）沿 parent 往上的鏈，parent[t] 為移動 t 的移動原子且編號小於 t 的兩面角中最大者。條件不成立時沿用依序處理。目前所有測試系統都成立。
+  - 計算：A_t 為兩面角 t 繞其輸入軸（參考座標的軸原子）旋轉的剛體轉換；M_t = M_parent[t] ∘ A_t 以 pointer jumping 在 ⌈log₂ 最大深度⌉ 輪內求得（每輪每個兩面角一個執行緒，轉換組合一次）；座標 a 的結果為 M_deep[a](x_ref[a])。轉換存為 R（3 × 3）與 y：M_t(x) = y + R (x − o_t)，o_t 為兩面角 t 的輸入軸點，使運算都在軸點附近的局部向量上進行（float 時的捨入較小）。軸長為 0 的兩面角 A_t 為恆等轉換（與依序處理時不旋轉相同）。
+  - 工作記憶體：每個兩面角 2 組 × 12 個 T 與 2 組 parent 索引。放進 shared memory 不會減少每個 SM 的 block 數時放在 shared memory；只需一波 block（樣本數 ≤ SM 數 × 每個 SM 的 block 數）時否則放在 global memory（每個 block 一份）；需要多波時只在放進 shared memory 且每個 SM 使用的 shared memory 不超過一半（其餘保留為 L1）時使用，否則依序處理。核心以樣板參數分成兩個版本（兩面角轉換／依序處理）。`bytesPerSample` 加上工作記憶體。
+  - 嘗試過但未採用：只用 global memory 的工作記憶體時，大批次（2KJJ、4096 個樣本）因 L1 被擠掉而比依序處理慢。
+- **正確性**：
+  - `gpu: energy and gradient match the CPU reference`：每組兩面角重複 40 次（共 2,560 個樣本，多於同時駐留的 block，測試每個 block 計算多個樣本）。GPU double 與 CPU double 的差：1L2Y 3.5×10⁻¹³、2KJJ 9.2×10⁻¹⁴、1ZNF 4.5×10⁻¹⁴、1D3Z 3.7×10⁻¹²（能量）；GPU float 對 CPU double 的誤差：1L2Y 6.8×10⁻⁵（CPU float 1.5×10⁻⁴）、2KJJ 7.6×10⁻⁵（8.1×10⁻⁵）、1ZNF 6.2×10⁻⁵（8.3×10⁻⁵）、1D3Z 2.0×10⁻²（2.0×10⁻²）。
+  - `gpu: 9b pose energies and minimization match the CPU path`：GPU float 與 CPU float 的能量差由 5.0×10⁻⁵ 變為 1.4×10⁻⁴（兩者都是 float，捨入方式不同；梯度差 8×10⁻⁵–1.6×10⁻⁴，容許 10⁻³），能量容許值由 10⁻⁴ 改為 2×10⁻⁴。最小化結果與 CPU 相同的比例（1.70：62／68／64，1.71：64／66／66，共 128；CPU 對照 65／65／66）不變。
+  - 所有測試通過（動態、靜態、CUDA 建置）。
+- **速度**（`zbench: latency`，`tests/test_input.cpp`，預設略過，以 `--no-skip` 執行；一次呼叫的時間，含資料傳輸與梯度；TITAN V）：
+
+| 系統 | 精度 | n = 1：1.70 → 1.71 | n = 256 | n = 4096 |
+|---|---|---|---|---|
+| 1L2Y | double | 290 → 172 µs | 776 → 569 µs | 7.97 → 6.06 ms |
+| 2KJJ loop | double | 971 → 634 µs | 2.90 → 2.07 ms | 28.8 → 22.1 ms |
+| 1ZNF metal break | double | 433 → 269 µs | 1.14 → 0.83 ms | 12.4 → 8.9 ms |
+| 1D3Z | double | 2886 → 1683 µs | 7.78 → 5.93 ms | 108.3 → 77.7 ms |
+| 1L2Y | float | 228 → 143 µs | 626 → 353 µs | 5.55 → 4.47 ms |
+| 2KJJ loop | float | 753 → 527 µs | 2.35 → 1.92 ms | 22.0 → 20.3 ms |
+| 1ZNF metal break | float | 333 → 216 µs | 956 → 567 µs | 8.56 → 7.35 ms |
+| 1D3Z | float | 2182 → 1416 µs | 6.23 → 5.92 ms | 73.0 → 63.5 ms |
+
+- **整個執行**（15.1.14 的 A、B，各 3 次的平均，16 執行緒）：
+
+| 例子 | 9a：1.70 → 1.71 | 9b docking | 全部 |
+|---|---|---|---|
+| A | 18.3 → 14.9 s | 31.0 → 20.9 s | 65.3 → 51.8 s |
+| B | 3.76 → 2.97 s | 14.2 → 10.1 s | 23.7 → 18.5 s |
+
+- **結果的差異**：GPU float 的捨入改變後，9b 各樣本的最小化路徑不同，topSampleSet 隨之改變。B 以 `--seed=3` 時 1.71 的前 10 個平均能量較高（1.70：−44.1～−44.3，1.71：−43.5～−43.8，各 6 次）；但中間版本在同一 seed 下反而較低（−44.7～−45.2），同一程式的重複執行差異小、不同程式之間差異大，表示差異來自捨入造成的路徑改變，而非系統性的偏差。以 8 個 seed（11–18）比較 B 的前 10 個平均能量：1.71 較低 5 個、較高 3 個，平均差 +0.02 kcal/mol（1.71 − 1.70），無明顯差異。
 
 ### 15.2 依賴套件
 
@@ -2257,3 +2297,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.68 | 2026-10-19 | GPU 每原子梯度改為依分量存放，減少 L2 atomic 交易：9a 約快 21%、9b 約快 4%（15.1.13） |
 | 1.69 | 2026-10-19 | 記錄 1.68 之後 `gpu.conf9aPrecision` double／float 的對照量測與各階段時間；預設維持 `double`（15.1.13） |
 | 1.70 | 2026-10-19 | 記錄效能瓶頸量測：量測穩定度、9b 小批次與單一樣本延遲、每 block 執行緒數、Nsight Compute、9d（15.1.14） |
+| 1.71 | 2026-10-19 | GPU 核心最佳化（三）：原子對的資料與運算精簡、每個 block 計算多個樣本、兩面角轉換（pointer jumping）平行化；9a 約快 19%、9b 約快 30%（15.1.15） |

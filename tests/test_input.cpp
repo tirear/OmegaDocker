@@ -4431,18 +4431,21 @@ TEST_CASE("gpu: energy and gradient match the CPU reference") {
     std::vector<std::vector<od::Vec3>> xRef(kSets);
     for (int s = 0; s < kSets; ++s) ref[s] = c.sys->evaluate(sets[s], &gRef[s], &xRef[s]);
 
+    // The sets repeated kRep times: more samples than resident blocks (blocks evaluate several).
+    constexpr int kRep = 40, kAll = kSets * kRep;
     auto onGpu = [&]<class T>(T, EvalDiff& d, int& clashDiff) {
       std::vector<T> angles;
-      for (const auto& a : sets) angles.insert(angles.end(), a.begin(), a.end());
-      std::vector<od::FlatTerms> terms(kSets);
-      std::vector<double> grad(static_cast<std::size_t>(kSets) * nt);
-      std::vector<T> coords(static_cast<std::size_t>(kSets) * nc);
-      gpu.evaluate(angles.data(), kSets, terms.data(), grad.data(), coords.data());
-      for (int s = 0; s < kSets; ++s) {
+      for (int r = 0; r < kRep; ++r)
+        for (const auto& a : sets) angles.insert(angles.end(), a.begin(), a.end());
+      std::vector<od::FlatTerms> terms(kAll);
+      std::vector<double> grad(static_cast<std::size_t>(kAll) * nt);
+      std::vector<T> coords(static_cast<std::size_t>(kAll) * nc);
+      gpu.evaluate(angles.data(), kAll, terms.data(), grad.data(), coords.data());
+      for (int s = 0; s < kAll; ++s) {
         const T* x = coords.data() + static_cast<std::size_t>(s) * nc;
-        d.add(ref[s], gRef[s], xRef[s], termArray(terms[s]), grad.data() + static_cast<std::size_t>(s) * nt,
-              [&](std::size_t i, int k) { return static_cast<double>(x[3 * i + k]); });
-        clashDiff += ref[s].clashPairs != terms[s].clashPairs;
+        d.add(ref[s % kSets], gRef[s % kSets], xRef[s % kSets], termArray(terms[s]),
+              grad.data() + static_cast<std::size_t>(s) * nt, [&](std::size_t i, int k) { return static_cast<double>(x[3 * i + k]); });
+        clashDiff += ref[s % kSets].clashPairs != terms[s].clashPairs;
       }
     };
     EvalDiff gd, gf, cf;
@@ -4605,7 +4608,8 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
       for (std::size_t k = 0; k < ref.size(); ++k) worstG = std::max(worstG, std::abs(grad[i * (6 + nt) + k] - ref[k]) / gmax);
     }
     MESSAGE(std::format("{}: worst relative difference: energy {:.2e}, gradient {:.2e}", name, worstE, worstG));
-    CHECK(worstE < 1e-4);
+    // Both are single precision with different rounding (torsion transforms on the GPU, spec 15.1.15).
+    CHECK(worstE < 2e-4);
     CHECK(worstG < 1e-3);
     // Minimization: GPU energies against the CPU, with the CPU from starts shifted by 1e-5 Å as control.
     const int n = static_cast<int>(poses.size());
@@ -4805,5 +4809,47 @@ TEST_CASE("gpu: energy grids equal the CPU grids") {
       }
     }
   }
+}
+#endif
+
+#ifdef OD_HAVE_CUDA
+template <class T>
+static double zbenchRun(od::GpuEnergy& ev, const std::vector<T>& a, int n, std::vector<od::FlatTerms>& t,
+                        std::vector<double>& g, int reps) {
+  ev.evaluate(a.data(), n, t.data(), g.data(), static_cast<T*>(nullptr));
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int r = 0; r < reps; ++r) ev.evaluate(a.data(), n, t.data(), g.data(), static_cast<T*>(nullptr));
+  return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
+}
+template <class T>
+static void zbenchAll(const char* label) {
+  FlatFixture f;
+  const char* only = std::getenv("ZB_CASE");
+  const char* ns = std::getenv("ZB_N");
+  for (const auto& c : f.cases) {
+    if (only && c.name != only) continue;
+    const od::EnergySystem& sys = *c.sys;
+    const od::EnergyModel model = sys.model();
+    const int d = sys.torsionCount();
+    std::string line = std::format("{} {} (tors {}, pairs {}, coords {}):", label, c.name, d, model.pairs.size(), model.coordCount);
+    std::vector<int> nl{1, 32, 256, 4096};
+    if (ns) nl = {std::atoi(ns)};
+    for (int n : nl) {
+      std::vector<T> a;
+      for (int i = 0; i < n; ++i) {
+        const auto v = perturbed(sys.inputAngles(), 30, 900 + i);
+        a.insert(a.end(), v.begin(), v.end());
+      }
+      od::GpuEnergy ev(model, 0);
+      std::vector<od::FlatTerms> t(n);
+      std::vector<double> g(static_cast<std::size_t>(n) * d);
+      line += std::format("  n={} {:.0f} us", n, zbenchRun(ev, a, n, t, g, ns ? 3 : (n >= 4096 ? 10 : 200)));
+    }
+    MESSAGE(line);
+  }
+}
+TEST_CASE("zbench: latency" * doctest::skip()) {
+  zbenchAll<float>("float");
+  if (!std::getenv("ZB_FLOAT")) zbenchAll<double>("double");
 }
 #endif
