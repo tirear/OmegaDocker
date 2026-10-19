@@ -49,6 +49,7 @@
 #include "dock9b_gpu.hpp"
 #include "energy_gpu.hpp"
 #include "grid_gpu.hpp"
+#include "shake_gpu.hpp"
 #endif
 #include "symrmsd.hpp"
 #include "energy.hpp"
@@ -4293,6 +4294,42 @@ TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
   CHECK(cl.mobm == doctest::Approx(std::accumulate(full.begin() + static_cast<long>(stam.size()), full.end(), 0.0)).epsilon(1e-9));
   CHECK(od::minusTS(sumFull, sp) > 0);
   CHECK(od::minusTS(-1.0, sp) == doctest::Approx(od::kGasConstant * 298.15));
+#ifdef OD_HAVE_CUDA
+  // GPU shaking (spec 15.1.17): the CPU values within the summation differences.
+  if (od::gpuDeviceCount() > 0) {
+    for (double step : {0.4, 0.2}) {
+      od::ShakeParams g = sp;
+      g.step = step;
+      od::GpuShaker sh(ep, g, 0);
+      std::vector<od::Vec3f> near = mx;
+      for (auto& v : near) v[0] += 6;
+      const od::ShakeAtoms all = od::joinShakeAtoms(stam, od::shakeAtoms(*x.mobSys, x.mobParts, near));
+      std::vector<char> shake(all.size(), 1);
+      for (std::size_t a = 0; a < all.size(); a += 3) shake[a] = 0;
+      for (const auto& s : {std::vector<char>{}, shake}) {
+        const auto cpu = od::shakeLnF(all, ep, g, s);
+        const auto gpu = sh.lnF(all, s);
+        REQUIRE(gpu.size() == cpu.size());
+        double worst = 0, sumC = 0, sumG = 0;
+        for (std::size_t a = 0; a < cpu.size(); ++a) {
+          worst = std::max(worst, std::abs(cpu[a] - gpu[a]));
+          sumC += cpu[a];
+          sumG += gpu[a];
+          if (cpu[a] == 0) CHECK(gpu[a] == 0);
+        }
+        INFO("step ", step, " shake mask ", !s.empty());
+        MESSAGE(std::format("GPU shaking step {} mask {}: largest ln f difference {:.2e}, sum {:.6f} vs {:.6f}", step, !s.empty(), worst, sumG, sumC));
+        CHECK(worst < 1e-4);
+        CHECK(sumG == doctest::Approx(sumC).epsilon(1e-6));
+        const od::ComplexLnF lc = od::complexSumLnF(stam, alone, od::shakeAtoms(*x.mobSys, x.mobParts, near), ep, g);
+        const od::ComplexLnF lg = od::complexSumLnF(stam, alone, od::shakeAtoms(*x.mobSys, x.mobParts, near), ep, g,
+                                                    [&](const od::ShakeAtoms& a, std::span<const char> m) { return sh.lnF(a, m); });
+        CHECK(lg.stam == doctest::Approx(lc.stam).epsilon(1e-6));
+        CHECK(lg.mobm == doctest::Approx(lc.mobm).epsilon(1e-6));
+      }
+    }
+  }
+#endif
 }
 
 TEST_CASE("write_struct: PDB, mmCIF, SDF and mol2") {

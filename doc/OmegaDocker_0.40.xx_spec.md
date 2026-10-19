@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.74 |
+| 文件版本 | 1.75 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -2069,6 +2069,22 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - log：每輪寫出視窗結束的原因（`gpu.dock9bStamNum`、GPU 記憶體、主機記憶體、最後一個）、一個構形的主機與 GPU 記憶體；有視窗因記憶體結束時，另寫出一輪所有構形一個視窗所需的 `memory.hostLimit` ≈ (該輪 9b 開始時的常駐記憶體 + 構形數 × 一個構形) ÷ 0.9，與可用 GPU 記憶體 ≈ 2 × 構形數 × 一個構形，供 HPC 申請記憶體時參考。
   - 測試：`cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)`（命令列與 TOML 的整數或 `"auto"`、錯誤、`params.used.toml` 寫回）；`sysmem: cgroup memory limit, resident memory and MemAvailable`（以假的 `/proc`、cgroup 檔案測 cgroup v2、v1、無上限）。接續執行時可改變 `memory.hostLimit`（測試：上限 1500 MiB 跑 2 輪，以 auto 接續第 3 輪）。
 
+### 15.1.17 CUDA 版：9d 原子搖動（1.75）
+
+- **做法**（`src/gpu/shake_gpu.hpp`、`src/gpu/shake_gpu.cu`，`GpuShaker`）：`shakeLnF`（10.2）在 GPU 上計算。每個搖動的原子一個 block（256 執行緒），執行緒分攤球內各點（1.4 Å、0.2 Å 為 1,419 點，每個執行緒最多 16 點）；其他原子每 256 個一批放入 shared memory（距離 < 20.48 Å + 半徑、不在 3 個鍵內者，依原子順序），每個點對一批的能量以單精度累加、各批之間以雙精度累加；最小值與 Σ exp(−ΔE × `rrtScaling`) 以 warp shuffle 歸約。原子對的能量函數與 CPU 相同（`ad4_pair.hpp`，單精度）。
+- 使用：有 GPU（`gpu.enable`）且選用 `od_0100` 時，9d 的 StaM、MobM 單獨的 shaking 與 `complexSumLnF` 都用 `GpuShaker`（`ShakeFn`）；否則用 CPU。
+- 差異：與 CPU 的差別只在能量的加總順序。2KJJ + 1L2Y 測試（step 0.4、0.2，含部分原子不搖動）：每個原子 ln f 最大差 9.5 × 10⁻⁵，Σ ln f 的相對差 < 10⁻⁷。
+- 量測（A，TITAN V，16 執行緒）：
+
+| 項目 | CPU（OpenMP） | GPU |
+|---|---|---|
+| G_unbound（StaM 20 個候選） | 2.54 s | 0.08 s |
+| 重算 50 個樣本 | 8.1 s | 0.25 s |
+
+  - 單執行緒（B，`OMP_NUM_THREADS=1`）：G_unbound 21.1 s → 0.08 s，重算 12.1 s → 0.05 s。
+- **9a 的時間組成**（1.75 量測，A，SLURM `-c 1`，GPU 最小化）：9a 47.8 s 中，產生樣本（csgm1、RCD 閉合，CPU）44.4 s，GPU 最小化 2.9 s。9a 的時間隨 CPU 核心數下降（`-c 1`／`2`／`4`：47.8／33.5／18.6 s；16 執行緒 7.4 s），GPU 精度（`gpu.conf9aPrecision`）沒有影響（float 48.2 s）。有閉合的分子，9a 的瓶頸是 CPU 上的閉合，不是 GPU。
+- 測試：`score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)` 加入 GPU 與 CPU 的比較（`shakeLnF`、`complexSumLnF`）。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2383,3 +2399,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.72 | 2026-10-20 | 9b 多個 StaM 構形一起最小化：新增 `gpu.dock9bStamNum`（預設 16）、`GpuField` 同時存放多個場、`dockPairs` 的 `PairGroup` 版、多場核心；A 的 9b 約快 3.5 倍、B 約快 1.4 倍（15.1.16） |
 | 1.73 | 2026-10-20 | `gpu.dock9bStamNum` 預設改為 `auto`；新增 `memory.hostLimit`（預設 auto：cgroup 上限），9b 視窗受主機記憶體 90% 限制；log 寫出每個構形的記憶體與一個視窗所需的記憶體（13、15.1.16） |
 | 1.74 | 2026-10-21 | `gpu.dock9bStamNum = auto` 改依姿勢數（48 × GPU 同時計算的姿勢數）決定視窗，構形加入視窗時先做快速篩選（15.1.16）；9a 最小化前的閉合檢查 `conf9a.preCloseFactor`，與 9a 大量樣本 E ≥ `E_max` 的原因分析（7.9） |
+| 1.75 | 2026-10-21 | 9d 原子搖動在 GPU 上計算（`GpuShaker`）：A 的 G_unbound 2.54 → 0.08 s、重算 8.1 → 0.25 s；9a 時間組成的量測（產生樣本與 RCD 閉合為 CPU 瓶頸）（15.1.17） |

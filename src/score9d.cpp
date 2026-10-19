@@ -75,7 +75,7 @@ InterTerms exactInter(const ShakeAtoms& stam, const ShakeAtoms& mob, const Energ
 }
 
 ComplexLnF complexSumLnF(const ShakeAtoms& stam, std::span<const double> stamAlone, const ShakeAtoms& mob,
-                         const EnergyParams& ep, const ShakeParams& p) {
+                         const EnergyParams& ep, const ShakeParams& p, const ShakeFn& fn) {
   const ShakeAtoms all = joinShakeAtoms(stam, mob);
   const double reach = kElecCutoff + p.radius;
   std::vector<char> shake(all.size(), 1);
@@ -93,7 +93,7 @@ ComplexLnF complexSumLnF(const ShakeAtoms& stam, std::span<const double> stamAlo
       out.stam += stamAlone[j];
     }
   }
-  const auto l = shakeLnF(all, ep, p, shake);
+  const auto l = fn ? fn(all, shake) : shakeLnF(all, ep, p, shake);
   out.stam += std::accumulate(l.begin(), l.begin() + static_cast<long>(stam.size()), 0.0);
   out.mobm += std::accumulate(l.begin() + static_cast<long>(stam.size()), l.end(), 0.0);
   return out;

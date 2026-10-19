@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -46,6 +47,9 @@ std::vector<Vec3f> shakePoints(double radius, double step);
 // with shake[i] == 0 when shake is not empty).
 std::vector<double> shakeLnF(const ShakeAtoms& atoms, const EnergyParams& ep, const ShakeParams& p,
                              std::span<const char> shake = {});
+
+// shakeLnF(atoms, ep, p, shake) of a back end (e.g. GpuShaker); empty: shakeLnF on the CPU.
+using ShakeFn = std::function<std::vector<double>(const ShakeAtoms& atoms, std::span<const char> shake)>;
 
 constexpr double kGasConstant = 1.987204259e-3;  // kcal/(mol K)
 inline double minusTS(double sumLnF, const ShakeParams& p) { return -kGasConstant * p.temperature * sumLnF; }

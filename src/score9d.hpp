@@ -33,7 +33,7 @@ struct ComplexLnF {
   double stam = 0, mobm = 0;
 };
 ComplexLnF complexSumLnF(const ShakeAtoms& stam, std::span<const double> stamAlone, const ShakeAtoms& mob,
-                     const EnergyParams& ep, const ShakeParams& p);
+                         const EnergyParams& ep, const ShakeParams& p, const ShakeFn& fn = {});
 
 constexpr double kAdgpuTorsionCoeff = 0.2983;  // AutoDock4.2 torsional free energy per torsion (kcal/mol)
 

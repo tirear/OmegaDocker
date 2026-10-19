@@ -128,7 +128,7 @@ if(OD_CUDA)
   find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  add_library(od_gpu STATIC src/gpu/energy_gpu.cu src/gpu/prep_gpu.cu src/gpu/grid_gpu.cu)
+  add_library(od_gpu STATIC src/gpu/energy_gpu.cu src/gpu/prep_gpu.cu src/gpu/grid_gpu.cu src/gpu/shake_gpu.cu)
   # The quick filter and the energy grids follow the CPU operations exactly (spec 15.1.5, 15.1.10).
   set_source_files_properties(src/gpu/prep_gpu.cu src/gpu/grid_gpu.cu PROPERTIES COMPILE_OPTIONS "-fmad=false")
   target_include_directories(od_gpu PUBLIC src src/gpu)

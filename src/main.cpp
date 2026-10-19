@@ -50,6 +50,7 @@
 #include "conf9a_gpu.hpp"
 #include "dock9b_gpu.hpp"
 #include "grid_gpu.hpp"
+#include "shake_gpu.hpp"
 #endif
 
 namespace {
@@ -619,13 +620,25 @@ double dot4(const Terms4& c, const Terms4& e) {
 }
 
 void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const std::vector<MobState>& ms,
-           const od::Options& opt, const od::FeParams& fp, float shift) {
+           const od::Options& opt, const od::FeParams& fp, float shift, bool gpu) {
   const od::EnergyParams ep = energyParams(opt);
   od::ShakeParams sp;
   sp.radius = fp.shakingRadius;
   sp.step = fp.shakingStep;
   sp.temperature = fp.temperature;
   sp.rrtScaling = fp.rrtScaling;
+  // Atom shaking of od_0100 on the GPU (spec 15.1.17).
+  od::ShakeFn shakeFn;
+#ifdef OD_HAVE_CUDA
+  std::shared_ptr<od::GpuShaker> gpuShaker;
+  if (gpu && opt.feOd0100) {
+    gpuShaker = std::make_shared<od::GpuShaker>(ep, sp, opt.gpuDevice);
+    shakeFn = [gpuShaker](const od::ShakeAtoms& a, std::span<const char> s) { return gpuShaker->lnF(a, s); };
+  }
+#else
+  (void)gpu;
+#endif
+  const auto lnF = [&](const od::ShakeAtoms& a) { return shakeFn ? shakeFn(a, {}) : od::shakeLnF(a, ep, sp); };
   const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
 
   // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.
@@ -642,7 +655,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     a.atoms = od::shakeAtoms(set.sys(), set.parts(), a.x);
     a.terms = set.sys().evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr);
     if (shake) {
-      a.lnF = od::shakeLnF(a.atoms, ep, sp);
+      a.lnF = lnF(a.atoms);
       a.sumLnF = std::accumulate(a.lnF.begin(), a.lnF.end(), 0.0);
     }
     return a;
@@ -718,7 +731,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       w.e9bGrid = r.rank() + shift;
       w.dgAd = w.inter + od::kAdgpuTorsionCoeff * nTors;
       if (opt.feOd0100) {
-        const od::ComplexLnF l = od::complexSumLnF(st.atoms, st.lnF, mobAtoms, ep, sp);
+        const od::ComplexLnF l = od::complexSumLnF(st.atoms, st.lnF, mobAtoms, ep, sp, shakeFn);
         w.mtsStam = od::minusTS(l.stam, sp);
         w.mtsMobm = od::minusTS(l.mobm, sp);
         w.inter4 = terms4(it);
@@ -1480,7 +1493,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count()));
   }
   const float shift = stamSet.movable() && std::isfinite(stamRef) ? stamRef - stamSet.minEnergy() : 0.0f;
-  run9d(stamSet, mobSets, ms, opt, fp, shift);
+  run9d(stamSet, mobSets, ms, opt, fp, shift, gpu);
   od::logInfo("Final topSampleSet:");
   for (std::size_t i = 0; i < ms.size(); ++i) {
     od::logInfo(std::format("  {:<40} {} sample(s)", mobSets[i]->name(), ms[i].top.size()));
