@@ -67,12 +67,11 @@ OD_HD inline bool probeTerm(const DockView& d, const FieldView& f, int k, const 
   }
   if (!in) return false;
   const float q = static_cast<float>(pr.charge);
-  float g[3] = {0, 0, 0}, dg[3] = {0, 0, 0};
-  inter += field::energy<float>(f, pr.map, q, w, gw ? g : nullptr);
+  float g[3] = {0, 0, 0}, dg[3] = {0, 0, 0}, dd = 0;
+  inter += field::energyDistance<float>(f, pr.map, q, w, gw ? g : nullptr, pr.heavy ? &dd : nullptr, gw ? dg : nullptr);
   if (pr.heavy) {
     const float cd = static_cast<float>(d.clashDistance), base = static_cast<float>(d.clashBase),
                 kk = static_cast<float>(d.clashK);
-    const float dd = field::distance<float>(f, w, gw ? dg : nullptr);
     if (dd < cd) {
       interClash += base + kk * (cd - dd) * (cd - dd);
       for (int i = 0; i < 3; ++i) g[i] += -2 * kk * (cd - dd) * dg[i];

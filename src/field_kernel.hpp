@@ -145,6 +145,54 @@ OD_HD inline T interpolate(const FieldView& f, int m, const T p[3], T* grad) {
   return lerp(c0, c1, fz);
 }
 
+// interpolate for the maps maps[0..count) at the same point: the cell and the corner addresses are
+// found once (the values and gradients are those of interpolate). grad (optional): count × 3.
+template <class T>
+OD_HD inline void interpolateMaps(const FieldView& f, const int* maps, int count, const T p[3], T* val, T* grad) {
+  using std::floor;
+  const T spacing = static_cast<T>(f.spacing);
+  int i0[3];
+  T fr[3];
+  for (int c = 0; c < 3; ++c) {
+    const T u = (p[c] - static_cast<T>(f.origin[c])) / spacing;
+    int i = static_cast<int>(floor(u));
+    i = i < 0 ? 0 : i > f.n[c] - 2 ? f.n[c] - 2 : i;
+    i0[c] = i;
+    fr[c] = u - i;
+  }
+  // Corner c = 4z + 2y + x: point index, or with delta blocks the block (−1: reference map) and the
+  // offset in the block.
+  constexpr int B = 8;  // kDeltaBlock
+  constexpr std::size_t bs = static_cast<std::size_t>(B) * B * B;
+  std::size_t at[8];
+  int blk[8];
+  for (int c = 0; c < 8; ++c) {
+    const int i = i0[0] + (c & 1), j = i0[1] + (c >> 1 & 1), k = i0[2] + (c >> 2);
+    blk[c] = f.mode == 2 ? f.block[(static_cast<std::size_t>(k / B) * f.nb[1] + j / B) * f.nb[0] + i / B] : -1;
+    at[c] = blk[c] < 0 ? pointIndex(f, i, j, k)
+                       : static_cast<std::size_t>(blk[c]) * f.mapCount * bs + ((k % B) * B + j % B) * B + i % B;
+  }
+  const T fx = fr[0], fy = fr[1], fz = fr[2];
+  auto lerp = [](T a, T b, T t) { return a + (b - a) * t; };
+  for (int q = 0; q < count; ++q) {
+    const int m = maps[q];
+    T v[2][2][2];
+    for (int c = 0; c < 8; ++c)
+      v[c >> 2][c >> 1 & 1][c & 1] = blk[c] < 0 ? f.maps[m][at[c]] : f.data[at[c] + static_cast<std::size_t>(m) * bs];
+    const T c00 = lerp(v[0][0][0], v[0][0][1], fx), c10 = lerp(v[0][1][0], v[0][1][1], fx);
+    const T c01 = lerp(v[1][0][0], v[1][0][1], fx), c11 = lerp(v[1][1][0], v[1][1][1], fx);
+    const T c0 = lerp(c00, c10, fy), c1 = lerp(c01, c11, fy);
+    if (grad) {
+      const T dx0 = lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], fy);
+      const T dx1 = lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], fy);
+      grad[3 * q] = lerp(dx0, dx1, fz) / spacing;
+      grad[3 * q + 1] = lerp(c10 - c00, c11 - c01, fz) / spacing;
+      grad[3 * q + 2] = (c1 - c0) / spacing;
+    }
+    val[q] = lerp(c0, c1, fz);
+  }
+}
+
 // Calls fn(atom) for every atom of the cells overlapping the cube p ± r (detail::CellList::forNear).
 template <class F>
 OD_HD inline void forNear(const FieldCells& c, const double p[3], double r, F&& fn) {
@@ -222,12 +270,44 @@ OD_HD inline T energy(const FieldView& f, int m, T q, const T p[3], T* grad) {
   return static_cast<T>(grid + movedSum(f, m, q, p, grad));
 }
 
+// flexres part of distance: d, the map value, or the distance to the nearest moved StaM heavy atom
+// when closer.
+template <class T>
+OD_HD inline T movedNearest(const FieldView& f, const T p[3], T d, T* grad);
+
 // Distance to the nearest StaM heavy atom (at most the cap); grad: dd/dp.
 template <class T>
 OD_HD inline T distance(const FieldView& f, const T p[3], T* grad) {
-  using std::sqrt;
-  T d = interpolate(f, f.typeMapCount + 2, p, grad);
+  const T d = interpolate(f, f.typeMapCount + 2, p, grad);
   if (f.mode != 1 || f.movedHeavyCount == 0) return d;
+  return movedNearest(f, p, d, grad);
+}
+
+// energy (map m, charge q) and, with dist, distance at p, the maps interpolated together
+// (interpolateMaps; the same values as energy and distance).
+template <class T>
+OD_HD inline T energyDistance(const FieldView& f, int m, T q, const T p[3], T* grad, T* dist, T* dgrad) {
+  using std::abs;
+  const int nt = f.typeMapCount;
+  const int maps[4] = {m, nt, nt + 1, nt + 2};
+  T val[4], g[12];
+  interpolateMaps(f, maps, dist ? 4 : 3, p, val, grad ? g : nullptr);
+  const T aq = abs(q);
+  const T grid = val[0] + q * val[1] + aq * val[2];
+  if (grad)
+    for (int i = 0; i < 3; ++i) grad[i] = g[i] + q * g[3 + i] + aq * g[6 + i];
+  if (dist) {
+    if (dgrad)
+      for (int i = 0; i < 3; ++i) dgrad[i] = g[9 + i];
+    *dist = f.mode != 1 || f.movedHeavyCount == 0 ? val[3] : movedNearest(f, p, val[3], dgrad);
+  }
+  if (f.mode != 1 || f.movedCount == 0) return grid;
+  return static_cast<T>(grid + movedSum(f, m, q, p, grad));
+}
+
+template <class T>
+OD_HD inline T movedNearest(const FieldView& f, const T p[3], T d, T* grad) {
+  using std::sqrt;
   int best = -1;
   T best2 = d * d;
   const double pd[3] = {static_cast<double>(p[0]), static_cast<double>(p[1]), static_cast<double>(p[2])};

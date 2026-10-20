@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.84 |
+| 文件版本 | 1.85 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -2282,6 +2282,19 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - **需要更多案例測試**（17.3）：不同大小的 MobM（小分子到較長的寡肽）、不同盒子大小、多輪執行，並以有實驗結構的複合物比較與實驗結構的 RMSD。
 - 測試：`dock9b: posm2_fft` 加入 stride 2（格點幾何、FFT 能量與粗格點上直接三線性加總的差 < 10⁻⁴、平移在粗格點上、stride 0 報錯）；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 stride 2 的多組頻譜；`cli` 加入 `dock9b.fftStride` 的預設與範圍。
 
+### 15.1.24 CUDA 版：單精度原子對分塊與探針格點內插（1.85）
+
+- 單精度原子對分塊（`PairData`，`src/gpu/energy_gpu.cu`）：原子對分成 32 × 32 原子的區塊。每個區塊有 tileI、tileJ 各 32 個原子；第 s 步時 lane l 處理 tileI[l] 與 tileJ[(l + s) mod 32] 的原子對，旗標存在 slots（`GpuPair::tf`；`kSwap` 表示 i 為 tileJ 的原子；−1 為沒有原子對）。lane 在暫存器中累加自己 tileI 原子的梯度與正在處理的 tileJ 原子梯度，後者每步以 warp shuffle 傳給 lane l − 1；每個 warp 的區塊範圍結束時，各 lane 只做一次 double 原子加法。一個 block 的各 warp 平均分配所有區塊的步數；下一步的旗標與 tileJ 原子索引預先載入。
+- 只用在 float 且樣本數多於多處理器數時（`PairData::tiled`）；樣本少時延遲為主，維持原本依 i 排序、分段 shuffle 加總的路徑。double 不變。
+- 9b 探針原子：能量的三個圖（原子型別、靜電、去溶劑化）與重原子的距離圖在同一點內插（`field::interpolateMaps`、`field::energyDistance`），格點位置與 8 個角落的位址（delta 區塊或參考圖）只算一次；數值與 `field::interpolate` 逐位元相同。能量項先在 warp 內加總、再處理探針原子，減少探針部分同時存活的暫存器（9b 核心 128 → 116 個暫存器）。
+- 量測（TITAN V，重新開機後、桌面有 Chrome 使用約 1.4 核心與顯示使用 GPU 約 22%；與 1.84 的同一份程式在同一時段比較）：
+  - `zbench` 核心時間（每批 µs，float，n = 256／4096）：1L2Y 407／4767 → 274／3359；2KJJ loop 2055／24682 → 1575／16712；1ZNF metal break 608／8871 → 447／5788；1D3Z 6853／78017 → 4890／53391（n = 4096 快 1.42–1.53 倍）。n = 1、32 差異在 10% 以內；double 不變。
+  - RB4（2KJJ StaM、1L2Y MobM），14 執行緒的 9b 對接：posm1（`posm1SampleNum` 100000）10.52／9.91 → 10.08／8.49 s（兩次）；posm3（`rotStep` 15）300.8 → 283.7 s。
+  - posm1 在新版 4 次執行（14、16 執行緒各 2 次）的結果完全相同，1.84 的 4 次執行結果各不相同；這只是觀察，梯度仍使用 double 原子加法，不保證可重現（15.1.3）。posm3 新版兩次執行的結果仍不同。
+- 嘗試後未採用：flexres 配對加總不內聯、flexres 與其他格點模式分成不同核心（暫存器未減少）；`__launch_bounds__` 要求每個多處理器兩個 block（暫存器 80，但溢出到 local memory，9b 未變快）；三個圖以不展開的迴圈內插（溢出增加）；分塊迴圈預先載入下一個 tileJ 原子的座標與常數（9b 核心 9.4 → 18.2 s）。
+- 執行緒超額：16 執行緒（等於邏輯 CPU 數）時，其他程式佔用 CPU 會使 9b 大幅變慢：X server 佔用約 1 核心時 posm1 約 300 s（14 執行緒 8 s），只有 Chrome 時約 38–43 s（14 執行緒 8.5–10.5 s）；新舊版相同。`OMP_WAIT_POLICY=passive` 時 16 執行緒為 8.3 s，原因是閒置的 OpenMP 執行緒忙等，搶走實際工作的執行緒的 CPU 時間。後續方向：盡可能減少 9b 對 CPU 的依賴（17.1）。
+- 測試：既有的 `gpu:` 測試（float 與 CPU 參考值比較）涵蓋分塊路徑（樣本數多於多處理器數）與探針內插；CPU 與 CUDA 建置全部通過。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2500,6 +2513,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | od_0100：球形搖動格點（半徑 1.4 Å、步長 0.2 Å，與網格間距無關）、Boltzmann 權重（捨棄 `wellDepth` 線性權重）、可佔據比例 f_i、−TS = −RT × Σ ln f_i；鍵結不列入；未結合狀態取 9a 構型樣本中的最低自由能（10.2） |
 | — | od_0100 係數拆分為 c0、c_tors、a_t（分子間 4 項）、b_t（分子內 4 項）、s_StaM、s_MobM，以 TOML 參數檔 `--feParamFile` 設定，取代 `--enthalpyScaling`、`--entropyScaling`；預設值未校準，CUDA 與 OpenCL 版完成後以標準資料最佳化；方法名稱維持 `od_0100`（10.2） |
 | — | 執行參數放入參數檔 `--paramFile`（TOML，與分子設定檔分開），命令列 `--<表>_<鍵>=<值>` 覆寫；舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；搖動權重 w_k = exp(−ΔE_k × `rrtScaling`)，預設暫定 4，不依 `temperature`；擬合時 `temperature` 固定 298.15 K（14.1、10.2） |
+| — | 效能最佳化的方向：盡可能減少對 CPU 的依賴（工作移到 GPU、CPU 不忙等），避免 CPU 被其他程式佔用時大幅變慢（15.1.24） |
 
 ### 17.2 待確認
 - （無）
@@ -2648,3 +2662,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.82 | 2026-10-21 | posm2_fft：一次處理多個 StaM 構型（最多 16 個），MobM 探針頻譜每個（MobM 構型、定向）只算一次；`MobmDocker::conformations`、`fftProbeSpectra`／`fftCombine`、`GpuDockPrep` 多組頻譜與 `macMultiKernel`；40 Å、12 個 StaM 構形 173 → 38 s，CPU 版輸出逐位元不變；修正 posm3 視窗重新配置時 StaM 區域指標失效（8.4.3、15.1.22） |
 | 1.83 | 2026-10-21 | 新增 `dock9b.fftStride`（預設 1）：posm2_fft 的 FFT 使用每隔 n 個格點；量測 stride 1–3 的時間與結果（1L2Y、BTN）（8.4.3、14、15.1.23） |
 | 1.84 | 2026-10-21 | 新增 17.3：需要更多案例測試的參數（未校準、只有少數案例的測試、尚未測試三類）；`dock9b.fftStride` 標註需要更多案例（15.1.23） |
+| 1.85 | 2026-10-21 | 單精度原子對 32 × 32 分塊（樣本數多於多處理器數時）、9b 探針原子的格點同點內插、能量項先加總；float 核心 n = 4096 快 1.42–1.53 倍，RB4 posm1 9b 約 −8%、posm3 −5.7%；記錄 16 執行緒超額時的變慢與 `OMP_WAIT_POLICY=passive` 的量測（15.1.24、17.1） |

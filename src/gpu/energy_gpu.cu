@@ -62,11 +62,13 @@ __device__ inline double warpMax(double v) {
   return v;
 }
 
-// Pair data of the kernel: pairs in the order of EnergyModel::pairs (tf: type << 2 | hbond << 1 |
-// heavy), per-atom constants in T.
+// Pair data of the kernel: pairs (tf: type << 2 | hbond << 1 | heavy), per-atom constants in T.
 struct GpuPair {
   int i, j, tf;
 };
+inline int pairFlags(const EnergyModel& m, const FlatPair& pr) {
+  return pr.type << 2 | (m.pairParams[pr.type].n == 10 ? 2 : 0) | (pr.heavy ? 1 : 0);
+}
 template <class T>
 struct GpuAtom {
   T cq, q, sv, vol;  // elecCoeff·q, q, desolvCoeff·S, V
@@ -76,12 +78,21 @@ struct GpuPairParams {
   T AC, BD, reqm;
   int m, n;
 };
+// Pairs in tiles of 32 × 32 atoms (spec 15.1.24). Tile t: atoms tileI[32t + l] and tileJ[32t + l]
+// (−1: none); at step s, lane l takes atom tileI[32t + l] with tileJ[32t + (l + s) % 32], flags
+// slots[1024t + 32s + l] (GpuPair::tf, | kSwap: i is the tileJ atom; −1: no pair). The steps of
+// tile t are tileS0[t] … tileS0[t] + tileOff[t + 1] − tileOff[t] − 1; the warps of a block take
+// equal ranges of the tileOff[tiles] steps of all tiles.
+// pairs: in EnergyModel order (count), used for double and, with tiled 0, for float.
+constexpr int kSwap = 1 << 30;
 template <class T>
 struct PairData {
-  const GpuPair* pairs;
   const GpuAtom<T>* atoms;
   const GpuPairParams<T>* params;
-  int count;
+  const int *tileI, *tileJ, *tileS0, *tileOff, *slots;
+  int tiles;
+  const GpuPair* pairs;
+  int count, tiled;
 };
 
 // One atom pair (the terms of flat::pairTerm with one reciprocal per function instead of
@@ -323,41 +334,95 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, PairData
 
     double e[5] = {0, 0, 0, 0, 0};
     int clashPairs = 0;
-    // Warp w takes pairs base + lane. The pairs are sorted by i: the i contributions of a warp are
-    // summed in T per i (segmented shuffle sum; one plain sum when all pairs share i) and added
-    // once by the first lane of each segment. The pair of the next iteration is loaded ahead.
-    GpuPair next{-1, 0, 0};
-    if (warp * 32 + lane < pd.count) next = pd.pairs[warp * 32 + lane];
-    for (int base = warp * 32; base < pd.count; base += kThreads) {
-      const int p = base + lane;
-      const GpuPair pr = next;
-      if (p + kThreads < pd.count) next = pd.pairs[p + kThreads];
-      T d[3], f;
-      const bool ok = p < pd.count && pairTermGpu(m, pr, pd, x, e, clashPairs, d, f);
-      if (!g) continue;
-      T v[3] = {0, 0, 0};
-      const int key = pr.i;
-      if (ok && f != 0)
-        for (int c = 0; c < 3; ++c) {
-          v[c] = f * d[c];
-          atomicAdd(g + c * cc + pr.j, -static_cast<double>(v[c]));
-        }
-      const int prev = __shfl_up_sync(0xffffffffu, key, 1);
-      const unsigned heads = __ballot_sync(0xffffffffu, lane == 0 || prev != key);
-      if (heads == 1u) {
-        for (int o = 16; o > 0; o /= 2)
-          for (int c = 0; c < 3; ++c) v[c] += __shfl_down_sync(0xffffffffu, v[c], o);
-      } else {
-        for (int o = 1; o < 32; o *= 2) {
-          const int k = __shfl_down_sync(0xffffffffu, key, o);
-          T nv[3];
-          for (int c = 0; c < 3; ++c) nv[c] = __shfl_down_sync(0xffffffffu, v[c], o);
-          if (lane + o < 32 && k == key)
-            for (int c = 0; c < 3; ++c) v[c] += nv[c];
-        }
+    // Pair tiles (PairData): lane l keeps the gradient of its tileI atom and of the tileJ atom it
+    // takes; the latter passes to lane l − 1 after each step. Both are summed in T and added once
+    // per tile range of the warp.
+    bool tiled = false;
+    if constexpr (std::is_same_v<T, float>) tiled = pd.tiled;
+    if (tiled) {
+      const int steps = pd.tileOff[pd.tiles];
+      int sb = static_cast<int>(static_cast<long long>(steps) * warp / kWarps);
+      const int se = static_cast<int>(static_cast<long long>(steps) * (warp + 1) / kWarps);
+      int tl = 0, th = pd.tiles;
+      while (th - tl > 1) {
+        const int mid = (tl + th) / 2;
+        if (pd.tileOff[mid] <= sb) tl = mid; else th = mid;
       }
-      if (key >= 0 && (heads >> lane & 1u) && (v[0] != 0 || v[1] != 0 || v[2] != 0))
-        for (int c = 0; c < 3; ++c) atomicAdd(g + c * cc + key, static_cast<double>(v[c]));
+      for (int tt = tl; sb < se; ++tt) {
+        const int te = min(se, pd.tileOff[tt + 1]);
+        const int s0 = pd.tileS0[tt] + (sb - pd.tileOff[tt]), s1 = s0 + (te - sb);
+        sb = te;
+        const int ia = pd.tileI[32 * tt + lane], jr = pd.tileJ[32 * tt + lane];
+        const int* sl = pd.slots + 1024 * static_cast<std::size_t>(tt) + lane;
+        T gi[3] = {0, 0, 0}, gj[3] = {0, 0, 0};
+        int tfNext = sl[32 * s0], jaNext = __shfl_sync(0xffffffffu, jr, (lane + s0) & 31);
+        for (int s = s0; s < s1; ++s) {
+          const int tf = tfNext, ja = jaNext;
+          if (s + 1 < s1) tfNext = sl[32 * (s + 1)];
+          jaNext = __shfl_sync(0xffffffffu, jr, (lane + s + 1) & 31);
+          if (tf >= 0) {
+            const bool sw = tf & kSwap;
+            const GpuPair pr = sw ? GpuPair{ja, ia, tf & ~kSwap} : GpuPair{ia, ja, tf};
+            T d[3], f;
+            if (pairTermGpu(m, pr, pd, x, e, clashPairs, d, f) && g && f != 0)
+              for (int c = 0; c < 3; ++c) {
+                const T v = f * d[c];
+                if (sw) {
+                  gj[c] += v;
+                  gi[c] -= v;
+                } else {
+                  gi[c] += v;
+                  gj[c] -= v;
+                }
+              }
+          }
+          if (g && s + 1 < s1)
+            for (int c = 0; c < 3; ++c) gj[c] = __shfl_sync(0xffffffffu, gj[c], (lane + 1) & 31);
+        }
+        if (!g) continue;
+        const int jl = __shfl_sync(0xffffffffu, jr, (lane + s1 - 1) & 31);
+        if (ia >= 0 && (gi[0] != 0 || gi[1] != 0 || gi[2] != 0))
+          for (int c = 0; c < 3; ++c) atomicAdd(g + c * cc + ia, static_cast<double>(gi[c]));
+        if (jl >= 0 && (gj[0] != 0 || gj[1] != 0 || gj[2] != 0))
+          for (int c = 0; c < 3; ++c) atomicAdd(g + c * cc + jl, static_cast<double>(gj[c]));
+      }
+    } else {
+      // Warp w takes pairs base + lane. The pairs are sorted by i: the i contributions of a warp are
+      // summed in T per i (segmented shuffle sum; one plain sum when all pairs share i) and added
+      // once by the first lane of each segment. The pair of the next iteration is loaded ahead.
+      GpuPair next{-1, 0, 0};
+      if (warp * 32 + lane < pd.count) next = pd.pairs[warp * 32 + lane];
+      for (int base = warp * 32; base < pd.count; base += kThreads) {
+        const int p = base + lane;
+        const GpuPair pr = next;
+        if (p + kThreads < pd.count) next = pd.pairs[p + kThreads];
+        T d[3], f;
+        const bool ok = p < pd.count && pairTermGpu(m, pr, pd, x, e, clashPairs, d, f);
+        if (!g) continue;
+        T v[3] = {0, 0, 0};
+        const int key = pr.i;
+        if (ok && f != 0)
+          for (int c = 0; c < 3; ++c) {
+            v[c] = f * d[c];
+            atomicAdd(g + c * cc + pr.j, -static_cast<double>(v[c]));
+          }
+        const int prev = __shfl_up_sync(0xffffffffu, key, 1);
+        const unsigned heads = __ballot_sync(0xffffffffu, lane == 0 || prev != key);
+        if (heads == 1u) {
+          for (int o = 16; o > 0; o /= 2)
+            for (int c = 0; c < 3; ++c) v[c] += __shfl_down_sync(0xffffffffu, v[c], o);
+        } else {
+          for (int o = 1; o < 32; o *= 2) {
+            const int k = __shfl_down_sync(0xffffffffu, key, o);
+            T nv[3];
+            for (int c = 0; c < 3; ++c) nv[c] = __shfl_down_sync(0xffffffffu, v[c], o);
+            if (lane + o < 32 && k == key)
+              for (int c = 0; c < 3; ++c) v[c] += nv[c];
+          }
+        }
+        if (key >= 0 && (heads >> lane & 1u) && (v[0] != 0 || v[1] != 0 || v[2] != 0))
+          for (int c = 0; c < 3; ++c) atomicAdd(g + c * cc + key, static_cast<double>(v[c]));
+      }
     }
     double closure = 0, maxDev = 0;
     for (int c = tid; c < m.closureCount; c += kThreads) {
@@ -373,20 +438,28 @@ __global__ void __launch_bounds__(NT) evaluateKernel(EnergyModelView m, PairData
     }
 
     constexpr int kVals = Dock ? 17 : 8;
-    double v[kVals] = {e[0], e[1], e[2], e[3], e[4], closure, maxDev, static_cast<double>(clashPairs)};
+    __shared__ double red[kWarps][kVals];
+    {
+      // Warp sums of the energy terms before the probe atoms (fewer registers there).
+      double v[8] = {e[0], e[1], e[2], e[3], e[4], closure, maxDev, static_cast<double>(clashPairs)};
+      for (int k = 0; k < 8; ++k) {
+        v[k] = k == 6 ? warpMax(v[k]) : warpSum(v[k]);
+        if (lane == 0) red[warp][k] = v[k];
+      }
+    }
     if constexpr (Dock) {
       // 8: inter, 9: interClash, 10: outside, 11–13: translation, 14–16: rotation gradient.
+      double v[kVals] = {};
       const DockPose ps = poses[s];
       // The field of this sample (spec 15.1.16): the kernel parameter, or of DockView::fields.
       if constexpr (Dock == 2)
         probeTerms<kThreads>(dv, dv.fields[ps.field], x, ps, g, cc, v);
       else
         probeTerms<kThreads>(dv, dv.field, x, ps, g, cc, v);
-    }
-    __shared__ double red[kWarps][kVals];
-    for (int k = 0; k < kVals; ++k) {
-      v[k] = k == 6 ? warpMax(v[k]) : warpSum(v[k]);
-      if (lane == 0) red[warp][k] = v[k];
+      for (int k = 8; k < kVals; ++k) {
+        v[k] = warpSum(v[k]);
+        if (lane == 0) red[warp][k] = v[k];
+      }
     }
     __syncthreads();
     if (tid == 0) {
@@ -758,7 +831,10 @@ void launchNT(cudaStream_t st, int n, std::size_t shm, bool keepX, const EnergyM
     }
   }
   const int blocks = std::min(n, sms * per);
-  (tdl.ok ? kernelT : kernelS)<<<blocks, NT, shm, st>>>(m, pd, tdl, angles, xs, gs, terms, grad, dv, poses, dterms, grad6,
+  // Pair tiles for float with more samples than multiprocessors (spec 15.1.24).
+  PairData<T> pdl = pd;
+  pdl.tiled = std::is_same_v<T, float> && n > sms ? 1 : 0;
+  (tdl.ok ? kernelT : kernelS)<<<blocks, NT, shm, st>>>(m, pdl, tdl, angles, xs, gs, terms, grad, dv, poses, dterms, grad6,
                                                         n, shm ? 1 : 0, keepX ? 1 : 0);
 }
 
@@ -854,7 +930,9 @@ struct GpuEnergy::Impl {
   DevBuf<FlatTorsion> torsions;
   DevBuf<int> moving;
   DevBuf<FlatClosure> closures;
+  DevBuf<int> tileI, tileJ, tileS0, tileOff, slots;
   DevBuf<GpuPair> gpuPairs;
+  int tiles = 0;
   DevBuf<GpuAtom<float>> atomsF;
   DevBuf<GpuAtom<double>> atomsD;
   DevBuf<GpuPairParams<float>> paramsF;
@@ -932,9 +1010,69 @@ struct GpuEnergy::Impl {
   template <class T>
   PairData<T> pairData() const {
     if constexpr (std::is_same_v<T, float>)
-      return {gpuPairs.p, atomsF.p, paramsF.p, view.pairCount};
+      return {atomsF.p, paramsF.p, tileI.p, tileJ.p, tileS0.p, tileOff.p, slots.p, tiles, gpuPairs.p, view.pairCount, 0};
     else
-      return {gpuPairs.p, atomsD.p, paramsD.p, view.pairCount};
+      return {atomsD.p, paramsD.p, tileI.p, tileJ.p, tileS0.p, tileOff.p, slots.p, tiles, gpuPairs.p, view.pairCount, 0};
+  }
+
+  // Pair tiles (PairData): the atoms of the pairs, those moved by torsions first, in blocks of 32; a
+  // tile per pair of blocks with pairs. Pair (a, b) of blocks A <= B is taken by the lane of its
+  // block-A atom (of a when A = B and (lane b − lane a) mod 32 <= 16) at step (lane of the other −
+  // lane) mod 32; the steps of a tile run from its first to its last used step.
+  void uploadTiles(const EnergyModel& m) {
+    const int nc = m.coordCount;
+    std::vector<char> used(nc, 0), moved(nc, 0);
+    for (const FlatPair& pr : m.pairs) used[pr.i] = used[pr.j] = 1;
+    for (int q : m.moving) moved[q] = 1;
+    std::vector<int> order;
+    for (int pass = 0; pass < 2; ++pass)
+      for (int a = 0; a < nc; ++a)
+        if (used[a] && moved[a] == (pass == 0)) order.push_back(a);
+    std::vector<int> pos(nc, -1);
+    for (std::size_t k = 0; k < order.size(); ++k) pos[order[k]] = static_cast<int>(k);
+    const int nb = static_cast<int>((order.size() + 31) / 32);
+    std::vector<int> tileOf(static_cast<std::size_t>(nb) * nb, -1);
+    std::vector<int> ti, tj, s0, s1, off{0}, sl;
+    for (const FlatPair& pr : m.pairs) {
+      const int pa = pos[pr.i], pb = pos[pr.j];
+      int A = pa / 32, B = pb / 32, la = pa % 32, lb = pb % 32;
+      bool swap = false;
+      if (A > B || (A == B && ((la - lb) & 31) < ((lb - la) & 31)) || (A == B && ((lb - la) & 31) == 16 && la > lb)) {
+        std::swap(A, B);
+        std::swap(la, lb);
+        swap = true;
+      }
+      int& id = tileOf[static_cast<std::size_t>(A) * nb + B];
+      if (id < 0) {
+        id = static_cast<int>(s0.size());
+        for (int l = 0; l < 32; ++l) {
+          const std::size_t ka = 32 * static_cast<std::size_t>(A) + l, kb = 32 * static_cast<std::size_t>(B) + l;
+          ti.push_back(ka < order.size() ? order[ka] : -1);
+          tj.push_back(kb < order.size() ? order[kb] : -1);
+        }
+        s0.push_back(32);
+        s1.push_back(0);
+        sl.resize(sl.size() + 1024, -1);
+      }
+      const int s = (lb - la) & 31;
+      s0[id] = std::min(s0[id], s);
+      s1[id] = std::max(s1[id], s + 1);
+      sl[1024 * static_cast<std::size_t>(id) + 32 * s + la] =
+          pairFlags(m, pr) | (swap ? kSwap : 0);
+    }
+    tiles = static_cast<int>(s0.size());
+    for (int k = 0; k < tiles; ++k) off.push_back(off.back() + s1[k] - s0[k]);
+    if (tiles == 0) {
+      ti.assign(32, -1);
+      tj.assign(32, -1);
+      s0.push_back(0);
+      sl.assign(1024, -1);
+    }
+    tileI.upload(ti);
+    tileJ.upload(tj);
+    tileS0.upload(s0);
+    tileOff.upload(off);
+    slots.upload(sl);
   }
 
   // desolvCoeff·(Si·Vj + Sj·Vi) as sv[i]·vol[j] + sv[j]·vol[i] (spec 15.1.15).
@@ -1125,11 +1263,9 @@ GpuEnergy::GpuEnergy(const EnergyModel& m, int device) : impl_(std::make_unique<
   d.moving.upload(m.moving);
   d.closures.upload(m.closures);
   std::vector<GpuPair> gp(m.pairs.size());
-  for (std::size_t p = 0; p < gp.size(); ++p) {
-    const FlatPair& pr = m.pairs[p];
-    gp[p] = {pr.i, pr.j, pr.type << 2 | (m.pairParams[pr.type].n == 10 ? 2 : 0) | (pr.heavy ? 1 : 0)};
-  }
+  for (std::size_t p = 0; p < gp.size(); ++p) gp[p] = {m.pairs[p].i, m.pairs[p].j, pairFlags(m, m.pairs[p])};
   d.gpuPairs.upload(gp);
+  d.uploadTiles(m);
   d.uploadAtoms(m, d.atomsF, d.paramsF);
   d.uploadAtoms(m, d.atomsD, d.paramsD);
   d.planTorsions(m);
