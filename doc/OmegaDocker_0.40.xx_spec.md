@@ -2606,4 +2606,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.80 | 2026-10-21 | 9b `delta` 格點與主機端工作重疊：`GpuGridBuilder::submitDelta`／`finishDelta`、送出下一個構形後再處理目前構形；delta 串流最低優先權，`GpuDockPrep` 與最小化串流最高優先權；`GpuField::setSlots` 不再重新配置欄位表；A 的 9b 格點 + 對接 4.29 → 4.12 s（平均）（15.1.19、15.1.20） |
 | 1.81 | 2026-10-21 | posm3／posm4：L1poss 依旋轉產生，盒子檢查用每個旋轉的探針原子範圍（完全等價），已在盒子內的姿勢在重疊原子數達上限時即判定；GPU 由旋轉資料產生姿勢（`GpuDockPrep::filterPosm3`）；40 Å、12 個 StaM 構形的 posm3 9b 316 → 49 s，CPU 版輸出逐位元不變（8.5、15.1.5、15.1.21） |
 | 1.82 | 2026-10-21 | posm2_fft：一次處理多個 StaM 構型（最多 16 個），MobM 探針頻譜每個（MobM 構型、定向）只算一次；`MobmDocker::conformations`、`fftProbeSpectra`／`fftCombine`、`GpuDockPrep` 多組頻譜與 `macMultiKernel`；40 Å、12 個 StaM 構形 173 → 38 s，CPU 版輸出逐位元不變；修正 posm3 視窗重新配置時 StaM 區域指標失效（8.4.3、15.1.22） |
-| 1.83 | 2026-10-21 | 新增 `dock9b.fftStride`（預設 1）：posm2_fft 的 FFT 使用每隔 n 個格點；量測 stride 1–3 的時間與結果（1L2Y、BTN）（8.4.3、13、15.1.23） |
+| 1.83 | 2026-10-21 | 新增 `dock9b.fftStride`（預設 1）：posm2_fft 的 FFT 使用每隔 n 個格點；量測 stride 1–3 的時間與結果（1L2Y、BTN）（8.4.3、14、15.1.23） |
