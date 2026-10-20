@@ -332,6 +332,13 @@ class PoseEvaluator {
   virtual int lanes() const { return 1; }
   virtual void submit(int /*lane*/, int /*n*/, const PoseRequest* /*req*/) {}
   virtual void complete(int /*lane*/, MobmDocker::PoseEnergy* /*out*/, double* /*grad*/) {}
+  // Whole L-BFGS minimizations on the device (spec 15.1.26) from the poses and angles of req with
+  // the parameters p; out and anglesOut (n × torsions). false: not supported (the minimization
+  // then runs on the host with evaluate or submit and complete).
+  virtual bool minimize(int /*n*/, const PoseRequest* /*req*/, const DockMinParams& /*p*/, DockMinResult* /*out*/,
+                        float* /*anglesOut*/) {
+    return false;
+  }
 
   // Optional device versions of L1poss preparation (spec 15.1.5); the defaults leave it to the CPU.
   // 8.5 quick filter of the L1pos [k0, k1) of c: appends the passing ones to l2 (any order) and

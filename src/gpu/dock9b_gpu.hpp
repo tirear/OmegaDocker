@@ -10,6 +10,7 @@
 
 #include "dock9b.hpp"
 #include "error.hpp"
+#include "pool.hpp"
 #include "energy_gpu.hpp"
 #include "prep_gpu.hpp"
 
@@ -20,14 +21,16 @@ namespace od {
 class GpuPoseEvaluator : public PoseEvaluator {
  public:
   // batch: requested poses per call, limited to 90% of the free device memory.
+  // deviceMin: L-BFGS minimizations entirely on the GPU (minimize, spec 15.1.26).
   GpuPoseEvaluator(const EnergyModel& model, std::shared_ptr<GpuField> field, int device, int batch,
-                   std::shared_ptr<GpuDockPrep> prep = nullptr)
+                   std::shared_ptr<GpuDockPrep> prep = nullptr, bool deviceMin = true)
       : gpu_(model, device),
         field_(std::move(field)),
         prep_(std::move(prep)),
         nt_(model.torsionCount),
         device_(device),
-        want_(std::max(1, batch)) {
+        want_(std::max(1, batch)),
+        deviceMin_(deviceMin) {
     batch_ = want_;
   }
   int maxBatch() const override { return batch_; }
@@ -70,8 +73,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
     w.poses.resize(nn);
     w.terms.resize(nn);
     w.dterms.resize(nn);
-#pragma omp parallel for schedule(static)
-    for (long long i = 0; i < n; ++i) {
+    parallelRange(n, [&](long long i) {
       const PoseRequest& r = req[i];
       for (std::size_t k = 0; k < nt; ++k) w.angles[i * nt + k] = static_cast<float>(r.anglesDeg[k]);
       DockPose& ps = w.poses[i];
@@ -84,14 +86,13 @@ class GpuPoseEvaluator : public PoseEvaluator {
       ps.q[2] = static_cast<float>(r.pose.q.y);
       ps.q[3] = static_cast<float>(r.pose.q.z);
       ps.field = slot_[static_cast<std::size_t>(r.field)];
-    }
+    });
     gpu_.submitDock(lane, *field_, w.angles.data(), w.poses.data(), n, true);
   }
   void complete(int lane, MobmDocker::PoseEnergy* out, double* grad) override {
     Work& w = work_[lane];
     gpu_.completeDock(lane, w.terms.data(), w.dterms.data(), grad);
-#pragma omp parallel for schedule(static)
-    for (long long i = 0; i < w.n; ++i) {
+    parallelRange(w.n, [&](long long i) {
       const FlatTerms& f = w.terms[i];
       MobmDocker::PoseEnergy& pe = out[i];
       pe = {};
@@ -107,7 +108,29 @@ class GpuPoseEvaluator : public PoseEvaluator {
       pe.interClash = w.dterms[i].interClash;
       pe.intra.external = pe.inter + pe.interClash;
       pe.outside = w.dterms[i].outside;
-    }
+    });
+  }
+  bool minimize(int n, const PoseRequest* req, const DockMinParams& p, DockMinResult* out, float* anglesOut) override {
+    if (!deviceMin_) return false;
+    const std::size_t nn = static_cast<std::size_t>(n), nt = static_cast<std::size_t>(nt_);
+    minStarts_.resize(nn);
+    minAngles_.resize(nn * nt);
+    parallelRange(n, [&](long long i) {
+      const PoseRequest& r = req[i];
+      DockMinStart& s = minStarts_[i];
+      for (int c = 0; c < 3; ++c) {
+        s.t[c] = r.pose.t[c];
+        s.center[c] = static_cast<float>(r.center[c]);
+      }
+      s.q[0] = r.pose.q.w;
+      s.q[1] = r.pose.q.x;
+      s.q[2] = r.pose.q.y;
+      s.q[3] = r.pose.q.z;
+      s.field = slot_[static_cast<std::size_t>(r.field)];
+      std::copy_n(r.anglesDeg, nt, minAngles_.begin() + static_cast<std::ptrdiff_t>(i * nt));
+    });
+    gpu_.minimizeDock(*field_, p, minStarts_.data(), minAngles_.data(), n, out, anglesOut);
+    return true;
   }
   void idle() override {
     gpu_.releaseScratch();
@@ -165,8 +188,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
             p3.r0 = r0;
             p3.quats.resize(4 * static_cast<std::size_t>(nr));
             p3.base.resize(6 * static_cast<std::size_t>(nr));
-#pragma omp parallel for schedule(static)
-            for (long long j = 0; j < nr; ++j) {
+            parallelRange(nr, [&](long long j) {
               const MobmDocker::Posm3Rot rot = dk.posm3Rot(c, r0 + j);
               const QuatF q = toFloat(rot.q);
               float* qd = p3.quats.data() + 4 * j;
@@ -179,7 +201,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
                 bd[d] = rot.anchorS[d];
                 bd[3 + d] = rot.rm[d];
               }
-            }
+            });
             prep_->filterPosm3(*field_, s, p3, std::max(k0, r0 * nt), std::min(n3, (r0 + nr) * nt), l2, cnt);
           }
           k0 = n3;
@@ -193,10 +215,9 @@ class GpuPoseEvaluator : public PoseEvaluator {
         const long long m = std::min(kChunk, k1 - b);
         poses.resize(static_cast<std::size_t>(m));
         valid.assign(static_cast<std::size_t>(m), 0);
-#pragma omp parallel for schedule(static)
-        for (long long i = 0; i < m; ++i) {
+        parallelRange(m, [&](long long i) {
           const auto pose = dk.l1Pose(c, stream, b + i);
-          if (!pose) continue;
+          if (!pose) return;
           GpuDockPrep::FilterPose& fp = poses[static_cast<std::size_t>(i)];
           for (int d = 0; d < 3; ++d) fp.t[d] = static_cast<float>(pose->t[d]);
           const QuatF q = toFloat(pose->q);
@@ -206,7 +227,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
           fp.q[3] = q.z;
           fp.k = b + i;
           valid[static_cast<std::size_t>(i)] = 1;
-        }
+        });
         std::size_t n = 0;
         for (std::size_t i = 0; i < poses.size(); ++i)
           if (valid[i]) poses[n++] = poses[i];
@@ -255,6 +276,9 @@ class GpuPoseEvaluator : public PoseEvaluator {
   std::shared_ptr<GpuField> field_;
   std::shared_ptr<GpuDockPrep> prep_;
   int nt_, device_, want_, batch_;
+  bool deviceMin_;
+  std::vector<DockMinStart> minStarts_;
+  std::vector<double> minAngles_;
   std::uint64_t sized_ = 0;
   std::vector<int> slot_{0};  // GpuField slot of each bound docker
   // Host data of each lane.

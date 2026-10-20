@@ -5160,6 +5160,40 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
                         "lowest energy GPU {:.3f}, CPU {:.3f}",
                         name, n, agree, ctlAgree, gpuMin, cpuMin));
     CHECK(agree >= ctlAgree - n / 10);
+    // Whole minimizations on the device (L-BFGS, spec 15.1.26).
+    REQUIRE(fs.p.minimizer.method == od::MinMethod::Lbfgs);
+    const od::DockMinParams mp{fs.p.scaleTrans,         fs.p.scaleRot,           fs.p.scaleTors,
+                               fs.p.maxTransStep,       fs.p.maxAngleStep * std::numbers::pi / 180.0,
+                               fs.p.minimizer.deltaE,   fs.p.minimizer.maxSteps, fs.p.minimizer.convSteps,
+                               fs.p.minimizer.memory};
+    std::vector<od::PoseRequest> startReq;
+    for (int i = 0; i < n; ++i) startReq.push_back({poses[i], c.center, c.anglesDeg.data()});
+    std::vector<od::DockMinResult> dres(n);
+    std::vector<float> dang(static_cast<std::size_t>(n) * nt);
+    REQUIRE(ev.minimize(n, startReq.data(), mp, dres.data(), dang.data()));
+    int devAgree = 0, cpuSteps = 0, devSteps = 0;
+    double devMin = 1e300;
+    for (int i = 0; i < n; ++i) {
+      od::DockSample ds;
+      ds.energy = static_cast<float>(dres[i].dterms.inter + dres[i].dterms.interClash + dres[i].terms.vdw +
+                                     dres[i].terms.hbond + dres[i].terms.elec + dres[i].terms.desolv + dres[i].terms.clash);
+      devAgree += same(dres[i].ok != 0, ds, cpuOk[i], cpuOut[i]);
+      if (dres[i].ok) {
+        devMin = std::min(devMin, static_cast<double>(ds.energy));
+        devSteps += dres[i].steps;
+        // The returned angles and pose give the returned energy.
+        od::Pose rp;
+        for (int k = 0; k < 3; ++k) rp.t[k] = dres[i].t[k];
+        rp.q = {dres[i].q[0], dres[i].q[1], dres[i].q[2], dres[i].q[3]};
+        const std::vector<double> ra(dang.begin() + static_cast<std::ptrdiff_t>(i) * nt,
+                                     dang.begin() + static_cast<std::ptrdiff_t>(i + 1) * nt);
+        CHECK(std::abs(dk.evaluate(c, rp, ra).ranking() - ds.energy) <= 1e-3 * std::max(1.0f, std::abs(ds.energy)));
+      }
+      if (cpuOk[i]) cpuSteps += cpuOut[i].steps;
+    }
+    MESSAGE(std::format("{}: device minimizer: same result as the CPU {}, lowest energy {:.3f}; steps device {}, CPU {}",
+                        name, devAgree, devMin, devSteps, cpuSteps));
+    CHECK(devAgree >= ctlAgree - n / 10);
   }
   ev.idle();
 }

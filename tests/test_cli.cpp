@@ -444,6 +444,8 @@ TEST_CASE("cli: 9a RCD on the GPU (gpu.conf9aRcd, gpu.conf9aRcdMinBatch)") {
   CHECK(d.gpuConf9aRcdMinBatch == 1024);
   const auto o = parse({"--gpu_conf9aRcd=false", "--gpu_conf9aRcdMinBatch=1"});
   CHECK_FALSE(o.gpuConf9aRcd);
+  CHECK(d.gpuDock9bDeviceMin);
+  CHECK_FALSE(parse({"--gpu_dock9bDeviceMin=false"}).gpuDock9bDeviceMin);
   CHECK(o.gpuConf9aRcdMinBatch == 1);
   auto bad = parse({"--gpu_conf9aRcdMinBatch=0"});
   CHECK_THROWS_AS(od::validateOptions(bad), od::Error);

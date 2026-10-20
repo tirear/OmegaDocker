@@ -1044,7 +1044,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevice);
     for (std::size_t i = 0; i < mobSets.size(); ++i)
       poseEval[i] = std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuField, opt.gpuDevice,
-                                                           opt.gpuDock9bBatchNum, gpuPrep);
+                                                           opt.gpuDock9bBatchNum, gpuPrep, opt.gpuDock9bDeviceMin);
   }
 #else
   (void)gpu;
@@ -1695,6 +1695,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuConf9aRcdMinBatch = stored.gpuConf9aRcdMinBatch;
   cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
   cmp.gpuDock9bStamNum = stored.gpuDock9bStamNum;
+  cmp.gpuDock9bDeviceMin = stored.gpuDock9bDeviceMin;
   cmp.memHostLimit = stored.memHostLimit;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {

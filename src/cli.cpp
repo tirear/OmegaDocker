@@ -319,6 +319,10 @@ const std::vector<Param>& params() {
                  [](const Options& o) -> std::optional<Tokens> { return Tokens{o.gpuConf9aPrecision}; }});
     t.push_back(integer("gpu.dock9bBatchNum", "<n>", "8192",
                         "9b: poses minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuDock9bBatchNum)));
+    t.push_back(boolean("gpu.dock9bDeviceMin", "true",
+                        "9b: dock9b.minMethod = lbfgs: whole minimizations on the GPU (false: the minimizer runs on the "
+                        "CPU with energies from the GPU)",
+                        OD_ACC(gpuDock9bDeviceMin)));
     t.push_back(intAuto("gpu.dock9bStamNum", "auto|<n>",
                         "9b: StaM conformations whose poses are minimized together on the GPU (auto: until their L2poss "
                         "reach 48 x the poses the GPU evaluates at the same time; <n>: at most n; both within "

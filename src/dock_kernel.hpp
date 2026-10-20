@@ -39,6 +39,28 @@ struct DockTerms {
   int outside;
 };
 
+// Whole 9b minimizations with L-BFGS on the device (MobmDocker::minimize, spec 15.1.26).
+// Variables z = (t / sT, rotation vector / sR, torsions in rad / sA); steps limited to maxTrans
+// (Å) and maxAngle (rad); VecMinParams maxSteps, convSteps, deltaE and memory.
+struct DockMinParams {
+  double sT, sR, sA, maxTrans, maxAngle, deltaE;
+  int maxSteps, convSteps, memory;
+};
+// Start of one minimization: pose (double), centre (the Pose frame) and field as DockPose.
+struct DockMinStart {
+  double t[3], q[4];
+  float center[3];
+  int field;
+};
+// The lowest-energy accepted point (float pose) and its energies; ok 0: the pose left the grid
+// (only steps and evaluations are set).
+struct DockMinResult {
+  float t[3], q[4];
+  FlatTerms terms;
+  DockTerms dterms;
+  int steps, evaluations, ok;
+};
+
 namespace dock {
 
 OD_HD inline void rotate(const float q[4], const float v[3], float out[3]) {

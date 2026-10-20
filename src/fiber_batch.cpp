@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "log.hpp"
+#include "pool.hpp"
 
 namespace od {
 namespace {
@@ -227,19 +228,16 @@ struct Batch {
   }
   // Resumes the waiting fibers of slots (they continue with new indices when done).
   void resumeAll(std::span<const int> slots) {
-    const int nw = static_cast<int>(slots.size());
-#pragma omp parallel for schedule(dynamic, 1)
-    for (int w = 0; w < nw; ++w) {
+    parallelEach(static_cast<long long>(slots.size()), [&](long long w) {
       Fiber& fb = *fibers[slots[w]];
       fb.waiting = false;
       resume(fb);
       if (fb.error) failed = true;
       else launch(fb);
-    }
+    });
   }
   void launchAll(int k0, int k1) {
-#pragma omp parallel for schedule(dynamic, 1)
-    for (int k = k0; k < k1; ++k) launch(*fibers[k]);
+    parallelEach(k1 - k0, [&](long long k) { launch(*fibers[k0 + k]); });
   }
   void waiting(int k0, int k1, std::vector<int>& out) const {
     out.clear();

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.85 |
+| 文件版本 | 1.86 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1618,6 +1618,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.conf9aRcdMinBatch` | `--gpu_conf9aRcdMinBatch` | 1024 | 15.1.18（≥ 1；L1 批次至少這麼多樣本才用 GPU） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
 | `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：視窗的 L2poss 達 48 × GPU 同時計算的姿勢數為止；整數 n：最多 n 個；都受記憶體限制） |
+| `gpu.dock9bDeviceMin` | `--gpu_dock9bDeviceMin` | `true` | 15.1.26（`dock9b.minMethod = lbfgs` 時整個最小化在 GPU 上；false：最小化在 CPU、能量由 GPU 計算） |
 | `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
@@ -2295,6 +2296,43 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 執行緒超額：16 執行緒（等於邏輯 CPU 數）時，其他程式佔用 CPU 會使 9b 大幅變慢：X server 佔用約 1 核心時 posm1 約 300 s（14 執行緒 8 s），只有 Chrome 時約 38–43 s（14 執行緒 8.5–10.5 s）；新舊版相同。`OMP_WAIT_POLICY=passive` 時 16 執行緒為 8.3 s，原因是閒置的 OpenMP 執行緒忙等，搶走實際工作的執行緒的 CPU 時間。後續方向：盡可能減少 9b 對 CPU 的依賴（17.1）。
 - 測試：既有的 `gpu:` 測試（float 與 CPU 參考值比較）涵蓋分塊路徑（樣本數多於多處理器數）與探針內插；CPU 與 CUDA 建置全部通過。
 
+### 15.1.25 CPU 等待不忙等：執行緒池（1.86）
+
+- 問題（15.1.24）：9a／9b 每一步的協程恢復（`runBatched`、`runBatchedAsync`）與每次 GPU 計算前後的打包、拆開都是 OpenMP 平行區域；閒置的 OpenMP 執行緒忙等，執行緒數等於邏輯 CPU 數時，其他程式佔用 CPU 會使整體大幅變慢。
+- 做法：`src/pool.hpp`／`pool.cpp` 的執行緒池（`parallelFor`、`parallelEach`、`parallelRange`）。執行緒數 = `omp_get_max_threads()`（含呼叫的執行緒，第一次使用時建立）；閒置的執行緒以 futex（`std::atomic::wait`）阻塞，只喚醒需要的執行緒，呼叫的執行緒也分擔工作，再阻塞等待其餘完成。在池的工作中再呼叫（例如協程內）、或另一個執行緒正在使用時，直接在呼叫的執行緒依序執行；工作中的 OpenMP 區域只用一個執行緒（與之前巢狀 OpenMP 區域的行為相同）。
+- 取代的 OpenMP 區域：`fiber_batch.cpp` 的協程啟動與恢復；`energy_gpu.cu` 的 9a／9b 打包與拆開；`dock9b_gpu.hpp` 的姿勢打包、結果拆開、posm3 旋轉資料與 L1poss 姿勢；`dock9b.cpp` 的結果分配。每個構形一次的工作（格點、9d 等）仍用 OpenMP。
+- 量測（RB4 posm1，`posm1SampleNum` 100000，16 執行緒；`yes` 佔用 CPU）：
+
+| 佔用 | 1.85（OpenMP） | 1.86（執行緒池） | 1.85 + `OMP_WAIT_POLICY=passive` |
+|---|---|---|---|
+| 無（只有桌面） | 8.62 s | 8.27 s | — |
+| 1 核心 | 294.3 s | 9.74 s | — |
+| 4 核心 | — | 9.73 s | 9.90 s |
+| 8 核心 | — | 9.94 s | 10.13 s |
+
+  14 執行緒、無佔用：8.34 → 8.26 s。結果與 1.85 相同。
+- 測試：既有的 `runBatchedAsync` 與所有使用協程批次的測試（CPU、CUDA 建置全部通過）。
+
+### 15.1.26 CUDA 版：9b 的 L-BFGS 整個在 GPU 上（1.86）
+
+- 目的：減少 9b 對 CPU 的依賴（17.1），取代 1.70（15.1.14）「不把整個最小化移到 GPU」的決定。
+- 做法（`minimizeDockKernel`，`src/gpu/energy_gpu.cu`）：每個 block 以原子計數取下一個樣本，直到沒有樣本；warp 0 以 double 執行 `MobmDocker::minimize` 與 `runLbfgs` 的每一步（變數 z、重新以接受點為旋轉基準、步長上限、Armijo 回溯 20 次、`deltaE`／`convSteps`、`maxSteps`、記錄能量最低的被接受點、離開網格即停止），整個 block 計算能量與梯度（`evalOne`，與 `evaluateKernel` 共用，自 `evaluateKernel` 分出，計算不變）。向量的內積是 warp 加總（加總順序與 CPU 不同）；四元數、`wrapDeg` 與 CPU 相同的算式。工作記憶體（S、Y、z、g 等）每個 block 一份在全域記憶體。主機每批只上傳起始姿勢與兩面角、下載結果；以 `cudaEventBlockingSync` 事件等待，執行緒睡眠不佔 CPU。
+- 介面：`PoseEvaluator::minimize`（預設不支援）；`GpuPoseEvaluator` 在 `gpu.dock9bDeviceMin`（預設 true）時支援；`MobmDocker::minimizeBatched` 在 `dock9b.minMethod = lbfgs` 且支援時使用，L1pos 的起始姿勢以執行緒池計算，結果寫入對接樣本與統計（steps、evaluations、left grid）的方式與 `minimize` 相同。其他最佳化方法仍在 CPU 上最小化。
+- 結果：每個樣本的步驟與 CPU 版相同，但 GPU 的能量與 CPU 有單精度差異，加上內積的加總順序不同，最小化的路徑會分開；與 CPU 結果相同（相對 10⁻⁴）的比例與 CPU 對照組（起點平移 10⁻⁵ Å）同級。回傳的姿勢與兩面角以 CPU 重算，與回傳的能量相差在 10⁻³（相對）以內。觀察：RB4 posm1 兩次執行的結果相同（梯度仍以原子加法加總，不保證可重現）。
+- 量測（TITAN V，16 執行緒，同一時段交錯執行；桌面使用 GPU 約 20–30%）：
+
+| 例子 | 1.85 方式（`gpu.dock9bDeviceMin = false`） | GPU 最小化 |
+|---|---|---|
+| RB4 posm1 100000（兩次） | 9b 7.94／7.88 s，CPU user 47.0／47.5 s | 8.89／8.89 s，CPU user 3.6／3.5 s |
+| RB4 posm3 `rotStep` 15 | 293.4 s，CPU user 2149 s | 361.0 s，CPU user 28 s |
+| RB4 posm1，16 個核心被佔用 | 17.30 s | 10.47 s |
+
+  - CPU 不忙時，GPU 版 posm1 慢約 12%、posm3 慢約 23%；CPU 被佔用時 GPU 版快（且不受影響）；CPU 時間少 13–77 倍。
+  - 核心量測（posm1、posm3）：block 的時間中約 85% 在計算能量，約 15% 在 warp 0 的最小化步驟（等待期間 block 其他 warp 閒置），每次啟動結尾的尾端約 0.1–0.2 s（posm3 每次約 7 s，約 1.5%）。1.85 方式兩個 lane 的核心可重疊，GPU 較忙。
+  - 嘗試後未採用：限制暫存器為 80／64 個（每個多處理器 3／4 個 block，未變快／慢 14%）；向量全部放在共用記憶體（L1 快取變少，慢 5%）；只把 z、g、d 等五個向量放在共用記憶體並一起載入 S、Y（無差異）；樣本少於多處理器數時改用不分塊的原子對迴圈（無差異）；4 個 StaM 構形一個視窗（無差異）。
+- 後續：其他四種方法（`sd`、`cg`、`fire`、`adadelta`）、9a 的最小化移到 GPU；減少 warp 0 步驟的時間。
+- 測試：`gpu: 9b pose energies and minimization match the CPU path` 加入 GPU 最小化（三種格點模式；與 CPU 結果相同的個數 ≥ CPU 對照組 − n/10；回傳的姿勢以 CPU 重算的能量）；`cli` 加入 `gpu.dock9bDeviceMin`。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2426,7 +2464,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
-  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
+  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`、`gpu.dock9bDeviceMin`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpu.*`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -2513,7 +2551,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | od_0100：球形搖動格點（半徑 1.4 Å、步長 0.2 Å，與網格間距無關）、Boltzmann 權重（捨棄 `wellDepth` 線性權重）、可佔據比例 f_i、−TS = −RT × Σ ln f_i；鍵結不列入；未結合狀態取 9a 構型樣本中的最低自由能（10.2） |
 | — | od_0100 係數拆分為 c0、c_tors、a_t（分子間 4 項）、b_t（分子內 4 項）、s_StaM、s_MobM，以 TOML 參數檔 `--feParamFile` 設定，取代 `--enthalpyScaling`、`--entropyScaling`；預設值未校準，CUDA 與 OpenCL 版完成後以標準資料最佳化；方法名稱維持 `od_0100`（10.2） |
 | — | 執行參數放入參數檔 `--paramFile`（TOML，與分子設定檔分開），命令列 `--<表>_<鍵>=<值>` 覆寫；舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；搖動權重 w_k = exp(−ΔE_k × `rrtScaling`)，預設暫定 4，不依 `temperature`；擬合時 `temperature` 固定 298.15 K（14.1、10.2） |
-| — | 效能最佳化的方向：盡可能減少對 CPU 的依賴（工作移到 GPU、CPU 不忙等），避免 CPU 被其他程式佔用時大幅變慢（15.1.24） |
+| — | 效能最佳化的方向：盡可能減少對 CPU 的依賴（工作移到 GPU、CPU 不忙等），避免 CPU 被其他程式佔用時大幅變慢（15.1.24）；CPU 等待改用阻塞的執行緒池（15.1.25）；9b 的 L-BFGS 整個在 GPU 上（`gpu.dock9bDeviceMin` 預設 true），取代 1.70 的決定；先做 `lbfgs`，其他方法之後（15.1.26） |
 
 ### 17.2 待確認
 - （無）
@@ -2663,3 +2701,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.83 | 2026-10-21 | 新增 `dock9b.fftStride`（預設 1）：posm2_fft 的 FFT 使用每隔 n 個格點；量測 stride 1–3 的時間與結果（1L2Y、BTN）（8.4.3、14、15.1.23） |
 | 1.84 | 2026-10-21 | 新增 17.3：需要更多案例測試的參數（未校準、只有少數案例的測試、尚未測試三類）；`dock9b.fftStride` 標註需要更多案例（15.1.23） |
 | 1.85 | 2026-10-21 | 單精度原子對 32 × 32 分塊（樣本數多於多處理器數時）、9b 探針原子的格點同點內插、能量項先加總；float 核心 n = 4096 快 1.42–1.53 倍，RB4 posm1 9b 約 −8%、posm3 −5.7%；記錄 16 執行緒超額時的變慢與 `OMP_WAIT_POLICY=passive` 的量測（15.1.24、17.1） |
+| 1.86 | 2026-10-21 | 執行緒池取代每步的 OpenMP 區域，閒置執行緒阻塞不忙等（16 執行緒、1 核心被佔用時 posm1 294 → 9.7 s）（15.1.25）；9b 的 L-BFGS 整個在 GPU 上（`minimizeDockKernel`、`PoseEvaluator::minimize`、`gpu.dock9bDeviceMin` 預設 true），CPU 時間少 13–77 倍，CPU 不忙時慢 12–23%，CPU 被佔用時快（14、15.1.26、16、17.1） |

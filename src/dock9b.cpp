@@ -14,6 +14,7 @@
 #include "error.hpp"
 #include "fiber_batch.hpp"
 #include "log.hpp"
+#include "pool.hpp"
 #include "rng.hpp"
 
 namespace od {
@@ -65,6 +66,58 @@ void MobmDocker::minimizeBatched(PoseEvaluator& pev, std::span<const MobmDocker*
   if (dks.size() == 1) pev.bind(*dks[0]);
   else pev.bindAll(dks);
   const int m = static_cast<int>(items.size());
+  // L-BFGS: whole minimizations on the device when the evaluator supports it (spec 15.1.26).
+  const Dock9bParams& p0 = dks[0]->p_;
+  if (p0.minimizer.method == MinMethod::Lbfgs) {
+    const DockMinParams mp{p0.scaleTrans,         p0.scaleRot,          p0.scaleTors,
+                           p0.maxTransStep,       p0.maxAngleStep * kDeg, p0.minimizer.deltaE,
+                           p0.minimizer.maxSteps, p0.minimizer.convSteps, p0.minimizer.memory};
+    const std::size_t nt = static_cast<std::size_t>(dks[0]->sys_.torsionCount());
+    std::vector<PoseRequest> sr(static_cast<std::size_t>(m));
+    parallelRange(m, [&](long long i) {
+      const Conf& c = *items[i].conf;
+      sr[i] = {*items[i].dk->l1Pose(c, items[i].stream, items[i].k), c.center, c.anglesDeg.data(), items[i].field};
+    });
+    std::vector<DockMinResult> mr(static_cast<std::size_t>(m));
+    std::vector<float> ang(static_cast<std::size_t>(m) * nt);
+    if (pev.minimize(m, sr.data(), mp, mr.data(), ang.data())) {
+      parallelRange(m, [&](long long i) {
+        const DockMinResult& r = mr[i];
+        stats[i].steps += r.steps;
+        stats[i].evaluations += r.evaluations;
+        if (!r.ok) {
+          ++stats[i].leftGrid;
+          ok[i] = 0;
+          return;
+        }
+        PoseEnergy pe;
+        pe.intra.vdw = r.terms.vdw;
+        pe.intra.hbond = r.terms.hbond;
+        pe.intra.elec = r.terms.elec;
+        pe.intra.desolv = r.terms.desolv;
+        pe.intra.clash = r.terms.clash;
+        pe.intra.closure = r.terms.closure;
+        pe.intra.clashPairs = r.terms.clashPairs;
+        pe.intra.closureMaxDeviation = r.terms.closureMaxDeviation;
+        pe.inter = r.dterms.inter;
+        pe.interClash = r.dterms.interClash;
+        DockSample& out = res[i];
+        for (int k = 0; k < 3; ++k) out.pose.t[k] = r.t[k];
+        out.pose.q = {r.q[0], r.q[1], r.q[2], r.q[3]};
+        out.angles.assign(ang.begin() + static_cast<std::ptrdiff_t>(i * nt),
+                          ang.begin() + static_cast<std::ptrdiff_t>((i + 1) * nt));
+        out.energy = static_cast<float>(pe.ranking());
+        out.inter = static_cast<float>(pe.inter);
+        out.interClash = static_cast<float>(pe.interClash);
+        out.intra = static_cast<float>(pe.intra.filterEnergy());
+        out.closureMaxDeviation = static_cast<float>(pe.intra.closureMaxDeviation);
+        out.steps = r.steps;
+        out.center = items[i].conf->center;
+        ok[i] = 1;
+      });
+      return;
+    }
+  }
   const int nf = std::max(1, std::min(pev.maxBatch(), m));
   const std::size_t ng = 6 + static_cast<std::size_t>(dks[0]->sys_.torsionCount());
   std::vector<PoseRequest> req(nf);
@@ -101,12 +154,11 @@ void MobmDocker::minimizeBatched(PoseEvaluator& pev, std::span<const MobmDocker*
   const auto scatter = [&](int l) {
     const std::vector<int>& slots = bslots[l];
     const long long n = static_cast<long long>(slots.size());
-#pragma omp parallel for schedule(static)
-    for (long long i = 0; i < n; ++i) {
+    parallelRange(n, [&](long long i) {
       pe[slots[i]] = bout[l][i];
       std::copy_n(bgrad[l].begin() + static_cast<std::ptrdiff_t>(i * ng), ng,
                   grad.begin() + static_cast<std::ptrdiff_t>(slots[i] * ng));
-    }
+    });
   };
   if (lanes == 1) {
     const auto flush = [&](std::span<const int> slots) {

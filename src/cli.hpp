@@ -92,6 +92,7 @@ struct Options {
   int gpuConf9aRcdMinBatch = 1024;
   int gpuDock9bBatchNum = 8192;
   int gpuDock9bStamNum = 0;  // 0: auto
+  bool gpuDock9bDeviceMin = true;
   long long memHostLimit = 0;  // MiB; 0: auto
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
