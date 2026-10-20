@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.82 |
+| 文件版本 | 1.83 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1039,6 +1039,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 保留：每個定向能量最低的 `fftTopPerRot` 個平移（同能量時格點索引小者優先），依定向順序、定向內能量由低到高排列，作為 L1poss；之後照常 8.5 篩選與最佳化（最佳化使用未限制的網格）。
 - StaM 頻譜每個 StaM 構型計算一次；StaM 沒有可轉動兩面角且非 `flexres` 時跨輪次重複使用。
 - MobM 的探針頻譜只取決於 MobM 構型與定向：1.82 起一次處理多個 StaM 構型，每個（MobM 構型、定向）的探針頻譜只算一次（15.1.22）。
+- `dock9b.fftStride` n（預設 1，1.83）：FFT 格點取 StaM 網格每軸每隔 n 個的格點值（原點相同，間距 n × `grid.spacing`，格點數 ⌊(N − 1)/n⌋ + 1），平移也只在這些格點上；之後的 8.5 篩選與最佳化仍使用原網格（15.1.23）。
 - 平行化：各定向平行計算（OpenMP），每個 FFT 單執行緒。結果與執行緒數無關。
 
 **實測（1.53）**：2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å（81³ 個格點，FFT 81³）、16 個構型配對、`maxRound` 1、`seed` 3、`fftTopPerRot` 1，其餘為預設值；AMD Ryzen 7 9700X（8 核 16 執行緒）。
@@ -1667,6 +1668,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.posm1SampleNum` | `--dock9b_posm1SampleNum` | 1000 | 8.4.1、8.4.5 |
 | `dock9b.rotStep` | `--dock9b_rotStep` | 7.5° | 8.3、8.4.4（繞配對軸的角度間距） |
 | `dock9b.fftClamp` | `--dock9b_fftClamp` | 10 kcal/mol | 8.4.3（> 0；靜電網格限制在 ±此值） |
+| `dock9b.fftStride` | `--dock9b_fftStride` | 1 | 8.4.3、15.1.23（1–16；FFT 使用每軸每隔 n 個格點，間距 n × `grid.spacing`） |
 | `dock9b.fftTopPerRot` | `--dock9b_fftTopPerRot` | 1 | 8.4.3（1–10⁶） |
 | `dock9b.sepaShellMin`、`dock9b.sepaShellMax` | `--dock9b_sepaShellMin` 等 | 2.5 Å、6 Å | 8.4.4 |
 | `dock9b.sepaPotPercentile` | `--dock9b_sepaPotPercentile` | 5% | 8.4.4 |
@@ -2253,6 +2255,32 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 附帶修正：視窗項目改以 `unique_ptr` 持有 posm3 的 StaM 區域（`StamSepa`）。之前存在 `std::vector<WindowItem>` 的元素內，視窗加入新項目而重新配置時，先前 docker 的指標會失效（posm3／posm4 視窗大於 1 時，最小化產生姿勢會讀到已釋放的記憶體）。
 - 測試：`dock9b: posm2_fft against several StaM conformations equals each alone`（CPU：`conformations` 與逐一 `conformation` 逐位元相同，含重複與不同順序；不同盒子會報錯；`PairJob::conf` 的 `prepareJobs` 與由角度產生者相同）；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 3 組 StaM 頻譜同時計算（`fftTopPerRot` 1、3、20）與 CPU 比較。
 
+### 15.1.23 posm2_fft：較粗的 FFT 格點（`dock9b.fftStride`，1.83）
+
+- 做法：`buildFftStam(field, clamp, stride)` 取每軸每隔 stride 個格點的值（點取樣，等同以 stride × `grid.spacing` 建立的 AD4 網格），`FftStam::geom` 為這個較粗的格點；探針座標、合法平移範圍、保留的平移都以它為準，pose 的平移落在原網格每隔 stride 個的格點上。CPU、GPU 與 15.1.22 的多構型處理都不需另外修改。預設 1（與之前相同）。
+- 量測（TITAN V，16 執行緒，GPU，`dock9b.rotStep` 15、`maxRound` 1、`seed` 3、`dock9c.topSampleNum` 40）。結果比較以 stride 1 的 `rank_9b` 為基準：E1 為第 1 名的 9b 排序能量；「前 10 名重疊」為前 10 名中，與基準任一 pose 的 MobM 重原子 RMSD < 2 Å（同座標系，未做對稱校正）的個數。stride 1 重跑一次（1′）作為 GPU 本身的變動。
+
+| 設定 | stride | 9b 對接 | 平移搜尋 | E1 | 前 10 平均 | 前 40 平均 | 第 40 名 | 前 10 名重疊 |
+|---|---|---|---|---|---|---|---|---|
+| 1L2Y，40 Å（112³），12×4 構型 | 1 | 38.3 s | 31.5 s | −11.76 | −7.64 | −3.95 | −1.79 | 10 |
+| | 1′ | 38.1 s | — | −12.29 | −7.70 | −4.16 | −1.83 | 9 |
+| | 2 | 11.5 s | 4.1 s | −12.75 | −7.34 | −4.28 | −1.78 | 1 |
+| | 3 | 8.1 s | 1.7 s | −10.24 | −7.65 | −3.86 | −0.88 | 3 |
+| 1L2Y，48 Å（129³），12×4 構型 | 1 | 86.9 s | — | −14.08 | −12.78 | −11.51 | −10.09 | 10 |
+| | 1′ | 87.4 s | — | −15.20 | −13.81 | −12.05 | −10.39 | 7 |
+| | 2 | 43.7 s | — | −15.26 | −13.00 | −11.37 | −9.92 | 0 |
+| | 3 | 36.4 s | — | −14.30 | −13.26 | −11.73 | −10.31 | 0 |
+| BTN，30 Å（81³），8×8 構型 | 1 | 24.5 s | 18.3 s | 23.29 | 23.83 | 24.38 | 24.97 | 10 |
+| | 1′ | 24.4 s | — | 23.29 | 23.83 | 24.38 | 24.97 | 10 |
+| | 2 | 9.3 s | 3.0 s | 23.07 | 23.85 | 24.41 | 24.91 | 9 |
+| | 3 | 7.3 s | 1.0 s | 23.69 | 24.04 | 24.54 | 25.02 | 10 |
+
+  - 平移搜尋的時間約與 FFT 格點數成正比（stride 2 少約 8 倍）；stride 2 以上時 9b 由最小化決定。
+  - BTN（小分子）：stride 2、3 的能量與 stride 1 相近，前 10 名幾乎都落在 stride 1 找到的位置。
+  - 1L2Y（寡肽）：能量大致在 stride 1 自身的變動範圍內（40 Å 的 stride 3 第 1 名與第 40 名較差），但前 10 名的位置大多與 stride 1 不同；stride 1 重跑一次也有 1–3 個位置不同，表示這組設定（單輪）的結果本來就分散。40 Å 時 95% 的 L2poss 在最小化時離開網格，盒子對 1L2Y 偏小；粗格點時 8.5 移除的重疊較多（84,861 → 97,806 → 111,806）。
+  - 沒有已知結合結構可比對，以上只能說明與 stride 1 的差異，不能判斷哪一個較正確。預設維持 1。
+- 測試：`dock9b: posm2_fft` 加入 stride 2（格點幾何、FFT 能量與粗格點上直接三線性加總的差 < 10⁻⁴、平移在粗格點上、stride 0 報錯）；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 stride 2 的多組頻譜；`cli` 加入 `dock9b.fftStride` 的預設與範圍。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2578,3 +2606,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.80 | 2026-10-21 | 9b `delta` 格點與主機端工作重疊：`GpuGridBuilder::submitDelta`／`finishDelta`、送出下一個構形後再處理目前構形；delta 串流最低優先權，`GpuDockPrep` 與最小化串流最高優先權；`GpuField::setSlots` 不再重新配置欄位表；A 的 9b 格點 + 對接 4.29 → 4.12 s（平均）（15.1.19、15.1.20） |
 | 1.81 | 2026-10-21 | posm3／posm4：L1poss 依旋轉產生，盒子檢查用每個旋轉的探針原子範圍（完全等價），已在盒子內的姿勢在重疊原子數達上限時即判定；GPU 由旋轉資料產生姿勢（`GpuDockPrep::filterPosm3`）；40 Å、12 個 StaM 構形的 posm3 9b 316 → 49 s，CPU 版輸出逐位元不變（8.5、15.1.5、15.1.21） |
 | 1.82 | 2026-10-21 | posm2_fft：一次處理多個 StaM 構型（最多 16 個），MobM 探針頻譜每個（MobM 構型、定向）只算一次；`MobmDocker::conformations`、`fftProbeSpectra`／`fftCombine`、`GpuDockPrep` 多組頻譜與 `macMultiKernel`；40 Å、12 個 StaM 構形 173 → 38 s，CPU 版輸出逐位元不變；修正 posm3 視窗重新配置時 StaM 區域指標失效（8.4.3、15.1.22） |
+| 1.83 | 2026-10-21 | 新增 `dock9b.fftStride`（預設 1）：posm2_fft 的 FFT 使用每隔 n 個格點；量測 stride 1–3 的時間與結果（1L2Y、BTN）（8.4.3、13、15.1.23） |

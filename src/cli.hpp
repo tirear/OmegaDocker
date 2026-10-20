@@ -99,6 +99,7 @@ struct Options {
   double posStep = 1.0;
   long long posm1SampleNum = 1000;
   double fftClamp = 10.0;        // posm2_fft
+  long long fftStride = 1;       // posm2_fft: FFT grid spacing in grid points
   long long fftTopPerRot = 1;
   double sepaShellMin = 2.5, sepaShellMax = 6.0;
   double sepaPotPercentile = 5.0;

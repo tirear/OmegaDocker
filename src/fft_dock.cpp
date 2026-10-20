@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 
+#include "error.hpp"
 #include "pocketfft_hdronly.h"
 
 namespace od {
@@ -43,11 +44,16 @@ int fftSize(int n) {
   }
 }
 
-FftStam buildFftStam(const StamField& field, double clamp) {
+FftStam buildFftStam(const StamField& field, double clamp, int stride) {
   static std::atomic<std::uint64_t> next{1};
+  if (stride < 1) throw Error("buildFftStam: stride < 1");
   FftStam s;
   s.id = next.fetch_add(1);
-  s.geom = field.geom();
+  const GridGeometry& fg = field.geom();
+  s.geom = fg;
+  s.stride = stride;
+  s.geom.spacing = fg.spacing * stride;
+  for (int d = 0; d < 3; ++d) s.geom.n[d] = (fg.n[d] - 1) / stride + 1;
   s.clamp = clamp;
   for (int d = 0; d < 3; ++d) s.pad[d] = fftSize(s.geom.n[d]);
   const int nt = field.typeMapCount();
@@ -61,7 +67,7 @@ FftStam buildFftStam(const StamField& field, double clamp) {
     for (int k = 0; k < g.n[2]; ++k)
       for (int j = 0; j < g.n[1]; ++j)
         for (int i = 0; i < g.n[0]; ++i) {
-          const float x = v[g.index(i, j, k)];
+          const float x = v[fg.index(stride * i, stride * j, stride * k)];
           in[s.index(i, j, k)] = m == nt ? std::clamp(x, -c, c) : std::min(x, c);
         }
     s.spectra[m].resize(s.complexSize());

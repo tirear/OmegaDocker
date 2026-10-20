@@ -3909,6 +3909,52 @@ TEST_CASE("dock9b: posm2_fft (2KJJ, 1L2Y)") {
   }
   MESSAGE(std::format("posm2_fft: pad {}x{}x{}, kept {}, max |FFT - direct| {:.2e}, lowest {:.3f}", s.pad[0], s.pad[1],
                       s.pad[2], c.fftPoses.size(), maxErr, *std::min_element(c.fftEnergy.begin(), c.fftEnergy.end())));
+  // fftStride 2 (spec 15.1.23): every second grid point; energies of the trilinear sum on those points.
+  {
+    const od::FftStam s2 = od::buildFftStam(f.field, 10.0, 2);
+    const od::GridGeometry& g2 = s2.geom;
+    CHECK(s2.stride == 2);
+    CHECK(g2.spacing == 2 * g.spacing);
+    CHECK(g2.origin == g.origin);
+    for (int d = 0; d < 3; ++d) {
+      CHECK(g2.n[d] == (g.n[d] - 1) / 2 + 1);
+      CHECK(s2.pad[d] == od::fftSize(g2.n[d]));
+    }
+    std::vector<std::vector<float>> cm2(cm.size(), std::vector<float>(g2.size()));
+    for (std::size_t m = 0; m < cm.size(); ++m)
+      for (int k = 0; k < g2.n[2]; ++k)
+        for (int j = 0; j < g2.n[1]; ++j)
+          for (int i = 0; i < g2.n[0]; ++i) cm2[m][g2.index(i, j, k)] = cm[m][g.index(2 * i, 2 * j, 2 * k)];
+    const od::MobmDocker dk2(*f.x.mobSys, f.field, f.p, nullptr, &s2);
+    const auto c2 = dk2.conformation(f.x.mobSys->inputAngles());
+    REQUIRE(!c2.fftPoses.empty());
+    CHECK(c2.fftPoses.size() <= c.fftPoses.size());
+    double err2 = 0;
+    for (std::size_t k = 0; k < c2.fftPoses.size(); ++k) {
+      const od::Pose& pose = c2.fftPoses[k];
+      const od::QuatF qf = od::toFloat(pose.q);
+      double e = 0;
+      for (std::size_t a = 0; a < probeOf.size(); ++a) {
+        const od::Vec3f& y = c2.coords[probeOf[a]];
+        const od::Vec3f r = od::rotate(qf, {y[0] - static_cast<float>(c2.center[0]), y[1] - static_cast<float>(c2.center[1]),
+                                            y[2] - static_cast<float>(c2.center[2])});
+        const od::Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
+        REQUIRE(g2.inside(w));
+        e += od::interpolate(g2, cm2[mapOf[a]], w) + qOf[a] * od::interpolate(g2, cm2[nt], w) +
+             std::abs(qOf[a]) * od::interpolate(g2, cm2[nt + 1], w);
+      }
+      err2 = std::max(err2, std::abs(e - c2.fftEnergy[k]));
+      CHECK(c2.fftEnergy[k] == doctest::Approx(e).epsilon(1e-4).scale(50.0));
+      // On a point of the FFT grid, i.e. on every second point of the field grid.
+      for (int d = 0; d < 3; ++d) {
+        const double u = (pose.t[d] - g.origin[d]) / g2.spacing;
+        CHECK(std::abs(u - std::round(u)) < 1e-9);
+      }
+    }
+    MESSAGE(std::format("posm2_fft fftStride 2: pad {}x{}x{}, kept {}, max |FFT - direct| {:.2e}", s2.pad[0], s2.pad[1], s2.pad[2],
+                        c2.fftPoses.size(), err2));
+    CHECK_THROWS_AS(od::buildFftStam(f.field, 10.0, 0), od::Error);
+  }
   // fftTopPerRot 3: ascending per orientation, the first one as with 1.
   od::Dock9bParams p3 = f.p;
   p3.fftTopPerRot = 3;
@@ -5300,11 +5346,12 @@ TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
       CHECK(same >= cc.fftPoses.size() * 9 / 10);
     }
   }
-  // Several StaM conformations at once (spec 15.1.22): as each alone on the CPU.
-  for (int top : {1, 3, 20}) {
+  // Several StaM conformations at once (spec 15.1.22): as each alone on the CPU; fftStride 2 (15.1.23).
+  for (const auto& [top, stride] : {std::pair{1, 1}, std::pair{3, 1}, std::pair{20, 1}, std::pair{1, 2}}) {
     INFO(top);
+    INFO(stride);
     std::vector<od::FftStam> ss;
-    for (const auto& [name, field] : fs.fields) ss.push_back(od::buildFftStam(field, 10.0));
+    for (const auto& [name, field] : fs.fields) ss.push_back(od::buildFftStam(field, 10.0, stride));
     od::Dock9bParams p = fs.p;
     p.posm = od::Posm::Posm2Fft;
     p.fftTopPerRot = top;
@@ -5332,8 +5379,8 @@ TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
         worst = std::max(worst, std::abs(static_cast<double>(cg[s].fftEnergy[k]) - cc[s].fftEnergy[k]));
         CHECK(cg[s].fftEnergy[k] == doctest::Approx(cc[s].fftEnergy[k]).epsilon(1e-4).scale(50.0));
       }
-      MESSAGE(std::format("posm2_fft {} StaM sets, {} top {}: kept {}, same translation {}, max |GPU - CPU| energy {:.2e}",
-                          ss.size(), fs.fields[s].first, top, cc[s].fftPoses.size(), same, worst));
+      MESSAGE(std::format("posm2_fft {} StaM sets, {} top {} stride {}: kept {}, same translation {}, max |GPU - CPU| energy {:.2e}",
+                          ss.size(), fs.fields[s].first, top, stride, cc[s].fftPoses.size(), same, worst));
       CHECK(same >= cc[s].fftPoses.size() * 9 / 10);
     }
   }

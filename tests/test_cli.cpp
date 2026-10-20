@@ -95,6 +95,8 @@ TEST_CASE("cli: errors") {
     const auto pf = parse({"--dock9b_posm=posm2_fft"});
     CHECK(pf.posm == "posm2_fft");
     CHECK(pf.fftClamp == 10.0);
+    CHECK(pf.fftStride == 1);
+    CHECK(parse({"--dock9b_fftStride=2"}).fftStride == 2);
     CHECK(pf.fftTopPerRot == 1);
     const auto pg = parse({"--dock9b_posm=posm2_fft", "--dock9b_fftClamp=5", "--dock9b_fftTopPerRot=4"});
     CHECK(pg.fftClamp == 5.0);
@@ -106,6 +108,9 @@ TEST_CASE("cli: errors") {
     };
     CHECK_NOTHROW(v({"--dock9b_posm=posm2_fft"}));
     CHECK_THROWS_AS(v({"--dock9b_posm=posm2_fft", "--dock9b_fftClamp=0"}), od::Error);
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm2_fft", "--dock9b_fftStride=0"}), od::Error);
+    CHECK_THROWS_AS(v({"--dock9b_posm=posm2_fft", "--dock9b_fftStride=17"}), od::Error);
+    CHECK_NOTHROW(v({"--dock9b_posm=posm2_fft", "--dock9b_fftStride=2"}));
     CHECK_THROWS_AS(v({"--dock9b_posm=posm2_fft", "--dock9b_fftTopPerRot=0"}), od::Error);
   }
   auto p3 = parse({"--dock9b_posm=posm3", "--dock9b_sepaPotThreshold=2.5", "--dock9b_sepaPosRange=2"});

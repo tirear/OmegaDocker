@@ -1425,7 +1425,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         if (!stamSet.movable() && gridMode != od::GridMode::Flexres && fixedFft) {
           fft = fixedFft;
         } else {
-          fft = std::make_shared<const od::FftStam>(od::buildFftStam(field, opt.fftClamp));
+          fft = std::make_shared<const od::FftStam>(od::buildFftStam(field, opt.fftClamp, static_cast<int>(opt.fftStride)));
           if (!stamSet.movable() && gridMode != od::GridMode::Flexres) fixedFft = fft;
         }
         fftSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count();

@@ -391,6 +391,8 @@ const std::vector<Param>& params() {
     t.push_back(integer("dock9b.posm1SampleNum", "<n>", "1000", "9b, posm1 and posm4: random L1poss per conformation pair", OD_ACC(posm1SampleNum)));
     t.push_back(real("dock9b.fftClamp", "<energy>", "10",
                      "9b, posm2_fft: map values are clamped to this before the FFT (kcal/mol; elec map to +-this)", OD_ACC(fftClamp)));
+    t.push_back(integer("dock9b.fftStride", "<n>", "1",
+                        "9b, posm2_fft: the FFT uses every n-th grid point per axis (spacing n x grid.spacing)", OD_ACC(fftStride)));
     t.push_back(integer("dock9b.fftTopPerRot", "<n>", "1", "9b, posm2_fft: lowest-energy translations kept per orientation",
                         OD_ACC(fftTopPerRot)));
     t.push_back(real("dock9b.sepaShellMin", "<dist>", "2.5", "9b, posm3: StaM regions use grid points at least this far from the nearest StaM heavy atom (Å)",
@@ -812,6 +814,7 @@ void validateOptions(const Options& o) {
   check(o.posStep > 0, "dock9b.posStep", "> 0");
   check(o.posm1SampleNum >= 1, "dock9b.posm1SampleNum", ">= 1");
   check(o.fftClamp > 0, "dock9b.fftClamp", "> 0");
+  check(o.fftStride >= 1 && o.fftStride <= 16, "dock9b.fftStride", "within [1, 16]");
   check(o.fftTopPerRot >= 1 && o.fftTopPerRot <= 1000000, "dock9b.fftTopPerRot", "within [1, 1000000]");
   check(o.sepaShellMin >= 0, "dock9b.sepaShellMin", ">= 0");
   check(o.sepaShellMax > o.sepaShellMin, "dock9b.sepaShellMax", "greater than dock9b.sepaShellMin");

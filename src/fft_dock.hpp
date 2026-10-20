@@ -24,7 +24,8 @@ int fftSize(int n);
 // Spectra of the clamped maps of one StaM conformation: type maps, then elec, desolv.
 struct FftStam {
   std::uint64_t id = 0;  // unique per buildFftStam call
-  GridGeometry geom;
+  GridGeometry geom;          // FFT grid: every stride-th point of the field grid
+  int stride = 1;
   std::array<int, 3> pad{};  // FFT points per axis (x, y, z), each >= geom.n
   double clamp = 10;
   std::vector<std::vector<std::complex<float>>> spectra;
@@ -32,8 +33,9 @@ struct FftStam {
   std::size_t complexSize() const { return static_cast<std::size_t>(pad[0] / 2 + 1) * pad[1] * pad[2]; }
   std::size_t index(int i, int j, int k) const { return (static_cast<std::size_t>(k) * pad[1] + j) * pad[0] + i; }
 };
-// Type maps are clamped to <= clamp, elec to [-clamp, clamp], desolv to <= clamp.
-FftStam buildFftStam(const StamField& field, double clamp);
+// Type maps are clamped to <= clamp, elec to [-clamp, clamp], desolv to <= clamp. stride: the
+// FFT grid takes the map values at every stride-th point per axis (spacing stride × field spacing).
+FftStam buildFftStam(const StamField& field, double clamp, int stride = 1);
 
 // Per-thread buffers of fftCorrelate.
 struct FftWork {
