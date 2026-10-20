@@ -161,6 +161,23 @@ class MobmDocker {
   std::optional<Pose> l1Pose(const Conf& c, std::uint64_t stream, long long k) const;
   // 8.5 quick filter; updates the counters of stats.
   bool quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats) const;
+  // quickFilter of a pose whose probe atoms are all inside the box (fitsBox): decided at the
+  // overlap limit (spec 15.1.21).
+  bool quickFilterInBox(const Conf& c, const Pose& pose, Dock9bStats& stats) const;
+
+  // posm3 L1pos k (k < c.sepaPoses()): rotation r = k / posm3Translations(), translation
+  // k % posm3Translations(); the rotation gives the orientation, the region anchor and the
+  // rotated conformation anchor rm, pose.t = anchorS + delta - rm (spec 8.4.4, 15.1.21).
+  struct Posm3Rot {
+    Quat q;
+    Vec3 anchorS{}, rm{};
+  };
+  int posm3Translations() const { return transN_ * transN_ * transN_; }
+  Posm3Rot posm3Rot(const Conf& c, long long r) const;
+  Vec3 posm3Delta(int tr) const;
+  Pose posm3Pose(const Posm3Rot& rot, int tr) const;
+  // Box bounds of the L1pos box check (kPosMargin inside the box, float).
+  void fitBounds(float lo[3], float hi[3]) const;
 
   // Energy of a pose; grad (optional): d/d(t, rotation vector, torsions in rad).
   struct PoseEnergy {
@@ -255,6 +272,15 @@ class MobmDocker {
   int transN_ = 0;      // posm3: translations per axis
   std::optional<Pose> posm3Pose(const Conf& c, long long k) const;
   bool fitsBox(const Conf& c, const Pose& pose) const;
+  // Extent of the rotated probe atoms (float, relative to the centre): fitsBox(box, pose) equals
+  // fitsBox(c, pose) for any pose with this orientation (float addition is monotonic).
+  struct RotBox {
+    float lo[3], hi[3];
+  };
+  RotBox rotBox(const Conf& c, const Quat& q) const;
+  template <bool InBox>
+  bool quickFilterT(const Conf& c, const Pose& pose, Dock9bStats& stats) const;
+  bool fitsBox(const RotBox& b, const Pose& pose) const;
   Prepared prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream, bool posm1Only) const;
   Dock9bStats dockPrepared(Prepared pr, std::uint64_t stream, std::size_t chunkSize,
                            const std::function<void(std::vector<DockSample>&)>& sink) const;

@@ -597,57 +597,95 @@ void MobmDocker::fftPoses(Conf& c) const {
     }
 }
 
+void MobmDocker::fitBounds(float lo[3], float hi[3]) const {
+  const float m = static_cast<float>(kPosMargin);
+  for (int d = 0; d < 3; ++d) {
+    lo[d] = static_cast<float>(p_.boxCenter[d] - 0.5 * p_.boxSize[d]) + m;
+    hi[d] = static_cast<float>(p_.boxCenter[d] + 0.5 * p_.boxSize[d]) - m;
+  }
+}
+
 bool MobmDocker::fitsBox(const Conf& c, const Pose& pose) const {
   const QuatF qf = toFloat(pose.q);
   const Vec3f cf = castVec<float>(c.center), tf = castVec<float>(pose.t);
-  const float m = static_cast<float>(kPosMargin);
+  float lo[3], hi[3];
+  fitBounds(lo, hi);
   for (int k : probe_) {
     const Vec3f& y = c.coords[k];
     const Vec3f r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]});
     for (int d = 0; d < 3; ++d) {
       const float w = r[d] + tf[d];
-      if (w < static_cast<float>(p_.boxCenter[d] - 0.5 * p_.boxSize[d]) + m ||
-          w > static_cast<float>(p_.boxCenter[d] + 0.5 * p_.boxSize[d]) - m)
-        return false;
+      if (w < lo[d] || w > hi[d]) return false;
     }
   }
   return true;
 }
 
-std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
-  const long long nt = static_cast<long long>(transN_) * transN_ * transN_;
+MobmDocker::RotBox MobmDocker::rotBox(const Conf& c, const Quat& q) const {
+  const QuatF qf = toFloat(q);
+  const Vec3f cf = castVec<float>(c.center);
+  RotBox b;
+  for (int d = 0; d < 3; ++d) {
+    b.lo[d] = std::numeric_limits<float>::infinity();
+    b.hi[d] = -std::numeric_limits<float>::infinity();
+  }
+  for (int k : probe_) {
+    const Vec3f& y = c.coords[k];
+    const Vec3f r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]});
+    for (int d = 0; d < 3; ++d) {
+      b.lo[d] = std::min(b.lo[d], r[d]);
+      b.hi[d] = std::max(b.hi[d], r[d]);
+    }
+  }
+  return b;
+}
+
+bool MobmDocker::fitsBox(const RotBox& b, const Pose& pose) const {
+  const Vec3f tf = castVec<float>(pose.t);
+  float lo[3], hi[3];
+  fitBounds(lo, hi);
+  for (int d = 0; d < 3; ++d)
+    if (b.lo[d] + tf[d] < lo[d] || b.hi[d] + tf[d] > hi[d]) return false;
+  return true;
+}
+
+Vec3 MobmDocker::posm3Delta(int tr) const {
   const int half = transN_ / 2;
-  long long tr = k % nt;
   Vec3 delta;
   for (int d = 0; d < 3; ++d) {
     delta[d] = p_.sepaPosStep * static_cast<double>(tr % transN_ - half);
     tr /= transN_;
   }
+  return delta;
+}
+
+MobmDocker::Posm3Rot MobmDocker::posm3Rot(const Conf& c, long long r) const {
+  const long long nt = posm3Translations();
   const auto& ss = *sepas_;
   auto yAt = [&](int pk) {
     const Vec3f& y = c.coords[probe_[pk]];
     return Vec3{y[0], y[1], y[2]};
   };
-  Pose pose;
-  Vec3 anchorS, anchorM;  // world point and conformation point made to coincide (before delta)
-  if (k < c.pairPoses) {
+  Posm3Rot rot;
+  Vec3 anchorM;  // conformation point made to coincide with rot.anchorS (before delta)
+  Vec3& anchorS = rot.anchorS;
+  if (r < c.pairPoses / nt) {
     // Pair: match-major, then the rotation about the axis, then the translation.
-    const long long r = k / nt;
     const auto& pm = c.pairs[static_cast<std::size_t>(r / axisAngles_)];
     const int a = static_cast<int>(r % axisAngles_);
     const Vec3 s1 = ss[pm.s1].xyz, s2 = ss[pm.s2].xyz, m1 = yAt(pm.m1), m2 = yAt(pm.m2);
     const Vec3 us = unit({s2[0] - s1[0], s2[1] - s1[1], s2[2] - s1[2]});
     const Quat q0 = alignQuat(unit({m2[0] - m1[0], m2[1] - m1[1], m2[2] - m1[2]}), us);
     const double th = 2 * std::numbers::pi * a / axisAngles_;
-    pose.q = normalized(fromRotationVector({us[0] * th, us[1] * th, us[2] * th}) * q0);
+    rot.q = normalized(fromRotationVector({us[0] * th, us[1] * th, us[2] * th}) * q0);
     for (int d = 0; d < 3; ++d) {
       anchorS[d] = 0.5 * (s1[d] + s2[d]);
       anchorM[d] = 0.5 * (m1[d] + m2[d]);
     }
-  } else if (k >= c.pairPoses + c.singlePoses) {
+  } else if (r >= (c.pairPoses + c.singlePoses) / nt) {
     // Triple: match-major, then the translation; the triangle centroids coincide.
-    const auto& tm = c.triples[static_cast<std::size_t>((k - c.pairPoses - c.singlePoses) / nt)];
-    pose.q = tm.q;
+    const auto& tm = c.triples[static_cast<std::size_t>(r - (c.pairPoses + c.singlePoses) / nt)];
+    rot.q = tm.q;
     anchorS = anchorM = Vec3{0, 0, 0};
     for (int v = 0; v < 3; ++v) {
       const Vec3 sv = ss[tm.s[v]].xyz, mv = yAt(tm.m[v]);
@@ -658,15 +696,28 @@ std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
     }
   } else {
     // Single: placement-major, then the Hopf orientation, then the translation.
-    const long long r = (k - c.pairPoses) / nt;
+    const long long rs = r - c.pairPoses / nt;
     const long long nh = static_cast<long long>(hopf_.size());
-    const auto& sp = c.singles[static_cast<std::size_t>(r / nh)];
-    pose.q = hopf_[static_cast<std::size_t>(r % nh)];
+    const auto& sp = c.singles[static_cast<std::size_t>(rs / nh)];
+    rot.q = hopf_[static_cast<std::size_t>(rs % nh)];
     anchorS = ss[sp[0]].xyz;
     anchorM = yAt(sp[1]);
   }
-  const Vec3 rm = rotate(pose.q, {anchorM[0] - c.center[0], anchorM[1] - c.center[1], anchorM[2] - c.center[2]});
-  for (int d = 0; d < 3; ++d) pose.t[d] = anchorS[d] + delta[d] - rm[d];
+  rot.rm = rotate(rot.q, {anchorM[0] - c.center[0], anchorM[1] - c.center[1], anchorM[2] - c.center[2]});
+  return rot;
+}
+
+Pose MobmDocker::posm3Pose(const Posm3Rot& rot, int tr) const {
+  const Vec3 delta = posm3Delta(tr);
+  Pose pose;
+  pose.q = rot.q;
+  for (int d = 0; d < 3; ++d) pose.t[d] = rot.anchorS[d] + delta[d] - rot.rm[d];
+  return pose;
+}
+
+std::optional<Pose> MobmDocker::posm3Pose(const Conf& c, long long k) const {
+  const long long nt = posm3Translations();
+  const Pose pose = posm3Pose(posm3Rot(c, k / nt), static_cast<int>(k % nt));
   if (!fitsBox(c, pose)) return std::nullopt;
   return pose;
 }
@@ -706,6 +757,15 @@ std::optional<Pose> MobmDocker::l1Pose(const Conf& conf, std::uint64_t stream, l
 }
 
 bool MobmDocker::quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats) const {
+  return quickFilterT<false>(c, pose, stats);
+}
+
+bool MobmDocker::quickFilterInBox(const Conf& c, const Pose& pose, Dock9bStats& stats) const {
+  return quickFilterT<true>(c, pose, stats);
+}
+
+template <bool InBox>
+bool MobmDocker::quickFilterT(const Conf& c, const Pose& pose, Dock9bStats& stats) const {
   int overlap = 0;
   bool near = false;
   const QuatF qf = toFloat(pose.q);
@@ -720,14 +780,18 @@ bool MobmDocker::quickFilter(const Conf& c, const Pose& pose, Dock9bStats& stats
     const Vec3f& y = c.coords[probe_[k]];
     const Vec3f r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]});
     const Vec3f w{r[0] + tf[0], r[1] + tf[1], r[2] + tf[2]};
-    for (int d = 0; d < 3; ++d)
-      if (w[d] < boxLo[d] || w[d] > boxHi[d]) {
-        ++stats.outsideBox;
-        return false;
-      }
+    if constexpr (!InBox)
+      for (int d = 0; d < 3; ++d)
+        if (w[d] < boxLo[d] || w[d] > boxHi[d]) {
+          ++stats.outsideBox;
+          return false;
+        }
     if (!heavy_[k]) continue;
     const float dd = field_.distance<float>(w, nullptr);
-    if (dd < cd) ++overlap;
+    if (dd < cd && ++overlap >= p_.maxOverlapAtomNum && InBox) {
+      ++stats.overlap;
+      return false;
+    }
     if (dd <= nearD) near = true;
   }
   if (overlap >= p_.maxOverlapAtomNum) {
@@ -934,12 +998,25 @@ MobmDocker::Prepared MobmDocker::prepare(std::span<const double> mobAnglesDeg, s
     total.sepaTriples = static_cast<long long>(c.triples.size());
   }
   if (!p_.evaluator || !p_.evaluator->quickFilter(*this, c, stream, first, n, l2, total)) {
+    // posm3 part: per rotation, the box check of its translations from the rotated extent (spec 15.1.21).
+    const long long n3 = p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4 ? std::min(n, c.sepaPoses()) : first;
+    const long long nt = std::max(posm3Translations(), 1);
 #pragma omp parallel
     {
       Dock9bStats st;
       std::vector<long long> mine;
 #pragma omp for schedule(static) nowait
-      for (long long k = first; k < n; ++k) {
+      for (long long r = first / nt; r < (n3 + nt - 1) / nt; ++r) {
+        const Posm3Rot rot = posm3Rot(c, r);
+        const RotBox box = rotBox(c, rot.q);
+        for (long long k = std::max(first, r * nt); k < std::min(n3, (r + 1) * nt); ++k) {
+          const Pose pose = posm3Pose(rot, static_cast<int>(k - r * nt));
+          if (!fitsBox(box, pose)) ++st.outsideBox;
+          else if (quickFilterInBox(c, pose, st)) mine.push_back(k);
+        }
+      }
+#pragma omp for schedule(static) nowait
+      for (long long k = std::max(first, n3); k < n; ++k) {
         const auto pose = l1Pose(c, stream, k);
         if (!pose) ++st.outsideBox;
         else if (quickFilter(c, *pose, st)) mine.push_back(k);

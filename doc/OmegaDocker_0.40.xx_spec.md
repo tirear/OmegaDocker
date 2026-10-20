@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.80 |
+| 文件版本 | 1.81 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1194,6 +1194,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - d 由距離網格三線性內插取得；「重疊」「太遠」只看重原子，「超出範圍」看所有探針原子（8.1）。
 - 檢查順序：超出範圍 → 重疊 → 太遠；每個 pos 只計入第一個成立的條件。
 - posm1、posm2 產生的 pos 已在範圍內（8.4），「超出範圍」只作為保險；posm1 放不下的定向也計入此項。
+- posm3／posm4 的 posm3 部分：產生 pos 時已確認所有探針原子在範圍內（留 `kPosMargin`，比本表的「超出範圍」嚴格），因此重疊原子數達到 `maxOverlapAtomNum` 時即可判定為「重疊」，不必檢查其餘原子；結果與計數不變（1.81 起，15.1.21）。
 
 ### 8.6 9b 最佳化
 
@@ -1808,7 +1809,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 - **分工**：`PoseEvaluator` 新增可選的 `quickFilter`、`fftBatch`／`fftTop` 與 `prepared`；GPU 版由 `GpuDockPrep`（`src/gpu/prep_gpu.hpp`，所有 MobM 共用）實作。未以 CUDA 建置或 `gpu.enable = false` 時一律走 CPU，輸出與 1.59 逐位元相同（posm1、posm2_fft、posm3 已比對所有輸出檔與檢查點）。
 - **8.5 快速篩選**：
-  - posm2：L1poss 直接在 GPU 產生（與 `MobmDocker::l1Pose` 相同的定向與平移，每次 2²² 個）；posm1、posm3、posm4、posm2_fft：L1poss 在 CPU 以 OpenMP 產生（posm1 的 `randomQuat` 用到 double 的 sin／cos，GPU 與 glibc 的捨入可能不同），每次 2²⁰ 個上傳。
+  - posm2：L1poss 直接在 GPU 產生（與 `MobmDocker::l1Pose` 相同的定向與平移，每次 2²² 個）；posm3／posm4 的 posm3 部分：1.81 起由 CPU 算每個旋轉、GPU 產生姿勢（15.1.21）；posm1、posm4 的 posm1 部分、posm2_fft：L1poss 在 CPU 以 OpenMP 產生（posm1 的 `randomQuat` 用到 double 的 sin／cos，GPU 與 glibc 的捨入可能不同），每次 2²⁰ 個上傳。
   - GPU 每個執行緒一個姿勢，運算順序與 `MobmDocker::quickFilter` 相同；`prep_gpu.cu` 以 `-fmad=false` 編譯（CPU 版不使用 FMA），因此篩選結果與 CPU **完全相同**（通過的 L1pos 依序排序；三種 `grid.mode`、posm1／posm2 測試，各計數也相同）。
 - **posm2_fft**：
   - CPU 仍計算每個定向的探針格點座標與合法平移範圍（8.4.3）；StaM 頻譜仍以 pocketfft 建立，上傳一次（每個 StaM 構型）。
@@ -2203,6 +2204,32 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `posm2_fft`、`posm3`（盒子 40 Å、12 個 StaM 構形、`dock9b.rotStep` 15）：L2poss 與 1.79 相同，時間相同。
 - 測試：`gpu: energy grids equal the CPU grids` 加入 `submitDelta`／`finishDelta`（輸入在送出後釋放、結果與 `buildDelta` 相同、重複送出或沒有送出就取回時報錯）。
 
+### 15.1.21 posm3／posm4：L1poss 依旋轉產生與篩選（1.81）
+
+- 起因（posm3，盒子 40 Å、4 個 StaM 構形、4 個 MobM 構形，1.80，GPU）：9b 對接 118 s，GPU 只有約 15 s 在計算。CPU 取樣中 74% 在 `MobmDocker::fitsBox`：L1poss 有 1.31×10⁹ 個，CPU 逐一產生姿勢並檢查所有探針原子是否在盒子內（68% 不在），通過的 4.2×10⁸ 個再以每個 32 bytes 上傳 GPU 篩選（共 18.6 GB）。
+- 觀察：posm3 的 L1pos k = r × T + 平移（T = `posm3Translations()`，預設 27），同一個旋轉 r 的 T 個姿勢只差平移；`pose.t = anchorS + delta − rm`，其中定向 q、區域錨點 anchorS 與旋轉後的構形錨點 rm 只取決於 r。
+- 做法（結果與計數不變）：
+  1. `MobmDocker::posm3Pose` 拆成 `posm3Rot(c, r)`（q、anchorS、rm）、`posm3Delta(tr)` 與 `posm3Pose(rot, tr)`，運算與之前相同。
+  2. 盒子檢查（`fitsBox`）改用每個旋轉的探針原子範圍（`rotBox`：float 旋轉座標各軸的最小、最大值）：float 加法對單一引數單調（四捨五入到最近值），因此「範圍 + t 在邊界內」與「每個原子 + t 都在邊界內」**完全等價**，每個姿勢只需 6 次比較。
+  3. 通過盒子檢查的姿勢不必再檢查範圍（`quickFilterInBox`），重疊原子數達到 `maxOverlapAtomNum` 時即判定為「重疊」（8.5）。
+  4. GPU（`GpuDockPrep::filterPosm3`）：CPU 以 OpenMP 計算每個旋轉（每批約 2²² ÷ T 個旋轉），只上傳 float 四元數與 anchorS、rm（每個旋轉 64 bytes）；GPU 先算每個旋轉的範圍（`rotBoxKernel`），再每個執行緒一個姿勢，以 double 計算 `anchorS + delta − rm` 後轉 float，做盒子檢查與 8.5 篩選（`-fmad=false`，與 CPU 相同）。posm4 的 posm1 部分仍走原本的路徑。
+  5. CPU 版（無 GPU）的 posm3 部分同樣依旋轉處理（每個旋轉算一次範圍）。
+- 量測（TITAN V，16 執行緒；L1poss、L2poss 與各項移除計數均與 1.80 相同）：
+
+| 設定 | 1.80 | 1.81 |
+|---|---|---|
+| posm3，GPU，40 Å，4 個 StaM 構形 | 118.1 s | 18.5 s |
+| posm4，GPU，同上 | 117.8 s | 18.7 s |
+| posm3，GPU，40 Å，12 個 StaM 構形（15.1.19 的設定） | 316.3 s | 49.4 s |
+| posm4，GPU，同上 | 約 312 s | 49.4 s |
+| posm4，CPU（`gpu.enable = false`），34 Å，4 個 StaM 構形 | 122.7 s | 16.4 s |
+
+  - 只做第 4 點（GPU 產生姿勢）時為 23.6 s；第 3 點再省約 5 s（GPU 篩選 kernel 7.2 s 中大部分是重疊判定時多餘的原子）。
+  - CPU 版的所有輸出檔與檢查點與 1.80 逐位元相同。GPU 版的 docking samples 差異在 GPU 加總順序的變動內（15.1.2）。
+  - posm1（A）的時間與 L2poss 不變。
+  - 剩下的時間主要是 9b 最小化（4 個 StaM 構形時 GPU 能量 kernel 約 9 s）；這組設定的 L2poss 有 93% 在最小化時離開網格（盒子相對 1L2Y 較小）。
+- 測試：`dock9b: posm3 regions and poses` 加入 posm4（配對、單點、三點都有，盒子 34 Å）：`posm3Pose(posm3Rot)` 與 `l1Pose` 相同、`quickFilterInBox` 與 `quickFilter` 相同、`prepareJobs` 的 L2poss 與計數等於逐一 `l1Pose` + `quickFilter`；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 posm3、posm4（三種 `grid.mode`，範圍起點不對齊旋轉）。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2526,3 +2553,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.78 | 2026-10-21 | 9a 的 RCD 閉合在 GPU 上（`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`；`GpuRcd`、`GenBatch`）；C 的 9a 1 核心 156 → 6.8 s、16 執行緒 16.7 → 3.0 s；9a 執行紀錄加入產生與最小化的時間（15.1.18、14、16） |
 | 1.79 | 2026-10-21 | 9b `delta` 格點加速：區塊留在裝置上（`DeviceBlocks`，GPU 9b 不需主機複本）、只比較變動原子影響得到的區塊（CPU 與 GPU 共用判斷）、去溶劑化係數預先計算、型別圖累加留在暫存器；A 的 9b 格點 4.6 → 2.0 s、對接 4.2 → 2.3 s、整個執行 12.2 → 7.6 s（8.1、15.1.10、15.1.19） |
 | 1.80 | 2026-10-21 | 9b `delta` 格點與主機端工作重疊：`GpuGridBuilder::submitDelta`／`finishDelta`、送出下一個構形後再處理目前構形；delta 串流最低優先權，`GpuDockPrep` 與最小化串流最高優先權；`GpuField::setSlots` 不再重新配置欄位表；A 的 9b 格點 + 對接 4.29 → 4.12 s（平均）（15.1.19、15.1.20） |
+| 1.81 | 2026-10-21 | posm3／posm4：L1poss 依旋轉產生，盒子檢查用每個旋轉的探針原子範圍（完全等價），已在盒子內的姿勢在重疊原子數達上限時即判定；GPU 由旋轉資料產生姿勢（`GpuDockPrep::filterPosm3`）；40 Å、12 個 StaM 構形的 posm3 9b 316 → 49 s，CPU 版輸出逐位元不變（8.5、15.1.5、15.1.21） |

@@ -3710,6 +3710,61 @@ TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
     REQUIRE(a.has_value() == b.has_value());
     if (a) CHECK(a->t == b->t);
   }
+  // L1poss per posm3 rotation (spec 15.1.21): the L2poss and counters of l1Pose + quickFilter.
+  {
+    od::Dock9bParams pr4 = pDef;
+    pr4.posm = od::Posm::Posm4;
+    pr4.boxSize = {34, 34, 34};
+    pr4.sepaSingle = true;  // all three kinds of rotation
+    pr4.sepaPotPercentile = 1.0;
+    pr4.sepaChargeThreshold = 0.5;
+    pr4.maxOverlapAtomNum = 6;
+    const auto sepasB = od::stamSepas(f.field, pr4);
+    const od::MobmDocker dkb(*f.x.mobSys, f.field, pr4, &sepasB);
+    const auto cb = dkb.conformation(f.x.mobSys->inputAngles());
+    const long long n = dkb.l1Count(cb), nt = dkb.posm3Translations();
+    CHECK(nt == 27);
+    od::Dock9bStats ns;
+    std::vector<long long> naive;
+    long long inBoxSame = 0, sepaFit = 0;
+    for (long long k = 0; k < n; ++k) {
+      const auto pose = dkb.l1Pose(cb, 9, k);
+      if (!pose) {
+        ++ns.outsideBox;
+        continue;
+      }
+      if (k < cb.sepaPoses()) {
+        const od::Pose q = dkb.posm3Pose(dkb.posm3Rot(cb, k / nt), static_cast<int>(k % nt));
+        CHECK(q.t == pose->t);
+        od::Dock9bStats s1, s2;
+        const bool r1 = dkb.quickFilter(cb, *pose, s1), r2 = dkb.quickFilterInBox(cb, *pose, s2);
+        ++sepaFit;
+        inBoxSame += r1 == r2 && s1.overlap == s2.overlap && s1.far == s2.far && s1.outsideBox == 0 && s2.outsideBox == 0;
+      }
+      if (dkb.quickFilter(cb, *pose, ns)) naive.push_back(k);
+    }
+    MESSAGE(std::format("posm4 34 A box: pairs {}, singles {}, triples {}; L1poss {}, L2poss {}, outside {}, overlap {}, far {}",
+                        cb.pairs.size(), cb.singles.size(), cb.triples.size(), n, naive.size(), ns.outsideBox,
+                        ns.overlap, ns.far));
+    CHECK(!cb.pairs.empty());
+    CHECK(!cb.singles.empty());
+    CHECK(!cb.triples.empty());
+    CHECK(ns.outsideBox > 0);
+    CHECK(!naive.empty());
+    CHECK(sepaFit > 0);
+    CHECK(inBoxSame == sepaFit);
+    std::vector<od::MobmDocker::PairJob> jobs(1);
+    const auto ang = f.x.mobSys->inputAngles();
+    jobs[0].mobAnglesDeg = ang;
+    jobs[0].stream = 9;
+    dkb.prepareJobs(jobs);
+    REQUIRE(jobs[0].prepared);
+    CHECK(jobs[0].prepared->l2 == naive);
+    const od::Dock9bStats& ps = jobs[0].prepared->stats;
+    CHECK(ps.outsideBox == ns.outsideBox);
+    CHECK(ps.overlap == ns.overlap);
+    CHECK(ps.far == ns.far);
+  }
   // posm4, pair docked before: only the posm1 part.
   std::vector<od::DockSample> s4;
   const auto st4 = dk4.dockPair(f.x.mobSys->inputAngles(), 9, 1 << 20, [&](std::vector<od::DockSample>& ch) { s4.insert(s4.end(), ch.begin(), ch.end()); }, true);
@@ -5110,6 +5165,45 @@ TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
                           posm == od::Posm::Posm1 ? "posm1" : "posm2", name, n, cpu.size(), gpu.size(), cs.outsideBox,
                           gs.outsideBox, cs.overlap, gs.overlap, cs.far, gs.far));
       CHECK(!cpu.empty());
+      CHECK(gpu == cpu);
+      CHECK(gs.outsideBox == cs.outsideBox);
+      CHECK(gs.overlap == cs.overlap);
+      CHECK(gs.far == cs.far);
+    }
+  }
+  // posm3 and posm4: the poses generated on the device from the rotations (spec 15.1.21).
+  for (od::Posm posm : {od::Posm::Posm3, od::Posm::Posm4}) {
+    for (const auto& [name, field] : fs.fields) {
+      INFO(name);
+      od::Dock9bParams p = fs.p;
+      p.posm = posm;
+      p.boxSize = {34, 34, 34};
+      p.posm1SampleNum = 300;
+      p.sepaSingle = true;
+      p.sepaPotPercentile = 1.0;
+      p.sepaChargeThreshold = 0.5;
+      p.maxOverlapAtomNum = 6;
+      const auto sepas = od::stamSepas(field, p, nullptr);
+      const od::MobmDocker dk(*fs.x.mobSys, field, p, &sepas);
+      const auto c = dk.conformation(angles);
+      const long long n = dk.l1Count(c);
+      od::Dock9bStats cs, gs;
+      std::vector<long long> cpu, gpu;
+      for (long long k = 0; k < n; ++k) {
+        const auto pose = dk.l1Pose(c, 17, k);
+        if (!pose) ++cs.outsideBox;
+        else if (dk.quickFilter(c, *pose, cs)) cpu.push_back(k);
+      }
+      // Part of the range: not aligned to the rotations.
+      const long long k0 = 5 + c.sepaPoses() / 3;
+      REQUIRE(ev.quickFilter(dk, c, 17, 0, k0, gpu, gs));
+      REQUIRE(ev.quickFilter(dk, c, 17, k0, n, gpu, gs));
+      std::sort(gpu.begin(), gpu.end());
+      MESSAGE(std::format("{} {}: L1poss {}, L2poss CPU {} GPU {}; outside {}/{}, overlap {}/{}, far {}/{}",
+                          posm == od::Posm::Posm3 ? "posm3" : "posm4", name, n, cpu.size(), gpu.size(), cs.outsideBox,
+                          gs.outsideBox, cs.overlap, gs.overlap, cs.far, gs.far));
+      CHECK(!cpu.empty());
+      CHECK(cs.outsideBox > 0);
       CHECK(gpu == cpu);
       CHECK(gs.outsideBox == cs.outsideBox);
       CHECK(gs.overlap == cs.overlap);

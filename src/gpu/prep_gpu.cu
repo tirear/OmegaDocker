@@ -74,12 +74,21 @@ struct FilterArgs {
   int orients;
   double base[3], step;
   long long k0;
+  // posm3 (rotation r0 + j: quats[4j], base[6j], extent box[6j])
+  const double* rotBase;
+  const double* delta;
+  const float* box;
+  int nt;
+  long long r0;
+  float fitLo[3], fitHi[3];
   long long* pass;
   unsigned long long* passCount;
   unsigned long long* counts;  // outside, overlap, far
 };
 
-// MobmDocker::quickFilter.
+// MobmDocker::quickFilter; InBox (MobmDocker::quickFilterInBox): every probe atom is known to
+// be inside the box, so the result is decided at the overlap limit.
+template <bool InBox>
 __device__ int classify(const FilterArgs& a, const float t[3], const float q[4]) {
   int overlap = 0;
   bool near = false;
@@ -88,11 +97,12 @@ __device__ int classify(const FilterArgs& a, const float t[3], const float q[4])
     float r[3];
     dock::rotate(q, v, r);
     const float w[3] = {r[0] + t[0], r[1] + t[1], r[2] + t[2]};
-    for (int d = 0; d < 3; ++d)
-      if (w[d] < a.lo[d] || w[d] > a.hi[d]) return kOutside;
+    if constexpr (!InBox)
+      for (int d = 0; d < 3; ++d)
+        if (w[d] < a.lo[d] || w[d] > a.hi[d]) return kOutside;
     if (!a.heavy[k]) continue;
     const float dd = field::distance<float>(a.field, w, nullptr);
-    if (dd < a.cd) ++overlap;
+    if (dd < a.cd && ++overlap >= a.maxOverlap && InBox) return kOverlap;
     if (dd <= a.nearD) near = true;
   }
   if (overlap >= a.maxOverlap) return kOverlap;
@@ -100,7 +110,31 @@ __device__ int classify(const FilterArgs& a, const float t[3], const float q[4])
   return kPass;
 }
 
-template <bool Posm2>
+// posm3: extent of the rotated probe atoms per rotation (MobmDocker::rotBox).
+__global__ void rotBoxKernel(FilterArgs a, int rotations) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= rotations) return;
+  const float* q = a.quats + 4 * j;
+  float lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+  for (int k = 0; k < a.probes; ++k) {
+    const float v[3] = {a.y[3 * k] - a.c[0], a.y[3 * k + 1] - a.c[1], a.y[3 * k + 2] - a.c[2]};
+    float r[3];
+    dock::rotate(q, v, r);
+    for (int d = 0; d < 3; ++d) {
+      lo[d] = fminf(lo[d], r[d]);
+      hi[d] = fmaxf(hi[d], r[d]);
+    }
+  }
+  float* b = const_cast<float*>(a.box) + 6 * j;
+  for (int d = 0; d < 3; ++d) {
+    b[d] = lo[d];
+    b[3 + d] = hi[d];
+  }
+}
+
+enum : int { kExplicit = 0, kGenPosm2 = 1, kGenPosm3 = 2 };
+
+template <int Mode>
 __global__ void __launch_bounds__(kFilterThreads) filterKernel(FilterArgs a) {
   __shared__ unsigned int cnt[4];
   if (threadIdx.x < 4) cnt[threadIdx.x] = 0;
@@ -109,7 +143,19 @@ __global__ void __launch_bounds__(kFilterThreads) filterKernel(FilterArgs a) {
   if (i < a.n) {
     float t[3], q[4];
     long long k;
-    if constexpr (Posm2) {
+    int code = -1;
+    if constexpr (Mode == kGenPosm3) {
+      // MobmDocker::posm3Pose: t = anchorS + delta - rm, then fitsBox from the rotated extent.
+      k = a.k0 + i;
+      const int j = static_cast<int>(k / a.nt - a.r0), tr = static_cast<int>(k % a.nt);
+      const double* bs = a.rotBase + 6 * j;
+      const double* dl = a.delta + 3 * tr;
+      for (int c = 0; c < 3; ++c) t[c] = static_cast<float>(bs[c] + dl[c] - bs[3 + c]);
+      for (int c = 0; c < 4; ++c) q[c] = a.quats[4 * j + c];
+      const float* b = a.box + 6 * j;
+      for (int d = 0; d < 3; ++d)
+        if (b[d] + t[d] < a.fitLo[d] || b[3 + d] + t[d] > a.fitHi[d]) code = kOutside;
+    } else if constexpr (Mode == kGenPosm2) {
       k = a.k0 + i;
       // MobmDocker::l1Pose (posm2): orientation j covers [offset[j], offset[j + 1]).
       int lo = 0, hi = a.orients;  // first offset > k is at index hi
@@ -134,7 +180,7 @@ __global__ void __launch_bounds__(kFilterThreads) filterKernel(FilterArgs a) {
       for (int c = 0; c < 3; ++c) t[c] = p.t[c];
       for (int c = 0; c < 4; ++c) q[c] = p.q[c];
     }
-    const int code = classify(a, t, q);
+    if (code < 0) code = classify<Mode == kGenPosm3>(a, t, q);
     atomicAdd(&cnt[code], 1u);
     if (code == kPass) a.pass[atomicAdd(a.passCount, 1ull)] = k;
   }
@@ -351,6 +397,8 @@ struct GpuDockPrep::Impl {
   DevBuf<long long> offset, pass;
   DevBuf<FilterPose> poses;
   DevBuf<unsigned long long> counters;  // passCount, outside, overlap, far
+  DevBuf<double> base, delta;           // posm3
+  DevBuf<float> box;
   // posm2_fft
   std::uint64_t fftId = 0;
   std::array<int, 3> pad{};
@@ -410,14 +458,15 @@ struct GpuDockPrep::Impl {
     workBytes = std::max(w1, w2);
   }
 
-  void runFilter(FilterArgs a, bool posm2, std::vector<long long>& out, FilterCounts& cnt) {
+  void runFilter(FilterArgs a, int mode, std::vector<long long>& out, FilterCounts& cnt) {
     check(cudaMemsetAsync(counters.p, 0, 4 * sizeof(unsigned long long), stream), "memset");
     a.passCount = counters.p;
     a.counts = counters.p + 1;
     a.pass = pass.p;
     const int blocks = (a.n + kFilterThreads - 1) / kFilterThreads;
-    if (posm2) filterKernel<true><<<blocks, kFilterThreads, 0, stream>>>(a);
-    else filterKernel<false><<<blocks, kFilterThreads, 0, stream>>>(a);
+    if (mode == kGenPosm3) filterKernel<kGenPosm3><<<blocks, kFilterThreads, 0, stream>>>(a);
+    else if (mode == kGenPosm2) filterKernel<kGenPosm2><<<blocks, kFilterThreads, 0, stream>>>(a);
+    else filterKernel<kExplicit><<<blocks, kFilterThreads, 0, stream>>>(a);
     check(cudaGetLastError(), "filterKernel launch");
     unsigned long long h[4];
     check(cudaMemcpyAsync(h, counters.p, sizeof h, cudaMemcpyDeviceToHost, stream), "download counters");
@@ -470,7 +519,7 @@ void GpuDockPrep::filter(const GpuField& field, const FilterSetup& s, int n, con
   d.pass.reserve(static_cast<std::size_t>(n));
   a.poses = d.poses.p;
   a.n = n;
-  d.runFilter(a, false, pass, cnt);
+  d.runFilter(a, kExplicit, pass, cnt);
 }
 
 void GpuDockPrep::filterPosm2(const GpuField& field, const FilterSetup& s, const Posm2Setup& p2, long long k0,
@@ -492,7 +541,38 @@ void GpuDockPrep::filterPosm2(const GpuField& field, const FilterSetup& s, const
   for (long long b = k0; b < k1; b += kPosm2Chunk) {
     a.k0 = b;
     a.n = static_cast<int>(std::min(kPosm2Chunk, k1 - b));
-    d.runFilter(a, true, pass, cnt);
+    d.runFilter(a, kGenPosm2, pass, cnt);
+  }
+}
+
+void GpuDockPrep::filterPosm3(const GpuField& field, const FilterSetup& s, const Posm3Setup& p3, long long k0,
+                              long long k1, std::vector<long long>& pass, FilterCounts& cnt) {
+  if (k1 <= k0) return;
+  Impl& d = *impl_;
+  d.begin();
+  FilterArgs a = d.args(field, s);
+  const int rotations = static_cast<int>(p3.quats.size() / 4);
+  d.quats.upload(p3.quats, d.stream);
+  d.base.upload(p3.base, d.stream);
+  d.delta.upload(p3.delta, d.stream);
+  d.box.reserve(6 * static_cast<std::size_t>(rotations));
+  d.pass.reserve(static_cast<std::size_t>(std::min(kPosm2Chunk, k1 - k0)));
+  a.quats = d.quats.p;
+  a.rotBase = d.base.p;
+  a.delta = d.delta.p;
+  a.box = d.box.p;
+  a.nt = static_cast<int>(p3.delta.size() / 3);
+  a.r0 = p3.r0;
+  for (int c = 0; c < 3; ++c) {
+    a.fitLo[c] = p3.fitLo[c];
+    a.fitHi[c] = p3.fitHi[c];
+  }
+  rotBoxKernel<<<(rotations + kFilterThreads - 1) / kFilterThreads, kFilterThreads, 0, d.stream>>>(a, rotations);
+  check(cudaGetLastError(), "rotBoxKernel launch");
+  for (long long b = k0; b < k1; b += kPosm2Chunk) {
+    a.k0 = b;
+    a.n = static_cast<int>(std::min(kPosm2Chunk, k1 - b));
+    d.runFilter(a, kGenPosm3, pass, cnt);
   }
 }
 
@@ -696,6 +776,7 @@ void GpuDockPrep::releaseWork() {
   d.outC.release();
   d.poses.release();
   d.pass.release();
+  d.box.release();
 }
 
 }  // namespace od

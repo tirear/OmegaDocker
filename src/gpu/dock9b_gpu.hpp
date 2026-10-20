@@ -149,6 +149,43 @@ class GpuPoseEvaluator : public PoseEvaluator {
       p2.step = p.posStep;
       prep_->filterPosm2(*field_, s, p2, k0, k1, l2, cnt);
     } else {
+      if (p.posm == Posm::Posm3 || p.posm == Posm::Posm4) {
+        // posm3 part: the rotations from the CPU, the poses generated on the device (spec 15.1.21).
+        const long long n3 = std::min(k1, c.sepaPoses());
+        const long long nt = dk.posm3Translations();
+        if (k0 < n3) {
+          GpuDockPrep::Posm3Setup p3;
+          for (int tr = 0; tr < nt; ++tr) {
+            const Vec3 dl = dk.posm3Delta(tr);
+            p3.delta.insert(p3.delta.end(), dl.begin(), dl.end());
+          }
+          dk.fitBounds(p3.fitLo, p3.fitHi);
+          const long long rotChunk = std::max<long long>(1, (1LL << 22) / nt);
+          for (long long r0 = k0 / nt; r0 * nt < n3; r0 += rotChunk) {
+            const long long nr = std::min(rotChunk, (n3 + nt - 1) / nt - r0);
+            p3.r0 = r0;
+            p3.quats.resize(4 * static_cast<std::size_t>(nr));
+            p3.base.resize(6 * static_cast<std::size_t>(nr));
+#pragma omp parallel for schedule(static)
+            for (long long j = 0; j < nr; ++j) {
+              const MobmDocker::Posm3Rot rot = dk.posm3Rot(c, r0 + j);
+              const QuatF q = toFloat(rot.q);
+              float* qd = p3.quats.data() + 4 * j;
+              qd[0] = q.w;
+              qd[1] = q.x;
+              qd[2] = q.y;
+              qd[3] = q.z;
+              double* bd = p3.base.data() + 6 * j;
+              for (int d = 0; d < 3; ++d) {
+                bd[d] = rot.anchorS[d];
+                bd[3 + d] = rot.rm[d];
+              }
+            }
+            prep_->filterPosm3(*field_, s, p3, std::max(k0, r0 * nt), std::min(n3, (r0 + nr) * nt), l2, cnt);
+          }
+          k0 = n3;
+        }
+      }
       // Poses from the CPU (MobmDocker::l1Pose), in chunks.
       constexpr long long kChunk = 1LL << 20;
       std::vector<GpuDockPrep::FilterPose> poses;
