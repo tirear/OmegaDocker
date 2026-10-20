@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.83 |
+| 文件版本 | 1.84 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -2279,6 +2279,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - BTN（小分子）：stride 2、3 的能量與 stride 1 相近，前 10 名幾乎都落在 stride 1 找到的位置。
   - 1L2Y（寡肽）：能量大致在 stride 1 自身的變動範圍內（40 Å 的 stride 3 第 1 名與第 40 名較差），但前 10 名的位置大多與 stride 1 不同；stride 1 重跑一次也有 1–3 個位置不同，表示這組設定（單輪）的結果本來就分散。40 Å 時 95% 的 L2poss 在最小化時離開網格，盒子對 1L2Y 偏小；粗格點時 8.5 移除的重疊較多（84,861 → 97,806 → 111,806）。
   - 沒有已知結合結構可比對，以上只能說明與 stride 1 的差異，不能判斷哪一個較正確。預設維持 1。
+  - **需要更多案例測試**（17.3）：不同大小的 MobM（小分子到較長的寡肽）、不同盒子大小、多輪執行，並以有實驗結構的複合物比較與實驗結構的 RMSD。
 - 測試：`dock9b: posm2_fft` 加入 stride 2（格點幾何、FFT 能量與粗格點上直接三線性加總的差 < 10⁻⁴、平移在粗格點上、stride 0 報錯）；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 stride 2 的多組頻譜；`cli` 加入 `dock9b.fftStride` 的預設與範圍。
 
 ### 15.2 依賴套件
@@ -2503,6 +2504,45 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ### 17.2 待確認
 - （無）
 
+### 17.3 需要更多案例測試的參數
+
+以下參數的預設值尚未以足夠的案例驗證。目前的測試幾乎都只用 StaM 2KJJ 搭配 MobM BTN 或 1L2Y，且沒有以實驗結構（已知結合結構）比對。之後需要一組有實驗結構的複合物（小分子、寡肽、核酸，不同大小），以「與實驗結構的 RMSD」與「能量」重新評估。
+
+**(1) 明確未校準（需以標準資料擬合）**
+
+| 參數 | 預設 | 現況 | 節 |
+|---|---|---|---|
+| `od_0100.c0`、`.tors`、`.inter.*`、`.intra.*`、`.entropy.*` | 0、0、0.7564、0.7564、0.9 | 沿用舊版（0.7564 來源待查）；`summary.tsv` 已輸出未乘係數的分項，可離線擬合 | 10.2 |
+| `od_0100.shaking.rrtScaling` | 4 | 暫定 | 10.2 |
+
+**(2) 只有少數案例的測試**
+
+| 參數 | 預設 | 已有的測試 | 待測 | 節 |
+|---|---|---|---|---|
+| `dock9b.fftStride` | 1 | 1L2Y（40、48 Å）、BTN（30 Å），單輪；寡肽的前 10 名位置與 stride 1 多數不同 | 不同 MobM 大小、盒子、多輪；與實驗結構比對 | 15.1.23 |
+| `dock9b.rotStep` | 7.5° | posm2_fft，BTN，15° 與 7.5° 各一次 | 各 posm、較大的 MobM | 8.4.3 |
+| `conf9a.minMethod`、`dock9b.minMethod` | `lbfgs` | 5 種方法，2KJJ + BTN | 寡肽、較大的系統 | 12 |
+| `dock9b.sepa*`（posm3／posm4） | 見 14 | 2KJJ + BTN；`sepaPotPercentile` 註明實測後可改為固定門檻 | 不同電荷分布的 StaM／MobM | 8.4.4、8.4.4.1 |
+| `{stam,mobm}.rcdMaxIter`、`rcdStallTolerance`、`rcdClash` | 20000、10⁻⁴ rad、`none` | 2KJJ 的耦合組（loop A:8–15 + 雙硫鍵） | 其他 loop 長度、多個雙硫鍵 | 7.11、7.11.1 |
+| `energy.clashDistance` | 1.8 Å | 閉合後碰撞檢查門檻的比較（2KJJ） | 對接結果（9b 重疊篩選、排序）的影響 | 7.9、7.11.1 |
+| `od_0100.shaking.radius`、`.step` | 1.4 Å、0.2 Å | 2KJJ + BTN／1L2Y，前 40 名的 Δ(−TS) 與排序 | 與係數一起擬合 | 10.2 |
+| `dock9c.midTopSampleFactor`、`midKeepSkipped`、`sampleBufferNum` | 1、false、65536 | 分批與不分批的差異（BTN，posm2） | 寡肽、多輪 | 9 |
+
+**(3) 依文獻、其他程式或推估設定，尚未測試**
+
+| 參數 | 預設 | 來源 | 節 |
+|---|---|---|---|
+| `dock9b.fftClamp` | 10 kcal/mol | 推估 | 8.4.3 |
+| `dock9b.fftTopPerRot` | 1 | 同 ZDOCK／PIPER | 8.4.3 |
+| `{stam,mobm}.tournamentRate`、`crossoverRate`、`mutationRate` | 60、80、2 % | AutoDock-GPU 1.6 | 7.6 |
+| `{stam,mobm}.peMaxOffset`、`peCoverAngle`、`peSampleNumPerLine` | 30°、360°、4 | 推估 | 7.7 |
+| `ssHalfWidth`、`ssOriginalProb` | 15°、0.9 | 推估 | 5、7.5 |
+| `dock9c.diversityRmsd` | 2.0 Å | 常用的 RMSD 門檻 | 9 |
+| `dock9b.maxOverlapAtomNum`、`maxNearDistance` | 1、6 Å | 推估 | 8.5 |
+| `topology.maxBreakDist`、`energy.closureG` | 0.5 Å、200 | 推估 | 4.8、7.9 |
+| `stam.flexMargin` | 4 Å | 推估 | 4 |
+| `od_0100.unboundCandidateNum` | 20 | 推估 | 10.2 |
+
 ---
 
 ## 18. 未來版本預計支援項目
@@ -2607,3 +2647,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.81 | 2026-10-21 | posm3／posm4：L1poss 依旋轉產生，盒子檢查用每個旋轉的探針原子範圍（完全等價），已在盒子內的姿勢在重疊原子數達上限時即判定；GPU 由旋轉資料產生姿勢（`GpuDockPrep::filterPosm3`）；40 Å、12 個 StaM 構形的 posm3 9b 316 → 49 s，CPU 版輸出逐位元不變（8.5、15.1.5、15.1.21） |
 | 1.82 | 2026-10-21 | posm2_fft：一次處理多個 StaM 構型（最多 16 個），MobM 探針頻譜每個（MobM 構型、定向）只算一次；`MobmDocker::conformations`、`fftProbeSpectra`／`fftCombine`、`GpuDockPrep` 多組頻譜與 `macMultiKernel`；40 Å、12 個 StaM 構形 173 → 38 s，CPU 版輸出逐位元不變；修正 posm3 視窗重新配置時 StaM 區域指標失效（8.4.3、15.1.22） |
 | 1.83 | 2026-10-21 | 新增 `dock9b.fftStride`（預設 1）：posm2_fft 的 FFT 使用每隔 n 個格點；量測 stride 1–3 的時間與結果（1L2Y、BTN）（8.4.3、14、15.1.23） |
+| 1.84 | 2026-10-21 | 新增 17.3：需要更多案例測試的參數（未校準、只有少數案例的測試、尚未測試三類）；`dock9b.fftStride` 標註需要更多案例（15.1.23） |
