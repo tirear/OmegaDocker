@@ -37,10 +37,33 @@ struct DevBuf {
     check(cudaMalloc(&p, std::max<std::size_t>(count, 1) * sizeof(T)), "cudaMalloc");
     n = count;
   }
-  T* upload(const T* v, std::size_t count) {
+  // Pageable v: copied to staging memory before the call returns (v may then be released).
+  T* upload(const T* v, std::size_t count, cudaStream_t s = 0) {
     reserve(count);
-    if (count) check(cudaMemcpy(p, v, count * sizeof(T), cudaMemcpyHostToDevice), "upload");
+    if (count) check(cudaMemcpyAsync(p, v, count * sizeof(T), cudaMemcpyHostToDevice, s), "upload");
+    if (!s && count) check(cudaStreamSynchronize(0), "upload");
     return p;
+  }
+};
+
+// Pinned host buffer.
+template <class T>
+struct HostBuf {
+  T* p = nullptr;
+  std::size_t n = 0;
+  HostBuf() = default;
+  HostBuf(const HostBuf&) = delete;
+  HostBuf& operator=(const HostBuf&) = delete;
+  ~HostBuf() {
+    if (p) cudaFreeHost(p);
+  }
+  void reserve(std::size_t count) {
+    if (count <= n) return;
+    if (p) cudaFreeHost(p);
+    p = nullptr;
+    n = 0;
+    check(cudaMallocHost(&p, std::max<std::size_t>(count, 1) * sizeof(T)), "cudaMallocHost");
+    n = count;
   }
 };
 
@@ -152,42 +175,42 @@ struct OwnedBlocks : DeviceBlocks {
 
 // Uploads the arrays of a view; returns it with device pointers.
 template <class Bufs>
-GridBuildView uploadGrid(Bufs& d, const GridBuildView& h) {
+GridBuildView uploadGrid(Bufs& d, const GridBuildView& h, cudaStream_t s = 0) {
   const std::size_t na = static_cast<std::size_t>(h.cells.atomCount);
   const std::size_t nt = static_cast<std::size_t>(h.typeMapCount);
   const std::size_t npp = nt * static_cast<std::size_t>(h.nTypes);
   const std::size_t cellCount = static_cast<std::size_t>(h.cells.n[0]) * h.cells.n[1] * h.cells.n[2];
   GridBuildView v = h;
-  v.xyz = d.xyz.upload(h.xyz, 3 * na);
-  v.type = d.type.upload(h.type, na);
-  v.elecQ = d.elecQ.upload(h.elecQ, na);
-  v.S = d.S.upload(h.S, na);
-  v.V = d.V.upload(h.V, na);
-  v.solT = d.solT.upload(h.solT, nt);
-  v.volT = d.volT.upload(h.volT, nt);
-  v.desolvW = d.desolvW.upload(h.desolvW, nt * na);
-  v.dsW = d.dsW.upload(h.dsW, na);
-  v.AC = d.AC.upload(h.AC, npp);
-  v.BD = d.BD.upload(h.BD, npp);
-  v.reqm = d.reqm.upload(h.reqm, npp);
-  v.pm = d.pm.upload(h.pm, npp);
-  v.pn = d.pn.upload(h.pn, npp);
+  v.xyz = d.xyz.upload(h.xyz, 3 * na, s);
+  v.type = d.type.upload(h.type, na, s);
+  v.elecQ = d.elecQ.upload(h.elecQ, na, s);
+  v.S = d.S.upload(h.S, na, s);
+  v.V = d.V.upload(h.V, na, s);
+  v.solT = d.solT.upload(h.solT, nt, s);
+  v.volT = d.volT.upload(h.volT, nt, s);
+  v.desolvW = d.desolvW.upload(h.desolvW, nt * na, s);
+  v.dsW = d.dsW.upload(h.dsW, na, s);
+  v.AC = d.AC.upload(h.AC, npp, s);
+  v.BD = d.BD.upload(h.BD, npp, s);
+  v.reqm = d.reqm.upload(h.reqm, npp, s);
+  v.pm = d.pm.upload(h.pm, npp, s);
+  v.pn = d.pn.upload(h.pn, npp, s);
   if (na) {
-    v.cells.start = d.start.upload(h.cells.start, cellCount + 1);
-    v.cells.atoms = d.atoms.upload(h.cells.atoms, na);
+    v.cells.start = d.start.upload(h.cells.start, cellCount + 1, s);
+    v.cells.atoms = d.atoms.upload(h.cells.atoms, na, s);
   }
   return v;
 }
 
 template <class Bufs>
-DistBuildView uploadDist(Bufs& d, const DistBuildView& h) {
+DistBuildView uploadDist(Bufs& d, const DistBuildView& h, cudaStream_t s = 0) {
   const std::size_t na = static_cast<std::size_t>(h.cells.atomCount);
   const std::size_t cellCount = static_cast<std::size_t>(h.cells.n[0]) * h.cells.n[1] * h.cells.n[2];
   DistBuildView v = h;
-  v.xyz = d.dXyz.upload(h.xyz, 3 * na);
+  v.xyz = d.dXyz.upload(h.xyz, 3 * na, s);
   if (na) {
-    v.cells.start = d.dStart.upload(h.cells.start, cellCount + 1);
-    v.cells.atoms = d.dAtoms.upload(h.cells.atoms, na);
+    v.cells.start = d.dStart.upload(h.cells.start, cellCount + 1, s);
+    v.cells.atoms = d.dAtoms.upload(h.cells.atoms, na, s);
   }
   return v;
 }
@@ -209,12 +232,41 @@ struct GpuGridBuilder::Impl {
   DevBuf<float> ref, blocks;
   DevBuf<int> flag, slot;
   DevBuf<double> changed;
+  HostBuf<int> hFlag;
+  cudaStream_t stream = nullptr;  // delta (non-blocking: overlaps the work of the other streams)
+  // The submitted delta (submitDelta): views of the uploaded inputs and the launch arguments.
+  bool pending = false;
+  GridBuildView g{};
+  DistBuildView dv{};
+  DeltaArgs a{};
+  double clamp = 0;
+  int layers = 0;
+  ~Impl() {
+    if (stream) {
+      cudaStreamSynchronize(stream);
+      cudaStreamDestroy(stream);
+    }
+  }
+  // Delta kernel of the block layers [bz0, bz0 + nl) and the copy of their flags into hFlag.
+  void launch(int bz0, int nl) {
+    a.bz0 = bz0;
+    const int nblk = a.nb[0] * a.nb[1] * nl;
+    if (g.typeMapCount <= 4) deltaKernel<4><<<nblk, kBlockPoints, 0, stream>>>(g, dv, clamp, a, out.p, flag.p);
+    else if (g.typeMapCount <= 8) deltaKernel<8><<<nblk, kBlockPoints, 0, stream>>>(g, dv, clamp, a, out.p, flag.p);
+    else if (g.typeMapCount <= 16) deltaKernel<16><<<nblk, kBlockPoints, 0, stream>>>(g, dv, clamp, a, out.p, flag.p);
+    else deltaKernel<kGridMaxTypeMaps><<<nblk, kBlockPoints, 0, stream>>>(g, dv, clamp, a, out.p, flag.p);
+    check(cudaGetLastError(), "deltaKernel launch");
+    check(cudaMemcpyAsync(hFlag.p, flag.p, nblk * sizeof(int), cudaMemcpyDeviceToHost, stream), "deltaKernel");
+  }
 };
 
 GpuGridBuilder::GpuGridBuilder(int device, std::size_t slabValues) : impl_(std::make_unique<Impl>()) {
   impl_->device = device;
   if (slabValues) impl_->slabValues = slabValues;
   check(cudaSetDevice(device), "cudaSetDevice");
+  int least = 0, greatest = 0;
+  check(cudaDeviceGetStreamPriorityRange(&least, &greatest), "cudaDeviceGetStreamPriorityRange");
+  check(cudaStreamCreateWithPriority(&impl_->stream, cudaStreamNonBlocking, least), "cudaStreamCreate");
 }
 
 GpuGridBuilder::~GpuGridBuilder() = default;
@@ -262,6 +314,7 @@ void GpuGridBuilder::setReference(std::uint64_t id, const float* const* maps, in
   d.ref.reserve(static_cast<std::size_t>(mapCount) * points);
   for (int m = 0; m < mapCount; ++m)
     check(cudaMemcpy(d.ref.p + m * points, maps[m], points * sizeof(float), cudaMemcpyHostToDevice), "upload reference");
+  check(cudaDeviceSynchronize(), "upload reference");
   d.refMaps = mapCount;
   d.refPoints = points;
   d.refId = id;
@@ -278,14 +331,22 @@ std::shared_ptr<const DeviceBlocks> GpuGridBuilder::buildDelta(const GridBuildVi
                                                                double clamp, double threshold, const double* changed,
                                                                int changedCount, std::vector<int>& block,
                                                                std::vector<float>* data) {
+  submitDelta(gh, dh, clamp, threshold, changed, changedCount);
+  return finishDelta(block, data);
+}
+
+void GpuGridBuilder::submitDelta(const GridBuildView& gh, const DistBuildView& dh, double clamp, double threshold,
+                                 const double* changed, int changedCount) {
   Impl& d = *impl_;
   check(cudaSetDevice(d.device), "cudaSetDevice");
+  if (d.pending) throw Error("submitDelta: a delta is pending");
   const int maps = gh.typeMapCount + 3;
   const std::size_t points = static_cast<std::size_t>(gh.n[0]) * gh.n[1] * gh.n[2];
   if (d.refId == 0 || maps != d.refMaps || points != d.refPoints) throw Error("buildDelta: no matching reference");
-  const GridBuildView g = uploadGrid(d, gh);
-  const DistBuildView dv = uploadDist(d, dh);
-  DeltaArgs a{};
+  d.g = uploadGrid(d, gh, d.stream);
+  d.dv = uploadDist(d, dh, d.stream);
+  DeltaArgs& a = d.a;
+  a = DeltaArgs{};
   for (int c = 0; c < 3; ++c) {
     a.n[c] = gh.n[c];
     a.nb[c] = (gh.n[c] + kB - 1) / kB;
@@ -298,41 +359,52 @@ std::shared_ptr<const DeviceBlocks> GpuGridBuilder::buildDelta(const GridBuildVi
   a.spacing = gh.spacing;
   a.reach2 = deltaReach2(gh.spacing, std::max(kElecCutoff, dh.cap));
   a.changedCount = changed ? changedCount : -1;
-  a.changed = changed && changedCount > 0 ? d.changed.upload(changed, 3 * static_cast<std::size_t>(changedCount)) : nullptr;
+  a.changed = changed && changedCount > 0
+                  ? d.changed.upload(changed, 3 * static_cast<std::size_t>(changedCount), d.stream)
+                  : nullptr;
+  d.clamp = clamp;
   const std::size_t per = static_cast<std::size_t>(maps) * kBlockPoints;
   const int layerBlocks = a.nb[0] * a.nb[1];
   // Block layers per slab.
-  const int layers = static_cast<int>(std::clamp<std::size_t>(d.slabValues / (per * layerBlocks), 1, a.nb[2]));
-  d.out.reserve(per * layerBlocks * layers);
-  d.flag.reserve(static_cast<std::size_t>(layerBlocks) * layers);
-  d.slot.reserve(static_cast<std::size_t>(layerBlocks) * layers);
+  d.layers = static_cast<int>(std::clamp<std::size_t>(d.slabValues / (per * layerBlocks), 1, a.nb[2]));
+  d.out.reserve(per * layerBlocks * d.layers);
+  d.flag.reserve(static_cast<std::size_t>(layerBlocks) * d.layers);
+  d.slot.reserve(static_cast<std::size_t>(layerBlocks) * d.layers);
+  d.hFlag.reserve(static_cast<std::size_t>(layerBlocks) * d.layers);
+  d.launch(0, std::min(d.layers, a.nb[2]));
+  d.pending = true;
+}
+
+std::shared_ptr<const DeviceBlocks> GpuGridBuilder::finishDelta(std::vector<int>& block, std::vector<float>* data) {
+  Impl& d = *impl_;
+  check(cudaSetDevice(d.device), "cudaSetDevice");
+  if (!d.pending) throw Error("finishDelta: no delta submitted");
+  d.pending = false;
+  const DeltaArgs& a = d.a;
+  const int maps = a.maps, layers = d.layers;
+  const std::size_t per = static_cast<std::size_t>(maps) * kBlockPoints;
+  const int layerBlocks = a.nb[0] * a.nb[1];
   block.assign(static_cast<std::size_t>(layerBlocks) * a.nb[2], -1);
   int stored = 0;
-  std::vector<int> flag, slot;
+  std::vector<int> slot;
   // Blocks of the slabs: the stored blocks of one slab go straight to the result when it is the
   // only slab, otherwise to d.blocks (grown keeping the earlier slabs).
   auto result = std::make_shared<OwnedBlocks>();
   result->device = d.device;
   for (int bz0 = 0; bz0 < a.nb[2]; bz0 += layers) {
     const int nl = std::min(layers, a.nb[2] - bz0);
-    a.bz0 = bz0;
+    if (bz0 > 0) d.launch(bz0, nl);
     const int nblk = layerBlocks * nl;
-    if (gh.typeMapCount <= 4) deltaKernel<4><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
-    else if (gh.typeMapCount <= 8) deltaKernel<8><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
-    else if (gh.typeMapCount <= 16) deltaKernel<16><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
-    else deltaKernel<kGridMaxTypeMaps><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
-    check(cudaGetLastError(), "deltaKernel launch");
-    flag.resize(nblk);
-    check(cudaMemcpy(flag.data(), d.flag.p, nblk * sizeof(int), cudaMemcpyDeviceToHost), "deltaKernel");
+    check(cudaStreamSynchronize(d.stream), "deltaKernel");
     slot.assign(nblk, -1);
     int ns = 0;
     for (int b = 0; b < nblk; ++b)
-      if (flag[b]) {
+      if (d.hFlag.p[b]) {
         slot[b] = ns++;
         block[static_cast<std::size_t>(bz0) * layerBlocks + b] = stored + slot[b];
       }
     if (ns == 0) continue;
-    check(cudaMemcpy(d.slot.p, slot.data(), nblk * sizeof(int), cudaMemcpyHostToDevice), "upload slots");
+    d.slot.upload(slot.data(), nblk, d.stream);
     float* dst;
     if (layers >= a.nb[2]) {
       float* p = nullptr;
@@ -345,13 +417,15 @@ std::shared_ptr<const DeviceBlocks> GpuGridBuilder::buildDelta(const GridBuildVi
         DevBuf<float> grown;
         grown.reserve(std::max(per * (stored + ns), 2 * d.blocks.n));
         if (stored)
-          check(cudaMemcpy(grown.p, d.blocks.p, per * stored * sizeof(float), cudaMemcpyDeviceToDevice), "grow blocks");
+          check(cudaMemcpyAsync(grown.p, d.blocks.p, per * stored * sizeof(float), cudaMemcpyDeviceToDevice, d.stream),
+                "grow blocks");
+        check(cudaStreamSynchronize(d.stream), "grow blocks");
         std::swap(grown.p, d.blocks.p);
         std::swap(grown.n, d.blocks.n);
       }
       dst = d.blocks.p + per * stored;
     }
-    gatherKernel<<<nblk, kBlockPoints>>>(maps, d.out.p, d.slot.p, dst);
+    gatherKernel<<<nblk, kBlockPoints, 0, d.stream>>>(maps, d.out.p, d.slot.p, dst);
     check(cudaGetLastError(), "gatherKernel launch");
     stored += ns;
   }
@@ -360,14 +434,15 @@ std::shared_ptr<const DeviceBlocks> GpuGridBuilder::buildDelta(const GridBuildVi
     check(cudaMalloc(&p, per * stored * sizeof(float)), "cudaMalloc");
     result->ptr = p;
     result->floats = per * stored;
-    check(cudaMemcpy(p, d.blocks.p, per * stored * sizeof(float), cudaMemcpyDeviceToDevice), "blocks");
+    check(cudaMemcpyAsync(p, d.blocks.p, per * stored * sizeof(float), cudaMemcpyDeviceToDevice, d.stream), "blocks");
   }
   if (data) {
     data->resize(per * stored);
     if (stored)
-      check(cudaMemcpy(data->data(), result->ptr, per * stored * sizeof(float), cudaMemcpyDeviceToHost), "blocks");
+      check(cudaMemcpyAsync(data->data(), result->ptr, per * stored * sizeof(float), cudaMemcpyDeviceToHost, d.stream),
+            "blocks");
   }
-  check(cudaDeviceSynchronize(), "buildDelta");
+  check(cudaStreamSynchronize(d.stream), "buildDelta");
   return result;
 }
 

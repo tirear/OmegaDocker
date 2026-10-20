@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.79 |
+| 文件版本 | 1.80 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -2178,9 +2178,30 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 每個 StaM 構形的主機記憶體（9b 視窗） | 103 MiB | 0 MiB |
 
   - 計算格點的 kernel 每個構形 29.4 → 17.5 ms（Nsight Compute：FP64 管線使用率 72%；`-fmad=false` 使 FP64 指令無法合併，為了與 CPU 逐位元相同而保留）。各步驟（每次 1 次執行）：留在裝置上 4.83 → 3.10 s（對接 4.76 → 3.37 s），預先算好係數 → 2.80 s，`__launch_bounds__` → 2.30 s，暫存器 → 1.97 s。
-  - 每個構形剩下約 3 ms 是主機端（StaM 座標、`GridBuildData`、上傳原子資料）；與 GPU 計算重疊可再省約 0.3 s，尚未實作。
+  - 每個構形剩下約 3 ms 是主機端（StaM 座標、`GridBuildData`、上傳原子資料，以及之後加入視窗的準備）；1.80 起與 GPU 計算重疊（15.1.20）。
   - 其他 9b 模式（盒子 40 Å、12 個 StaM 構形、`dock9b.rotStep` 15）：`posm2`、`posm2_fft`、`posm3`、`posm4` 的 L2poss 與 1.78 相同，docking samples 的差異在 GPU 加總順序的變動內；這些設定的時間由對接決定（124–312 s），格點的差異不明顯。
 - 測試：`gpu: energy grids equal the CPU grids` 加入以變動原子限制的 delta（CPU 與 GPU 的區塊與數值相同、不多於不限制時、只在裝置上的區塊與複製回主機的相同、無主機複本時 `pointMap` 報錯）。
+
+### 15.1.20 CUDA 版：9b delta 格點與主機端工作重疊（1.80）
+
+- 起因：1.79 時每個 StaM 構形的 delta 格點在 GPU 上算約 17.5 ms，期間主機只在等待；算完後主機才做該構形的其餘工作（加入視窗：L1poss 與 8.5 快速篩選、`GpuField` 的欄位數）與下一個構形的輸入（StaM 座標、`GridBuildData`、`DistBuildData`），每個構形約 3–5 ms，GPU 此時閒置。
+- 做法（結果不變：delta 區塊與 1.79 逐位元相同）：
+  1. `GpuGridBuilder::buildDelta` 分成 `submitDelta`（上傳輸入、啟動 kernel 與旗標的非同步複製後立即返回；輸入在返回後即可釋放）與 `finishDelta`（等待、收集差異區塊、回傳）；`buildDelta` = 兩者連續呼叫。一次只能有一個進行中的 delta。
+  2. 9b 迴圈：取得構形 k 的區塊後，立刻送出構形 k+1，再處理構形 k 的其餘工作（包括視窗滿時的對接）。裝置記憶體的配置順序不變（構形 k+1 的區塊在 `finishDelta` 時才配置，即視窗對接、釋放之後），視窗的結束條件不受影響。
+  3. 串流：delta 格點用最低優先權的非阻塞串流；8.5 快速篩選與 `posm2_fft`（`GpuDockPrep`）改用最高優先權的非阻塞串流（原本用預設串流），9a／9b 最小化的串流（`GpuEnergy` 的 lane）也改為最高優先權。否則這些 kernel 要排在 delta kernel 的全部 thread block 之後（約 18 ms）。`GpuDockPrep` 每次工作前先等預設串流的複製完成（`GpuField` 仍用預設串流上傳）。
+  4. `GpuField::setSlots` 不再釋放並重新配置欄位表（每加入一個構形都會發生）；欄位表改為倍增擴充。`cudaFree` 會同步整個裝置，原本使主機等待進行中的 delta kernel。
+- 執行紀錄的「9b grids」時間只含主機端與 `finishDelta` 的等待；與主機端工作重疊的 GPU 計算算在「9b docking」內，因此兩者需合併比較。
+- 量測（A，16 執行緒，TITAN V；1.79 與 1.80 交替各執行 3 次）：
+
+| 項目 | 1.79 | 1.80 |
+|---|---|---|
+| 9b 格點 + 對接 | 4.13／4.45／4.28 s | 4.05／4.15／4.15 s |
+| 整個執行 | 7.53／7.77／7.60 s | 7.37／7.48／7.46 s |
+
+  - 省下約 0.17 s，少於主機端時間的總和（約 0.3–0.5 s）：重疊期間 delta kernel 與快速篩選、最小化共用 GPU，彼此變慢。
+  - 視窗數相同（3 個）；最大視窗 44 或 45 個構形，由裝置記憶體上限決定（`gpuFreeMem` 隨當時的可用記憶體變動）。
+  - `posm2_fft`、`posm3`（盒子 40 Å、12 個 StaM 構形、`dock9b.rotStep` 15）：L2poss 與 1.79 相同，時間相同。
+- 測試：`gpu: energy grids equal the CPU grids` 加入 `submitDelta`／`finishDelta`（輸入在送出後釋放、結果與 `buildDelta` 相同、重複送出或沒有送出就取回時報錯）。
 
 ### 15.2 依賴套件
 
@@ -2504,3 +2525,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.77 | 2026-10-21 | 18 節新增未來項目 F3（自由度不足時開放相鄰主鏈兩面角）、F4（抽樣時考慮雙硫鍵幾何）、F5（以 Jacobian 最小平方法同時調整多個兩面角的閉合）；7.11.1 嘗試 5 加入參照 |
 | 1.78 | 2026-10-21 | 9a 的 RCD 閉合在 GPU 上（`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`；`GpuRcd`、`GenBatch`）；C 的 9a 1 核心 156 → 6.8 s、16 執行緒 16.7 → 3.0 s；9a 執行紀錄加入產生與最小化的時間（15.1.18、14、16） |
 | 1.79 | 2026-10-21 | 9b `delta` 格點加速：區塊留在裝置上（`DeviceBlocks`，GPU 9b 不需主機複本）、只比較變動原子影響得到的區塊（CPU 與 GPU 共用判斷）、去溶劑化係數預先計算、型別圖累加留在暫存器；A 的 9b 格點 4.6 → 2.0 s、對接 4.2 → 2.3 s、整個執行 12.2 → 7.6 s（8.1、15.1.10、15.1.19） |
+| 1.80 | 2026-10-21 | 9b `delta` 格點與主機端工作重疊：`GpuGridBuilder::submitDelta`／`finishDelta`、送出下一個構形後再處理目前構形；delta 串流最低優先權，`GpuDockPrep` 與最小化串流最高優先權；`GpuField::setSlots` 不再重新配置欄位表；A 的 9b 格點 + 對接 4.29 → 4.12 s（平均）（15.1.19、15.1.20） |

@@ -42,6 +42,12 @@ class GpuGridBuilder {
   std::shared_ptr<const DeviceBlocks> buildDelta(const GridBuildView& g, const DistBuildView& d, double clamp,
                                                  double threshold, const double* changed, int changedCount,
                                                  std::vector<int>& block, std::vector<float>* data);
+  // buildDelta in two parts (spec 15.1.20): submitDelta uploads the inputs (g, d and changed may
+  // be released when it returns) and starts the computation on the builder's stream; finishDelta
+  // waits for it and returns the blocks. One delta at a time.
+  void submitDelta(const GridBuildView& g, const DistBuildView& d, double clamp, double threshold,
+                   const double* changed, int changedCount);
+  std::shared_ptr<const DeviceBlocks> finishDelta(std::vector<int>& block, std::vector<float>* data);
 
  private:
   struct Impl;

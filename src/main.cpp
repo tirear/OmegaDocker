@@ -1308,17 +1308,32 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         }
       }
     };
-    for (int sid : stamIds) {
+    auto stamAtomsOf = [&](int sid, bool input) {
+      const auto& sa = stamSet.sample(sid).angles;
+      std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end())
+                                                               : stamSet.sys().inputAngles();
+      std::vector<od::Vec3> x;
+      stamSet.sys().evaluate(angles, nullptr, &x);
+      return od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
+    };
+#ifdef OD_HAVE_CUDA
+    // delta on the GPU (spec 15.1.20): the blocks of the next StaM conformation are computed while
+    // the current one joins the window (and the window is docked).
+    bool deltaPending = false;
+    const auto submitDelta = [&](int sid) {
+      const od::GridAtoms a = stamAtomsOf(sid, false);
+      const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
+      gpuGrid->submitDelta(od::GridBuildData(geom, a, probe, energyParams(opt)).view,
+                           od::DistBuildData(geom, a, distCap).view, od::kGridClamp, opt.gridDeltaThreshold,
+                           changed.empty() ? nullptr : changed[0].data(), static_cast<int>(changed.size()));
+      deltaPending = true;
+    };
+#endif
+    for (std::size_t si = 0; si < stamIds.size(); ++si) {
+      const int sid = stamIds[si];
       const auto g0 = std::chrono::steady_clock::now();
       const std::size_t resident0 = od::residentBytes();
-      auto stamAtoms = [&](bool input) {
-        const auto& sa = stamSet.sample(sid).angles;
-        std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end())
-                                                                 : stamSet.sys().inputAngles();
-        std::vector<od::Vec3> x;
-        stamSet.sys().evaluate(angles, nullptr, &x);
-        return od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
-      };
+      auto stamAtoms = [&](bool input) { return stamAtomsOf(sid, input); };
       auto build = [&](const od::GridAtoms& a) {
         return std::pair{std::make_shared<const od::EnergyGrids>(energyGrids(a)),
                          std::make_shared<const od::DistanceGrid>(distanceGrid(a))};
@@ -1350,14 +1365,12 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
             maps.push_back(fixedDist->d.data());
             gpuGrid->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
           }
-          const od::GridAtoms a = stamAtoms(false);
-          const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
+          if (!deltaPending) submitDelta(sid);
           std::vector<int> block;
           std::vector<float> data;
-          auto dev = gpuGrid->buildDelta(od::GridBuildData(geom, a, probe, energyParams(opt)).view,
-                                         od::DistBuildData(geom, a, distCap).view, od::kGridClamp,
-                                         opt.gridDeltaThreshold, changed.empty() ? nullptr : changed[0].data(),
-                                         static_cast<int>(changed.size()), block, deltaHostData ? &data : nullptr);
+          deltaPending = false;
+          auto dev = gpuGrid->finishDelta(block, deltaHostData ? &data : nullptr);
+          if (si + 1 < stamIds.size()) submitDelta(stamIds[si + 1]);
           field = od::StamField::delta(fixedGrids, fixedDist, std::move(block), std::move(data), std::move(dev));
         } else
 #endif

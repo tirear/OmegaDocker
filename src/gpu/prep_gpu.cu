@@ -46,11 +46,12 @@ struct DevBuf {
     p = nullptr;
     n = 0;
   }
-  void upload(const T* v, std::size_t count) {
+  // On stream s; pageable v is copied to staging memory before the call returns.
+  void upload(const T* v, std::size_t count, cudaStream_t s) {
     reserve(count);
-    if (count) check(cudaMemcpy(p, v, count * sizeof(T), cudaMemcpyHostToDevice), "upload");
+    if (count) check(cudaMemcpyAsync(p, v, count * sizeof(T), cudaMemcpyHostToDevice, s), "upload");
   }
-  void upload(const std::vector<T>& v) { upload(v.data(), v.size()); }
+  void upload(const std::vector<T>& v, cudaStream_t s) { upload(v.data(), v.size(), s); }
 };
 
 constexpr int kFilterThreads = 128;
@@ -342,6 +343,8 @@ __global__ void mergeKernel(int n, int top, const Cand* part, Cand* out) {
 
 struct GpuDockPrep::Impl {
   int device = 0;
+  // Highest priority: not delayed by the delta grids of the next StaM conformation (spec 15.1.20).
+  cudaStream_t stream = nullptr;
   // filter
   DevBuf<float> y, quats;
   DevBuf<int> heavy, range;
@@ -365,7 +368,18 @@ struct GpuDockPrep::Impl {
   DevBuf<float> wts;
   DevBuf<Cand> part, outC;
 
-  ~Impl() { destroyPlans(); }
+  ~Impl() {
+    destroyPlans();
+    if (stream) {
+      cudaStreamSynchronize(stream);
+      cudaStreamDestroy(stream);
+    }
+  }
+  // Before work on the stream: the copies of the legacy default stream (e.g. GpuField) are done.
+  void begin() {
+    check(cudaSetDevice(device), "cudaSetDevice");
+    check(cudaStreamSynchronize(0), "cudaStreamSynchronize");
+  }
   Spectra spectraMode = Spectra::Auto;
   // Direct spectra cost about probes × Nc per orientation, the FFTs channels × N log N.
   bool directSpectra(int probes, int channels) const {
@@ -391,31 +405,33 @@ struct GpuDockPrep::Impl {
     checkFft(cufftSetAutoAllocation(c2r, 0), "cufftSetAutoAllocation");
     checkFft(cufftMakePlanMany(r2c, 3, dims, nullptr, 1, 0, nullptr, 1, 0, CUFFT_R2C, b, &w1), "plan R2C");
     checkFft(cufftMakePlanMany(c2r, 3, dims, nullptr, 1, 0, nullptr, 1, 0, CUFFT_C2R, b, &w2), "plan C2R");
+    checkFft(cufftSetStream(r2c, stream), "cufftSetStream");
+    checkFft(cufftSetStream(c2r, stream), "cufftSetStream");
     workBytes = std::max(w1, w2);
   }
 
   void runFilter(FilterArgs a, bool posm2, std::vector<long long>& out, FilterCounts& cnt) {
-    check(cudaMemset(counters.p, 0, 4 * sizeof(unsigned long long)), "memset");
+    check(cudaMemsetAsync(counters.p, 0, 4 * sizeof(unsigned long long), stream), "memset");
     a.passCount = counters.p;
     a.counts = counters.p + 1;
     a.pass = pass.p;
     const int blocks = (a.n + kFilterThreads - 1) / kFilterThreads;
-    if (posm2) filterKernel<true><<<blocks, kFilterThreads>>>(a);
-    else filterKernel<false><<<blocks, kFilterThreads>>>(a);
+    if (posm2) filterKernel<true><<<blocks, kFilterThreads, 0, stream>>>(a);
+    else filterKernel<false><<<blocks, kFilterThreads, 0, stream>>>(a);
     check(cudaGetLastError(), "filterKernel launch");
     unsigned long long h[4];
-    check(cudaMemcpy(h, counters.p, sizeof h, cudaMemcpyDeviceToHost), "download counters");
+    check(cudaMemcpyAsync(h, counters.p, sizeof h, cudaMemcpyDeviceToHost, stream), "download counters");
     const std::size_t old = out.size();
     out.resize(old + h[0]);
-    if (h[0]) check(cudaMemcpy(out.data() + old, pass.p, h[0] * sizeof(long long), cudaMemcpyDeviceToHost), "download");
+    if (h[0]) check(cudaMemcpyAsync(out.data() + old, pass.p, h[0] * sizeof(long long), cudaMemcpyDeviceToHost, stream), "download");
     cnt.outsideBox += static_cast<long long>(h[1]);
     cnt.overlap += static_cast<long long>(h[2]);
     cnt.far += static_cast<long long>(h[3]);
   }
 
   FilterArgs args(const GpuField& field, const FilterSetup& s) {
-    y.upload(s.y);
-    heavy.upload(s.heavy);
+    y.upload(s.y, stream);
+    heavy.upload(s.heavy, stream);
     counters.reserve(4);
     FilterArgs a{};
     a.field = field.deviceView();
@@ -434,7 +450,13 @@ struct GpuDockPrep::Impl {
   }
 };
 
-GpuDockPrep::GpuDockPrep(int device) : impl_(std::make_unique<Impl>()) { impl_->device = device; }
+GpuDockPrep::GpuDockPrep(int device) : impl_(std::make_unique<Impl>()) {
+  impl_->device = device;
+  check(cudaSetDevice(device), "cudaSetDevice");
+  int least = 0, greatest = 0;
+  check(cudaDeviceGetStreamPriorityRange(&least, &greatest), "cudaDeviceGetStreamPriorityRange");
+  check(cudaStreamCreateWithPriority(&impl_->stream, cudaStreamNonBlocking, greatest), "cudaStreamCreate");
+}
 GpuDockPrep::~GpuDockPrep() = default;
 void GpuDockPrep::setSpectra(Spectra s) { impl_->spectraMode = s; }
 
@@ -442,9 +464,9 @@ void GpuDockPrep::filter(const GpuField& field, const FilterSetup& s, int n, con
                          std::vector<long long>& pass, FilterCounts& cnt) {
   if (n <= 0) return;
   Impl& d = *impl_;
-  check(cudaSetDevice(d.device), "cudaSetDevice");
+  d.begin();
   FilterArgs a = d.args(field, s);
-  d.poses.upload(poses, static_cast<std::size_t>(n));
+  d.poses.upload(poses, static_cast<std::size_t>(n), d.stream);
   d.pass.reserve(static_cast<std::size_t>(n));
   a.poses = d.poses.p;
   a.n = n;
@@ -455,11 +477,11 @@ void GpuDockPrep::filterPosm2(const GpuField& field, const FilterSetup& s, const
                               long long k1, std::vector<long long>& pass, FilterCounts& cnt) {
   if (k1 <= k0) return;
   Impl& d = *impl_;
-  check(cudaSetDevice(d.device), "cudaSetDevice");
+  d.begin();
   FilterArgs a = d.args(field, s);
-  d.quats.upload(p2.quats);
-  d.range.upload(p2.range);
-  d.offset.upload(p2.offset);
+  d.quats.upload(p2.quats, d.stream);
+  d.range.upload(p2.range, d.stream);
+  d.offset.upload(p2.offset, d.stream);
   d.pass.reserve(static_cast<std::size_t>(std::min(kPosm2Chunk, k1 - k0)));
   a.quats = d.quats.p;
   a.range = d.range.p;
@@ -477,7 +499,7 @@ void GpuDockPrep::filterPosm2(const GpuField& field, const FilterSetup& s, const
 void GpuDockPrep::setFft(const FftStam& s) {
   Impl& d = *impl_;
   if (s.id != 0 && s.id == d.fftId) return;
-  check(cudaSetDevice(d.device), "cudaSetDevice");
+  d.begin();
   if (s.pad != d.pad) d.destroyPlans();
   d.pad = s.pad;
   d.N = s.realSize();
@@ -486,8 +508,8 @@ void GpuDockPrep::setFft(const FftStam& s) {
   d.spectra.release();
   d.spectra.reserve(static_cast<std::size_t>(d.channels) * d.Nc);
   for (int m = 0; m < d.channels; ++m)
-    check(cudaMemcpy(d.spectra.p + static_cast<std::size_t>(m) * d.Nc, s.spectra[m].data(), d.Nc * sizeof(cufftComplex),
-                     cudaMemcpyHostToDevice),
+    check(cudaMemcpyAsync(d.spectra.p + static_cast<std::size_t>(m) * d.Nc, s.spectra[m].data(), d.Nc * sizeof(cufftComplex),
+                     cudaMemcpyHostToDevice, d.stream),
           "upload spectrum");
   d.fftId = s.id;
 }
@@ -496,7 +518,7 @@ int GpuDockPrep::fftBatch() {
   Impl& d = *impl_;
   if (d.fftId == 0) return 0;
   if (d.planBatch) return d.planBatch;
-  check(cudaSetDevice(d.device), "cudaSetDevice");
+  d.begin();
   const std::size_t per = d.N * sizeof(float) + 2 * d.Nc * sizeof(cufftComplex);
   const double avail = 0.5 * static_cast<double>(gpuFreeMem(d.device));
   int b = static_cast<int>(std::clamp(avail / static_cast<double>(per), 1.0, 64.0));
@@ -513,7 +535,7 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
                          std::pair<float, std::size_t>* out) {
   if (n <= 0) return;
   Impl& d = *impl_;
-  check(cudaSetDevice(d.device), "cudaSetDevice");
+  d.begin();
   if (d.fftId == 0) throw Error("fftTop: no spectra");
   if (n > fftBatch()) throw Error("fftTop: batch too large");
   const int B = d.planBatch;
@@ -522,14 +544,14 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   d.work.reserve(d.workBytes);
   checkFft(cufftSetWorkArea(d.r2c, d.work.p), "cufftSetWorkArea");
   checkFft(cufftSetWorkArea(d.c2r, d.work.p), "cufftSetWorkArea");
-  d.f.upload(f, static_cast<std::size_t>(n) * probes * 3);
+  d.f.upload(f, static_cast<std::size_t>(n) * probes * 3, d.stream);
   std::vector<int> rg(6 * static_cast<std::size_t>(n));
   for (int b = 0; b < n; ++b)
     for (int c = 0; c < 3; ++c) {
       rg[6 * b + c] = lo[b][c];
       rg[6 * b + 3 + c] = hi[b][c];
     }
-  d.ranges.upload(rg);
+  d.ranges.upload(rg, d.stream);
   // Channels as fftCorrelate: the type maps with probe atoms, then elec and desolv when charged.
   const int nt = d.channels - 2;
   std::vector<std::pair<int, std::vector<std::pair<int, float>>>> chans;
@@ -560,7 +582,7 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
     const int len = d.pad[0] / 2 + 1 + d.pad[1] + d.pad[2];
     const std::size_t nTab = static_cast<std::size_t>(n) * probes * len;
     d.tables.reserve(nTab);
-    tableKernel<<<static_cast<unsigned>((nTab + 255) / 256), 256>>>(n, probes, d.f.p, d.pad[0], d.pad[1], d.pad[2],
+    tableKernel<<<static_cast<unsigned>((nTab + 255) / 256), 256, 0, d.stream>>>(n, probes, d.f.p, d.pad[0], d.pad[1], d.pad[2],
                                                                      d.tables.p);
     check(cudaGetLastError(), "tableKernel launch");
     std::vector<int> gm, gs{0}, at;
@@ -576,19 +598,19 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
         gs.push_back(static_cast<int>(at.size()));
       }
     }
-    d.groupMap.upload(gm);
-    d.groupStart.upload(gs);
-    d.atoms.upload(at);
-    d.wts.upload(qs);
+    d.groupMap.upload(gm, d.stream);
+    d.groupStart.upload(gs, d.stream);
+    d.atoms.upload(at, d.stream);
+    d.wts.upload(qs, d.stream);
     const long long nthr = static_cast<long long>(d.pad[0] / 2 + 1) * d.pad[1] * ((d.pad[2] + kDirectZ - 1) / kDirectZ);
     const dim3 grid(static_cast<unsigned>((nthr + 127) / 128), static_cast<unsigned>((n + kDirectOrients - 1) / kDirectOrients));
-    directKernel<<<grid, 128>>>(n, probes, d.pad[0], d.pad[1], d.pad[2], d.tables.p, d.spectra.p, d.Nc, nt,
+    directKernel<<<grid, 128, 0, d.stream>>>(n, probes, d.pad[0], d.pad[1], d.pad[2], d.tables.p, d.spectra.p, d.Nc, nt,
                                 static_cast<int>(gm.size()), d.groupMap.p, d.groupStart.p, d.atoms.p, d.wts.p, d.acc.p);
     check(cudaGetLastError(), "directKernel launch");
   } else {
     // FFT of the spread atoms per channel; the touched points are cleared after each one.
     d.spec.reserve(static_cast<std::size_t>(B) * d.Nc);
-    check(cudaMemset(d.real.p, 0, static_cast<std::size_t>(B) * d.N * sizeof(float)), "memset");
+    check(cudaMemsetAsync(d.real.p, 0, static_cast<std::size_t>(B) * d.N * sizeof(float), d.stream), "memset");
     bool first = true;
     for (const auto& [m, list] : chans) {
       std::vector<int> at;
@@ -597,18 +619,18 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
         at.push_back(a);
         wt.push_back(w);
       }
-      d.atoms.upload(at);
-      d.wts.upload(wt);
+      d.atoms.upload(at, d.stream);
+      d.wts.upload(wt, d.stream);
       const long long ns = static_cast<long long>(n) * static_cast<long long>(at.size());
       const unsigned nsb = static_cast<unsigned>((ns + 255) / 256);
-      spreadKernel<<<nsb, 256>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
+      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
                                  d.pad[2], d.real.p, d.N, 0);
       check(cudaGetLastError(), "spreadKernel launch");
       checkFft(cufftExecR2C(d.r2c, d.real.p, d.spec.p), "R2C");
-      spreadKernel<<<nsb, 256>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
+      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
                                  d.pad[2], d.real.p, d.N, 1);
       check(cudaGetLastError(), "spreadKernel (clear) launch");
-      macKernel<<<dim3(nbx, static_cast<unsigned>(n)), 256>>>(d.Nc, d.spec.p, d.spectra.p + static_cast<std::size_t>(m) * d.Nc,
+      macKernel<<<dim3(nbx, static_cast<unsigned>(n)), 256, 0, d.stream>>>(d.Nc, d.spec.p, d.spectra.p + static_cast<std::size_t>(m) * d.Nc,
                                                               d.acc.p, first ? 1 : 0);
       check(cudaGetLastError(), "macKernel launch");
       first = false;
@@ -616,20 +638,21 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   }
   // Orientations beyond n: their spectra are cleared (the plan transforms B of them).
   if (n < B)
-    check(cudaMemset(d.acc.p + static_cast<std::size_t>(n) * d.Nc, 0, static_cast<std::size_t>(B - n) * d.Nc * sizeof(cufftComplex)),
+    check(cudaMemsetAsync(d.acc.p + static_cast<std::size_t>(n) * d.Nc, 0,
+                          static_cast<std::size_t>(B - n) * d.Nc * sizeof(cufftComplex), d.stream),
           "memset");
   checkFft(cufftExecC2R(d.c2r, d.acc.p, d.real.p), "C2R");
   const float scale = 1.0f / static_cast<float>(d.N);
   if (top <= kSelMax) {
     d.part.reserve(outN * kSelSlices);
     d.outC.reserve(outN);
-    selectKernel<<<dim3(kSelSlices, static_cast<unsigned>(n)), kSelThreads>>>(d.real.p, d.N, d.pad[0], d.pad[1], d.ranges.p,
+    selectKernel<<<dim3(kSelSlices, static_cast<unsigned>(n)), kSelThreads, 0, d.stream>>>(d.real.p, d.N, d.pad[0], d.pad[1], d.ranges.p,
                                                                              scale, top, d.part.p);
     check(cudaGetLastError(), "selectKernel launch");
-    mergeKernel<<<(n + 63) / 64, 64>>>(n, top, d.part.p, d.outC.p);
+    mergeKernel<<<(n + 63) / 64, 64, 0, d.stream>>>(n, top, d.part.p, d.outC.p);
     check(cudaGetLastError(), "mergeKernel launch");
     std::vector<Cand> c(outN);
-    check(cudaMemcpy(c.data(), d.outC.p, outN * sizeof(Cand), cudaMemcpyDeviceToHost), "download");
+    check(cudaMemcpyAsync(c.data(), d.outC.p, outN * sizeof(Cand), cudaMemcpyDeviceToHost, d.stream), "download");
     for (std::size_t i = 0; i < outN; ++i) out[i] = {c[i].e, c[i].i == ~0ull ? SIZE_MAX : static_cast<std::size_t>(c[i].i)};
     return;
   }
@@ -637,7 +660,7 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   std::vector<float> e(d.N);
   std::vector<std::pair<float, std::size_t>> best;
   for (int b = 0; b < n; ++b) {
-    check(cudaMemcpy(e.data(), d.real.p + static_cast<std::size_t>(b) * d.N, d.N * sizeof(float), cudaMemcpyDeviceToHost),
+    check(cudaMemcpyAsync(e.data(), d.real.p + static_cast<std::size_t>(b) * d.N, d.N * sizeof(float), cudaMemcpyDeviceToHost, d.stream),
           "download");
     best.clear();
     for (int k = lo[b][2]; k <= hi[b][2]; ++k)

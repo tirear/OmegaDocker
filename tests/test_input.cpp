@@ -5231,6 +5231,23 @@ TEST_CASE("gpu: energy grids equal the CPU grids") {
                                      od::DistBuildData(geom, moved, cap).view, od::kGridClamp, thr, changed[0].data(),
                                      static_cast<int>(changed.size()), blockD, nullptr);
         CHECK(blockD == blockR);
+        // submitDelta / finishDelta (spec 15.1.20): the inputs may be released after submitDelta.
+        {
+          std::vector<int> blockS;
+          std::vector<float> dataS;
+          {
+            const od::GridBuildData gbd(geom, moved, x.mobm.type, params);
+            const od::DistBuildData dbd(geom, moved, cap);
+            const std::vector<od::Vec3> ch = changed;
+            gb.submitDelta(gbd.view, dbd.view, od::kGridClamp, thr, ch[0].data(), static_cast<int>(ch.size()));
+          }
+          CHECK_THROWS(gb.submitDelta(od::GridBuildData(geom, moved, x.mobm.type, params).view,
+                                      od::DistBuildData(geom, moved, cap).view, od::kGridClamp, thr, nullptr, -1));
+          gb.finishDelta(blockS, &dataS);
+          CHECK(blockS == blockR);
+          CHECK(dataS == dataR);
+          CHECK_THROWS(gb.finishDelta(blockS, &dataS));
+        }
         REQUIRE(dev);
         REQUIRE(devOnly);
         CHECK(dev->floats == dataR.size());

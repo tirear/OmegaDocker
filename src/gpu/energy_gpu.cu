@@ -506,6 +506,8 @@ struct GpuField::Impl {
     std::vector<FieldView> v(slots.size(), FieldView{});
     for (std::size_t i = 0; i < v.size(); ++i)
       if (slots[i]) v[i] = slots[i]->view;
+    // Grown geometrically: cudaFree synchronizes the device (spec 15.1.20).
+    if (v.size() > views.n) views.reserve(std::max(v.size(), 2 * views.n));
     views.upload(v);
   }
 };
@@ -555,7 +557,6 @@ void GpuField::setSlots(int n) {
       best = d.slots[i]->used;
       d.current = i;
     }
-  d.views.release();
   d.refreshViews();
 }
 
@@ -1141,7 +1142,11 @@ GpuEnergy::GpuEnergy(const EnergyModel& m, int device) : impl_(std::make_unique<
   d.view.pairParams = nullptr;
   d.view.pairs = nullptr;
   d.view.closures = d.closures.p;
-  for (Lane& L : d.lanes) check(cudaStreamCreateWithFlags(&L.stream, cudaStreamNonBlocking), "cudaStreamCreate");
+  // Highest priority: not delayed by the delta grids of the next StaM conformation (spec 15.1.20).
+  int least = 0, greatest = 0;
+  check(cudaDeviceGetStreamPriorityRange(&least, &greatest), "cudaDeviceGetStreamPriorityRange");
+  for (Lane& L : d.lanes)
+    check(cudaStreamCreateWithPriority(&L.stream, cudaStreamNonBlocking, greatest), "cudaStreamCreate");
 }
 
 GpuEnergy::~GpuEnergy() = default;
