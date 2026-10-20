@@ -16,6 +16,23 @@ constexpr int kGridMaxTypeMaps = kFieldMaxMaps - 3;
 // Blocks of kDeltaBlock^3 points (spec 8.1 delta).
 constexpr int kDeltaBlock = 8;
 
+// Delta blocks reached by a changed atom position (spec 15.1.19): squared distance from the centre
+// of a block within which a position may contribute to one of its points (reach: the largest
+// cutoff of the maps).
+OD_HD inline double deltaReach2(double spacing, double reach) {
+  using std::sqrt;
+  const double h = reach + 0.5 * sqrt(3.0) * (kDeltaBlock - 1) * spacing;
+  return h * h;
+}
+OD_HD inline bool deltaBlockReached(const double* origin, double spacing, int bx, int by, int bz, const double* p,
+                                    double reach2) {
+  const double c = 0.5 * (kDeltaBlock - 1);
+  const double x = p[0] - (origin[0] + (bx * kDeltaBlock + c) * spacing);
+  const double y = p[1] - (origin[1] + (by * kDeltaBlock + c) * spacing);
+  const double z = p[2] - (origin[2] + (bz * kDeltaBlock + c) * spacing);
+  return x * x + y * y + z * z <= reach2;
+}
+
 struct GridBuildView {
   double origin[3], spacing;
   int n[3];
@@ -27,6 +44,8 @@ struct GridBuildView {
   const double* V;
   const double* solT;   // per map
   const double* volT;
+  const double* desolvW;  // per (StaM atom, map): cDesolv (solT V + S volT)
+  const double* dsW;      // per StaM atom: cDesolvQasp V
   const double* AC;     // per (map, Ad4Type)
   const double* BD;
   const double* reqm;
@@ -36,12 +55,21 @@ struct GridBuildView {
   FieldCells cells;     // over the StaM atoms, cell 4 Å
 };
 
-// e: typeMapCount values (unclamped); el, ds: elec and desolv map values.
+// e: typeMapCount values (unclamped); el, ds: elec and desolv map values. MaxT >= typeMapCount:
+// with a small MaxT the GPU keeps e in registers (spec 15.1.19); the values do not depend on it.
+#ifdef __CUDA_ARCH__
+#define OD_UNROLL _Pragma("unroll")
+#else
+#define OD_UNROLL
+#endif
+template <int MaxT = kGridMaxTypeMaps>
 OD_HD inline void gridPoint(const GridBuildView& v, int i, int j, int k, double* e, double& el, double& ds) {
   using std::sqrt;
   const double p[3] = {v.origin[0] + i * v.spacing, v.origin[1] + j * v.spacing, v.origin[2] + k * v.spacing};
   const int nt = v.typeMapCount;
-  for (int t = 0; t < nt; ++t) e[t] = 0.0;
+  OD_UNROLL
+  for (int t = 0; t < MaxT; ++t)
+    if (t < nt) e[t] = 0.0;
   el = 0;
   ds = 0;
   field::forNear(v.cells, p, kElecCutoff, [&](int a) {
@@ -54,10 +82,13 @@ OD_HD inline void gridPoint(const GridBuildView& v, int i, int j, int k, double*
     el += ee;
     double gauss;
     ad4Desolv(r, 1.0, v.rMin, gauss, de);
-    ds += v.cDesolvQasp * v.V[a] * gauss;
+    ds += v.dsW[a] * gauss;
     const int ta = v.type[a];
-    for (int t = 0; t < nt; ++t) {
-      e[t] += v.cDesolv * (v.solT[t] * v.V[a] + v.S[a] * v.volT[t]) * gauss;
+    const double* w = v.desolvW + static_cast<std::size_t>(a) * nt;
+    OD_UNROLL
+    for (int t = 0; t < MaxT; ++t) {
+      if (t >= nt) break;
+      e[t] += w[t] * gauss;
       if (r < kVdwCutoff) {
         const int q = t * v.nTypes + ta;
         ad4VdwHb(r, v.AC[q], v.BD[q], v.pm[q], v.pn[q], v.reqm[q], v.halfSmooth, ee, de);

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.78 |
+| 文件版本 | 1.79 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -915,6 +915,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 樣本 k 對每個區塊記錄一個索引：−1 表示沿用參考構型；否則指向差異區塊。
   - 差異區塊 = 樣本 k 與參考構型在該區塊的任一張圖（各 type map、elec、desolv、距離網格）有任一格點差值 > `grid.deltaThreshold`（預設 1×10⁻⁴；距離網格的單位為 Å）。
   - 差異區塊儲存樣本 k 所有圖的完整數值（不是差值），查詢時不需相加。CPU 版仍需先建立樣本 k 的完整網格再比較，只節省記憶體。
+  - 只比較變動原子影響得到的區塊（1.79）：變動原子 = 座標與參考構型不同的 StaM 格點原子；區塊中心與某個變動原子的參考或樣本位置的距離 ≤ 影響距離 + 區塊半對角線（影響距離 = max(20.48 Å, 距離網格上限)，半對角線 = √3/2 × 7 × 網格間距）的區塊才比較，其餘沿用參考構型。其餘區塊的每個格點與所有變動原子的距離都超過截斷距離，與參考構型只差加總順序造成的捨入（cell list 的範圍隨原子座標改變），因此不比較也不會遺漏差異。CPU 與 GPU 用同一判斷（`deltaBlockReached`，`src/grid_kernel.hpp`）。
   - StaM 群沒有可轉動兩面角時，三種模式都只用輸入構型的網格。
 - 網格依 StaM 構型快取，多個 MobM 選到同一 StaM 構型時共用。
 - 執行紀錄：開始時印出實際的模式、網格原子數、可動原子數、主鏈是否可動；每輪印出建網格時間、`flexres` 的可動原子數、`delta` 儲存的區塊比例。
@@ -1915,6 +1916,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `full`、`flexres` 與參考構形：能量格點與距離格點在 GPU 上計算後複製回主機。
   - `delta`：參考構形的所有圖（型別圖、elec、desolv、距離）上傳一次後留在裝置上。每個樣本以整層 8³ 區塊分段：計算所有圖、每個區塊與參考比較（與 CPU 相同：任一點 `|sample − ref| > grid.deltaThreshold`），依 bz、by、bx 順序編號後，只把不同的區塊複製回主機，由 `StamField::delta(ref, refDist, block, data)` 建立。區塊內容與 CPU 的 `StamField::delta` 逐位元相同。
   - 裝置記憶體：參考圖 (型別圖數 + 3) × 格點數 × 4 bytes（上例 166 MB），另加一段的工作記憶體。
+- 1.79 起 `delta` 的計算方式見 15.1.19（區塊留在裝置上、只算變動原子影響得到的區塊）。
 - **驗證**：單元測試比較 GPU 與 CPU 的能量格點、距離格點與 delta 區塊（兩種盒子、預設分段與不整除的小分段、三個門檻），全部逐位元相同。CPU 版輸出與 1.64 逐位元相同。GPU 版的最終結果與 1.64 不同，但 1.64 自身連續兩次執行也不同（9a／9b 梯度 `atomicAdd` 的加總順序，15.1.4）；儲存的 delta 區塊數相同。
 - **速度**（上例，舊版、新版各執行 1 次；機器同時有其他負載）：
 
@@ -2157,6 +2159,28 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 開發過程：每個嘗試一個 warp、double、一次做完時比 16 執行緒的 CPU 慢（19.3 s，每次 kernel 等最長的嘗試）；改 float 與分段後 7.3 s；再改為每對原子一條執行緒的 tile（多個嘗試共用一個 warp）、不加 `-fmad=false` 後 2.1 s。
 - 統計上與 CPU 相同：C 以 11 個 seed（L1 16384）比較，L2 平均 GPU 433.7、CPU 435.5，閉合失敗平均 13,003／12,994；每個 seed 的差異（±40）在隨機變動內。
 - 測試：`closure: RCD on the GPU (2KJJ A:8-15 with the disulfide A:6-A:11)`（200 個樣本，CPU 與 GPU 都 200/200 閉合，閉合後兩個連結的偏差都在容許內；best effort 雙硫鍵 A:20–B:19 的平均偏差 CPU 0.793、GPU 0.770 Å）；`9a: L2 pool refill with a ConfEvaluator equals the CPU path (1L2Y)` 加入 `GenBatch` 的協程路徑與 `genBatchMin`（結果與 OpenMP 路徑相同）；`cli: 9a RCD on the GPU`。
+
+### 15.1.19 CUDA 版：9b delta 格點的加速（1.79）
+
+- 起因：1.78 時 A（2KJJ StaM、1L2Y MobM、64 Å 盒子 173³ 點、`stam.dockingConfSampleNum` 100，16 執行緒）整個執行 12.1–13.3 s，其中 9b 格點 4.6–4.8 s、9b 對接 4.1–4.8 s。Nsight Systems：每個 StaM 構形約 68 ms，其中 `sampleKernel`（計算全部格點）29 ms；delta 區塊（每個構形 108 MB，61.6% 的區塊）複製回主機 8.5 ms、主機上的配置與 `StamField::model()` 的複製約 16 ms、再上傳到 GPU（`GpuField::set`）8.6 ms。
+- 改動（結果不變：CPU 與 GPU 的 delta 區塊仍逐位元相同，CPU 版輸出與 1.78 逐位元相同）：
+  1. **區塊留在裝置上**：`GpuGridBuilder::buildDelta` 把差異區塊收集到一塊大小剛好的裝置記憶體（`DeviceBlocks`），由 `StamField::delta(ref, refDist, block, data, device)` 持有；`GpuField::set` 直接使用，不再上傳。只有 CPU 會讀格點時才複製回主機：無 GPU 9b 評估、`posm3`／`posm4`（StaM 區域，8.4.4）、`posm2_fft`（StaM 頻譜，8.4.3）。沒有主機複本時，CPU 的 `energy`／`distance`／`pointMap` 讀到差異區塊會報錯（不會讀錯值）。`FieldModel::data` 改為共用指標，`model()` 不再複製區塊。
+  2. **只算變動原子影響得到的區塊**（8.1）：變動原子的參考與樣本位置上傳到 GPU；每個 8³ 區塊一個 thread block（512 執行緒，一點一執行緒），先判斷是否受影響，不受影響的區塊不計算。計算、比較與寫出合併為一個 kernel（`deltaKernel`），值寫入區塊順序的工作區，再把差異區塊依編號複製到結果。A 的受影響區塊約 64%（儲存 61.6%）；不受影響的區塊離原子遠、本來就快，計算時間幾乎不變。
+  3. **減少 FP64 運算**：去溶劑化項每個（原子、型別圖）的係數 `cDesolv (solT V + S volT)` 與每個原子的 `cDesolvQasp V` 在 `GridBuildData` 先算好（`desolvW`、`dsW`）；乘法順序與原式相同，值逐位元相同。
+  4. **暫存器**：`gridPoint<MaxT>` 的型別圖累加陣列在 GPU 上依型別圖數（≤ 4／8／16／37）展開，留在暫存器（原本在 local memory）；`__launch_bounds__(512, 2)`（每執行緒 64 個暫存器，佔用率 25% → 50%）。
+- 量測（A，16 執行緒，TITAN V；1.78 與 1.79 交替各執行 2 次）：
+
+| 項目 | 1.78 | 1.79 |
+|---|---|---|
+| 9b 格點，100 個 StaM 構形 | 4.63／4.64 s | 1.97／1.97 s |
+| 9b 對接 | 4.21／4.10 s | 2.25／2.30 s |
+| 整個執行 | 12.29／12.06 s | 7.53／7.62 s |
+| 每個 StaM 構形的主機記憶體（9b 視窗） | 103 MiB | 0 MiB |
+
+  - 計算格點的 kernel 每個構形 29.4 → 17.5 ms（Nsight Compute：FP64 管線使用率 72%；`-fmad=false` 使 FP64 指令無法合併，為了與 CPU 逐位元相同而保留）。各步驟（每次 1 次執行）：留在裝置上 4.83 → 3.10 s（對接 4.76 → 3.37 s），預先算好係數 → 2.80 s，`__launch_bounds__` → 2.30 s，暫存器 → 1.97 s。
+  - 每個構形剩下約 3 ms 是主機端（StaM 座標、`GridBuildData`、上傳原子資料）；與 GPU 計算重疊可再省約 0.3 s，尚未實作。
+  - 其他 9b 模式（盒子 40 Å、12 個 StaM 構形、`dock9b.rotStep` 15）：`posm2`、`posm2_fft`、`posm3`、`posm4` 的 L2poss 與 1.78 相同，docking samples 的差異在 GPU 加總順序的變動內；這些設定的時間由對接決定（124–312 s），格點的差異不明顯。
+- 測試：`gpu: energy grids equal the CPU grids` 加入以變動原子限制的 delta（CPU 與 GPU 的區塊與數值相同、不多於不限制時、只在裝置上的區塊與複製回主機的相同、無主機複本時 `pointMap` 報錯）。
 
 ### 15.2 依賴套件
 
@@ -2479,3 +2503,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.76 | 2026-10-21 | 新增 `{stam,mobm}.rcdStallTolerance`（預設 10⁻⁴ rad）：RCD 停滯時結束嘗試；A 的 9a 1 核心 47.4 → 3.4 s；0.1–10⁻⁹ 的量測（7.11、7.11.1 嘗試 5、14） |
 | 1.77 | 2026-10-21 | 18 節新增未來項目 F3（自由度不足時開放相鄰主鏈兩面角）、F4（抽樣時考慮雙硫鍵幾何）、F5（以 Jacobian 最小平方法同時調整多個兩面角的閉合）；7.11.1 嘗試 5 加入參照 |
 | 1.78 | 2026-10-21 | 9a 的 RCD 閉合在 GPU 上（`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`；`GpuRcd`、`GenBatch`）；C 的 9a 1 核心 156 → 6.8 s、16 執行緒 16.7 → 3.0 s；9a 執行紀錄加入產生與最小化的時間（15.1.18、14、16） |
+| 1.79 | 2026-10-21 | 9b `delta` 格點加速：區塊留在裝置上（`DeviceBlocks`，GPU 9b 不需主機複本）、只比較變動原子影響得到的區塊（CPU 與 GPU 共用判斷）、去溶劑化係數預先計算、型別圖累加留在暫存器；A 的 9b 格點 4.6 → 2.0 s、對接 4.2 → 2.3 s、整個執行 12.2 → 7.6 s（8.1、15.1.10、15.1.19） |

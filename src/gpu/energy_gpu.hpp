@@ -26,6 +26,8 @@ int gpuDeviceCount();
 GpuDeviceInfo gpuDeviceInfo(int device);
 // Free device memory (bytes).
 std::size_t gpuFreeMem(int device);
+// Copies n floats from device memory to host memory.
+void gpuDownload(const float* device, float* host, std::size_t n);
 
 // StaM fields (spec 8.1, 8.2) on the device: up to slots() fields stay resident (spec 15.1.16);
 // fields with the same grids (FieldModel::base) share the reference maps.

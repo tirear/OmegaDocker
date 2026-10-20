@@ -469,6 +469,10 @@ std::size_t gpuFreeMem(int device) {
   return freeMem;
 }
 
+void gpuDownload(const float* device, float* host, std::size_t n) {
+  check(cudaMemcpy(host, device, n * sizeof(float), cudaMemcpyDeviceToHost), "gpuDownload");
+}
+
 // Reference maps of a field, shared by the slots with the same grids (FieldModel::base).
 struct FieldMaps {
   std::shared_ptr<const void> base, baseDist;
@@ -480,12 +484,14 @@ struct FieldSlot {
   std::uint64_t id = 0, used = 0;
   std::shared_ptr<FieldMaps> maps;
   DevBuf<float> data;
+  std::shared_ptr<const DeviceBlocks> deviceData;  // instead of data (spec 15.1.19)
   DevBuf<int> block, movedHeavy, cellStart, cellAtoms, heavyStart, heavyAtoms, pairM, pairN;
   DevBuf<FieldMoved> moved;
   DevBuf<double> solT, volT, pairAC, pairBD, pairReqm;
   FieldView view{};
   std::size_t bytes() const {
-    return data.n * sizeof(float) + block.n * sizeof(int) + moved.n * sizeof(FieldMoved);
+    return data.n * sizeof(float) + (deviceData ? deviceData->floats * sizeof(float) : 0) + block.n * sizeof(int) +
+           moved.n * sizeof(FieldMoved);
   }
 };
 
@@ -604,7 +610,11 @@ void GpuField::set(const FieldModel& fm) {
   auto sp = std::make_unique<FieldSlot>();
   FieldSlot& s = *sp;
   s.maps = std::move(maps);
-  s.data.upload(fm.data);
+  // Delta blocks already in device memory (built there) are used in place.
+  if (fm.deviceData && fm.deviceData->device == d.device) s.deviceData = fm.deviceData;
+  else if (fm.data) s.data.upload(*fm.data);
+  else if (fm.deviceData) throw Error("GpuField: delta blocks on another device");
+  else s.data.upload(std::vector<float>{});
   s.block.upload(fm.block);
   s.moved.upload(fm.moved);
   s.movedHeavy.upload(fm.movedHeavy);
@@ -621,7 +631,7 @@ void GpuField::set(const FieldModel& fm) {
   s.pairN.upload(fm.pairN);
   FieldView v = fm.view;
   for (int m = 0; m < nm; ++m) v.maps[m] = s.maps->maps.p + static_cast<std::size_t>(m) * fm.points;
-  v.data = s.data.p;
+  v.data = s.deviceData ? s.deviceData->ptr : s.data.p;
   v.block = s.block.p;
   v.moved = s.moved.p;
   v.movedHeavy = s.movedHeavy.p;

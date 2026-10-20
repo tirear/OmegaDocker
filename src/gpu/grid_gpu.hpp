@@ -36,6 +36,12 @@ class GpuGridBuilder {
   // layout of StamField::delta(ref, refDist, block, data).
   void buildDelta(const GridBuildView& g, const DistBuildView& d, double clamp, double threshold,
                   std::vector<int>& block, std::vector<float>& data);
+  // The same (spec 15.1.19); changed (optional): changedCount positions (3 values each,
+  // changedPositions) as StamField::delta; data (optional): host copy of the blocks. Returns the
+  // blocks in device memory.
+  std::shared_ptr<const DeviceBlocks> buildDelta(const GridBuildView& g, const DistBuildView& d, double clamp,
+                                                 double threshold, const double* changed, int changedCount,
+                                                 std::vector<int>& block, std::vector<float>* data);
 
  private:
   struct Impl;

@@ -55,6 +55,8 @@ struct GridAtoms {
 };
 // coords: coordinates of sys.evaluate for the same parts.
 GridAtoms gridAtoms(const EnergySystem& sys, const std::vector<EnergyPart>& parts, std::span<const Vec3> coords);
+// Positions in ref and in cur (the same atoms) of the atoms whose coordinates differ (spec 15.1.19).
+std::vector<Vec3> changedPositions(const GridAtoms& ref, const GridAtoms& cur);
 
 // For probe atom i at p: E = typeMap[type](p) + q * elecMap(p) + |q| * desolvMap(p).
 struct EnergyGrids {
@@ -148,7 +150,7 @@ struct GridBuildData {
   GridGeometry geom;
   std::vector<Ad4Type> types;  // EnergyGrids::types
   GridBuildView view{};
-  std::vector<double> xyz, elecQ, S, V, solT, volT, AC, BD, reqm;
+  std::vector<double> xyz, elecQ, S, V, solT, volT, desolvW, dsW, AC, BD, reqm;
   std::vector<int> type, pm, pn;
   detail::CellList cells;
 };
@@ -181,13 +183,19 @@ class StamField {
                            GridAtoms moved, const EnergyParams& params);
   // Blocks with a point differing from the reference by more than threshold in any map
   // (type maps, elec, desolv, distance) store the sample's values.
+  // changed (optional, changedPositions): blocks no changed position reaches keep the reference
+  // without comparison (spec 15.1.19).
   static StamField delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
-                         const EnergyGrids& grids, const DistanceGrid& dist, double threshold);
+                         const EnergyGrids& grids, const DistanceGrid& dist, double threshold,
+                         const std::vector<Vec3>* changed = nullptr);
   // delta from its blocks (e.g. computed on the GPU, spec 15.1.10): block per block (bz, by, bx
   // order) -1 or the index of its values in data; data: per stored block, the maps (type maps,
   // elec, desolv, distance) × kDeltaBlock^3 values (z, y, x order; 0 outside the grid).
+  // device (optional): the same blocks in device memory; data may then be empty (no host copy:
+  // energy, distance and pointMap fail on stored blocks, spec 15.1.19).
   static StamField delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
-                         std::vector<int> block, std::vector<float> data);
+                         std::vector<int> block, std::vector<float> data,
+                         std::shared_ptr<const DeviceBlocks> device = nullptr);
 
   GridMode mode() const { return mode_; }
   // Unique per StamField created by full, flexres or delta (copies share it).
@@ -200,6 +208,7 @@ class StamField {
   std::size_t movedAtomCount() const { return moved_.size(); }  // flexres
   std::size_t blockCount() const { return block_.size(); }      // delta: all blocks
   std::size_t deltaBlockCount() const;                          // delta: blocks with their own values
+  bool hasHostData() const { return mode_ != GridMode::Delta || data_ != nullptr; }
 
   // Energy of a probe atom of map `map` and charge q at p (inside geom()); grad: dE/dp.
   template <class T>
@@ -242,7 +251,8 @@ class StamField {
   // delta
   std::array<int, 3> nb_{};
   std::vector<int> block_;   // per block: -1 (reference) or index of its values in data_
-  std::vector<float> data_;  // per stored block: maps x kDeltaBlock^3 values
+  std::shared_ptr<const std::vector<float>> data_;  // per stored block: maps x kDeltaBlock^3 values
+  std::shared_ptr<const DeviceBlocks> device_;     // the same in device memory (optional)
   int mapCount_ = 0;         // type maps + elec + desolv + distance
 };
 

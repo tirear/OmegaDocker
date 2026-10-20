@@ -5213,7 +5213,42 @@ TEST_CASE("gpu: energy grids equal the CPU grids") {
         if (thr == 0.5) CHECK(cpu.deltaBlockCount() < cpu.blockCount());
         const od::FieldModel a = cpu.model(), b2 = gpu.model();
         CHECK(a.block == b2.block);
-        CHECK(a.data == b2.data);
+        REQUIRE(a.data);
+        REQUIRE(b2.data);
+        CHECK(*a.data == *b2.data);
+        // Only the blocks reached by the changed positions (spec 15.1.19); device-only blocks.
+        const std::vector<od::Vec3> changed = od::changedPositions(x.stam, moved);
+        CHECK(changed.size() > 0);
+        CHECK(changed.size() < 2 * moved.size());
+        const auto cpuR = od::StamField::delta(rg, rd, sg, sd, thr, &changed);
+        std::vector<int> blockR;
+        std::vector<float> dataR;
+        auto dev = gb.buildDelta(od::GridBuildData(geom, moved, x.mobm.type, params).view,
+                                 od::DistBuildData(geom, moved, cap).view, od::kGridClamp, thr, changed[0].data(),
+                                 static_cast<int>(changed.size()), blockR, &dataR);
+        std::vector<int> blockD;
+        auto devOnly = gb.buildDelta(od::GridBuildData(geom, moved, x.mobm.type, params).view,
+                                     od::DistBuildData(geom, moved, cap).view, od::kGridClamp, thr, changed[0].data(),
+                                     static_cast<int>(changed.size()), blockD, nullptr);
+        CHECK(blockD == blockR);
+        REQUIRE(dev);
+        REQUIRE(devOnly);
+        CHECK(dev->floats == dataR.size());
+        std::vector<float> back(devOnly->floats);
+        if (!back.empty()) od::gpuDownload(devOnly->ptr, back.data(), back.size());
+        CHECK(back == dataR);
+        const auto gpuR = od::StamField::delta(rg, rd, std::move(blockR), std::move(dataR), dev);
+        const od::FieldModel ar = cpuR.model(), br = gpuR.model();
+        CHECK(ar.block == br.block);
+        CHECK(*ar.data == *br.data);
+        CHECK(br.deviceData == dev);
+        // Reached blocks include all blocks that differ beyond the reach of rounding.
+        CHECK(cpuR.deltaBlockCount() <= cpu.deltaBlockCount());
+        CHECK(cpuR.deltaBlockCount() >= cpu.deltaBlockCount() * 9 / 10);
+        const auto gpuD = od::StamField::delta(rg, rd, std::move(blockD), {}, devOnly);
+        CHECK_FALSE(gpuD.hasHostData());
+        CHECK(gpuD.deltaBlockCount() == cpuR.deltaBlockCount());
+        CHECK_THROWS_AS(gpuD.pointMap(0), od::Error);
       }
     }
   }

@@ -77,64 +77,78 @@ __global__ void distKernel(DistBuildView v, std::size_t p0, std::size_t count, f
 constexpr int kB = kDeltaBlock;
 constexpr int kBlockPoints = kB * kB * kB;
 
-// All maps (type maps, elec, desolv, distance) of the planes [z0, z0 + nz); out: maps × count.
-__global__ void sampleKernel(GridBuildView g, DistBuildView d, double clamp, int z0, std::size_t count, float* out) {
-  const std::size_t s = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (s >= count) return;
-  const std::size_t row = s / g.n[0];
-  const int i = static_cast<int>(s - row * g.n[0]);
-  const int j = static_cast<int>(row % g.n[1]);
-  const int k = z0 + static_cast<int>(row / g.n[1]);
-  double e[kGridMaxTypeMaps];
-  double el, ds;
-  gridPoint(g, i, j, k, e, el, ds);
-  const int nt = g.typeMapCount;
-  for (int t = 0; t < nt; ++t) out[t * count + s] = static_cast<float>(clamp < e[t] ? clamp : e[t]);
-  out[nt * count + s] = static_cast<float>(el);
-  out[(nt + 1) * count + s] = static_cast<float>(ds);
-  out[(nt + 2) * count + s] = distPoint(d, i, j, k);
-}
-
 struct DeltaArgs {
   int n[3], nb[3], maps, bz0;  // grid points, blocks per axis, maps, first block layer of the slab
-  int z0;                      // first plane of the slab
-  std::size_t count, points;   // slab points, grid points
-  const float* cur;            // maps × count
+  std::size_t points;          // grid points
   const float* ref;            // maps × points
   double threshold;
+  double origin[3], spacing, reach2;
+  const double* changed;  // changedCount positions; changedCount < 0: every block
+  int changedCount;
 };
 
-// One thread block per grid block of the slab: flag[b] = 1 when a value differs.
-__global__ void compareKernel(DeltaArgs a, int* flag) {
+// One thread block per grid block of the slab: all maps (type maps, elec, desolv, distance) of
+// its points into scratch (per block maps × kBlockPoints values); flag[b] = 1 when a value
+// differs from the reference. Blocks no changed position reaches: flag 0, nothing computed.
+// MaxT >= type maps (e in registers).
+template <int MaxT>
+__global__ void __launch_bounds__(kBlockPoints, 2)
+    deltaKernel(GridBuildView g, DistBuildView d, double clamp, DeltaArgs a, float* scratch, int* flag) {
   const int b = blockIdx.x;
   const int bx = b % a.nb[0], by = (b / a.nb[0]) % a.nb[1], bz = a.bz0 + b / (a.nb[0] * a.nb[1]);
   const int t = threadIdx.x;
+  if (a.changedCount >= 0) {
+    int near = 0;
+    for (int c = t; c < a.changedCount && !near; c += blockDim.x)
+      near = deltaBlockReached(a.origin, a.spacing, bx, by, bz, a.changed + 3 * c, a.reach2);
+    if (!__syncthreads_or(near)) {
+      if (t == 0) flag[b] = 0;
+      return;
+    }
+  }
   const int x = bx * kB + t % kB, y = by * kB + (t / kB) % kB, z = bz * kB + t / (kB * kB);
+  float* out = scratch + static_cast<std::size_t>(b) * a.maps * kBlockPoints;
+  const int nt = g.typeMapCount;
   int differs = 0;
   if (x < a.n[0] && y < a.n[1] && z < a.n[2]) {
-    const std::size_t sl = (static_cast<std::size_t>(z - a.z0) * a.n[1] + y) * a.n[0] + x;
+    double e[MaxT];
+    double el, ds;
+    gridPoint<MaxT>(g, x, y, z, e, el, ds);
     const std::size_t gl = (static_cast<std::size_t>(z) * a.n[1] + y) * a.n[0] + x;
-    for (int m = 0; m < a.maps && !differs; ++m) {
-      const double s = a.cur[m * a.count + sl], r = a.ref[m * a.points + gl];
-      differs = fabs(s - r) > a.threshold;
-    }
+    const auto put = [&](int m, float v) {
+      out[m * kBlockPoints + t] = v;
+      const double s = v, r = a.ref[m * a.points + gl];
+      differs |= fabs(s - r) > a.threshold;
+    };
+#pragma unroll
+    for (int m = 0; m < MaxT; ++m)
+      if (m < nt) put(m, static_cast<float>(clamp < e[m] ? clamp : e[m]));
+    put(nt, static_cast<float>(el));
+    put(nt + 1, static_cast<float>(ds));
+    put(nt + 2, distPoint(d, x, y, z));
+  } else {
+    for (int m = 0; m < a.maps; ++m) out[m * kBlockPoints + t] = 0.0f;
   }
   differs = __syncthreads_or(differs);
   if (t == 0) flag[b] = differs;
 }
 
 // Copies the blocks with slot[b] >= 0 to data + slot[b] × maps × kBlockPoints.
-__global__ void gatherKernel(DeltaArgs a, const int* slot, float* data) {
+__global__ void gatherKernel(int maps, const float* scratch, const int* slot, float* data) {
   const int b = blockIdx.x;
   if (slot[b] < 0) return;
-  const int bx = b % a.nb[0], by = (b / a.nb[0]) % a.nb[1], bz = a.bz0 + b / (a.nb[0] * a.nb[1]);
-  const int t = threadIdx.x;
-  const int x = bx * kB + t % kB, y = by * kB + (t / kB) % kB, z = bz * kB + t / (kB * kB);
-  const bool in = x < a.n[0] && y < a.n[1] && z < a.n[2];
-  const std::size_t sl = in ? (static_cast<std::size_t>(z - a.z0) * a.n[1] + y) * a.n[0] + x : 0;
-  float* out = data + static_cast<std::size_t>(slot[b]) * a.maps * kBlockPoints;
-  for (int m = 0; m < a.maps; ++m) out[m * kBlockPoints + t] = in ? a.cur[m * a.count + sl] : 0.0f;
+  const std::size_t per = static_cast<std::size_t>(maps) * kBlockPoints;
+  const float* in = scratch + b * per;
+  float* out = data + static_cast<std::size_t>(slot[b]) * per;
+  for (std::size_t v = threadIdx.x; v < per; v += blockDim.x) out[v] = in[v];
 }
+
+// Delta blocks owned in device memory.
+struct OwnedBlocks : DeviceBlocks {
+  ~OwnedBlocks() override {
+    if (ptr) cudaFree(const_cast<float*>(ptr));
+  }
+};
 
 // Uploads the arrays of a view; returns it with device pointers.
 template <class Bufs>
@@ -151,6 +165,8 @@ GridBuildView uploadGrid(Bufs& d, const GridBuildView& h) {
   v.V = d.V.upload(h.V, na);
   v.solT = d.solT.upload(h.solT, nt);
   v.volT = d.volT.upload(h.volT, nt);
+  v.desolvW = d.desolvW.upload(h.desolvW, nt * na);
+  v.dsW = d.dsW.upload(h.dsW, na);
   v.AC = d.AC.upload(h.AC, npp);
   v.BD = d.BD.upload(h.BD, npp);
   v.reqm = d.reqm.upload(h.reqm, npp);
@@ -181,7 +197,7 @@ DistBuildView uploadDist(Bufs& d, const DistBuildView& h) {
 struct GpuGridBuilder::Impl {
   int device = 0;
   std::size_t slabValues = kSlabValues;
-  DevBuf<double> xyz, elecQ, S, V, solT, volT, AC, BD, reqm;
+  DevBuf<double> xyz, elecQ, S, V, solT, volT, desolvW, dsW, AC, BD, reqm;
   DevBuf<int> type, pm, pn, start, atoms;
   DevBuf<double> dXyz;
   DevBuf<int> dStart, dAtoms;
@@ -192,6 +208,7 @@ struct GpuGridBuilder::Impl {
   std::size_t refPoints = 0;
   DevBuf<float> ref, blocks;
   DevBuf<int> flag, slot;
+  DevBuf<double> changed;
 };
 
 GpuGridBuilder::GpuGridBuilder(int device, std::size_t slabValues) : impl_(std::make_unique<Impl>()) {
@@ -254,6 +271,13 @@ std::uint64_t GpuGridBuilder::referenceId() const { return impl_->refId; }
 
 void GpuGridBuilder::buildDelta(const GridBuildView& gh, const DistBuildView& dh, double clamp, double threshold,
                                 std::vector<int>& block, std::vector<float>& data) {
+  buildDelta(gh, dh, clamp, threshold, nullptr, -1, block, &data);
+}
+
+std::shared_ptr<const DeviceBlocks> GpuGridBuilder::buildDelta(const GridBuildView& gh, const DistBuildView& dh,
+                                                               double clamp, double threshold, const double* changed,
+                                                               int changedCount, std::vector<int>& block,
+                                                               std::vector<float>* data) {
   Impl& d = *impl_;
   check(cudaSetDevice(d.device), "cudaSetDevice");
   const int maps = gh.typeMapCount + 3;
@@ -265,37 +289,41 @@ void GpuGridBuilder::buildDelta(const GridBuildView& gh, const DistBuildView& dh
   for (int c = 0; c < 3; ++c) {
     a.n[c] = gh.n[c];
     a.nb[c] = (gh.n[c] + kB - 1) / kB;
+    a.origin[c] = gh.origin[c];
   }
   a.maps = maps;
   a.points = points;
   a.ref = d.ref.p;
   a.threshold = threshold;
-  const std::size_t plane = static_cast<std::size_t>(gh.n[0]) * gh.n[1];
+  a.spacing = gh.spacing;
+  a.reach2 = deltaReach2(gh.spacing, std::max(kElecCutoff, dh.cap));
+  a.changedCount = changed ? changedCount : -1;
+  a.changed = changed && changedCount > 0 ? d.changed.upload(changed, 3 * static_cast<std::size_t>(changedCount)) : nullptr;
+  const std::size_t per = static_cast<std::size_t>(maps) * kBlockPoints;
   const int layerBlocks = a.nb[0] * a.nb[1];
   // Block layers per slab.
-  const int layers = static_cast<int>(std::clamp<std::size_t>(d.slabValues / (maps * plane * kB), 1, a.nb[2]));
-  d.out.reserve(static_cast<std::size_t>(maps) * plane * kB * layers);
+  const int layers = static_cast<int>(std::clamp<std::size_t>(d.slabValues / (per * layerBlocks), 1, a.nb[2]));
+  d.out.reserve(per * layerBlocks * layers);
   d.flag.reserve(static_cast<std::size_t>(layerBlocks) * layers);
   d.slot.reserve(static_cast<std::size_t>(layerBlocks) * layers);
   block.assign(static_cast<std::size_t>(layerBlocks) * a.nb[2], -1);
-  data.clear();
   int stored = 0;
   std::vector<int> flag, slot;
+  // Blocks of the slabs: the stored blocks of one slab go straight to the result when it is the
+  // only slab, otherwise to d.blocks (grown keeping the earlier slabs).
+  auto result = std::make_shared<OwnedBlocks>();
+  result->device = d.device;
   for (int bz0 = 0; bz0 < a.nb[2]; bz0 += layers) {
     const int nl = std::min(layers, a.nb[2] - bz0);
-    const int z0 = bz0 * kB, nz = std::min(gh.n[2], z0 + nl * kB) - z0;
     a.bz0 = bz0;
-    a.z0 = z0;
-    a.count = plane * nz;
-    a.cur = d.out.p;
-    sampleKernel<<<static_cast<unsigned>((a.count + kGridThreads - 1) / kGridThreads), kGridThreads>>>(g, dv, clamp, z0,
-                                                                                                       a.count, d.out.p);
-    check(cudaGetLastError(), "sampleKernel launch");
     const int nblk = layerBlocks * nl;
-    compareKernel<<<nblk, kBlockPoints>>>(a, d.flag.p);
-    check(cudaGetLastError(), "compareKernel launch");
+    if (gh.typeMapCount <= 4) deltaKernel<4><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
+    else if (gh.typeMapCount <= 8) deltaKernel<8><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
+    else if (gh.typeMapCount <= 16) deltaKernel<16><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
+    else deltaKernel<kGridMaxTypeMaps><<<nblk, kBlockPoints>>>(g, dv, clamp, a, d.out.p, d.flag.p);
+    check(cudaGetLastError(), "deltaKernel launch");
     flag.resize(nblk);
-    check(cudaMemcpy(flag.data(), d.flag.p, nblk * sizeof(int), cudaMemcpyDeviceToHost), "compareKernel");
+    check(cudaMemcpy(flag.data(), d.flag.p, nblk * sizeof(int), cudaMemcpyDeviceToHost), "deltaKernel");
     slot.assign(nblk, -1);
     int ns = 0;
     for (int b = 0; b < nblk; ++b)
@@ -305,15 +333,42 @@ void GpuGridBuilder::buildDelta(const GridBuildView& gh, const DistBuildView& dh
       }
     if (ns == 0) continue;
     check(cudaMemcpy(d.slot.p, slot.data(), nblk * sizeof(int), cudaMemcpyHostToDevice), "upload slots");
-    const std::size_t per = static_cast<std::size_t>(maps) * kBlockPoints;
-    d.blocks.reserve(per * ns);
-    gatherKernel<<<nblk, kBlockPoints>>>(a, d.slot.p, d.blocks.p);
+    float* dst;
+    if (layers >= a.nb[2]) {
+      float* p = nullptr;
+      check(cudaMalloc(&p, per * ns * sizeof(float)), "cudaMalloc");
+      result->ptr = p;
+      result->floats = per * ns;
+      dst = p;
+    } else {
+      if (d.blocks.n < per * (stored + ns)) {
+        DevBuf<float> grown;
+        grown.reserve(std::max(per * (stored + ns), 2 * d.blocks.n));
+        if (stored)
+          check(cudaMemcpy(grown.p, d.blocks.p, per * stored * sizeof(float), cudaMemcpyDeviceToDevice), "grow blocks");
+        std::swap(grown.p, d.blocks.p);
+        std::swap(grown.n, d.blocks.n);
+      }
+      dst = d.blocks.p + per * stored;
+    }
+    gatherKernel<<<nblk, kBlockPoints>>>(maps, d.out.p, d.slot.p, dst);
     check(cudaGetLastError(), "gatherKernel launch");
-    data.resize(data.size() + per * ns);
-    check(cudaMemcpy(data.data() + per * stored, d.blocks.p, per * ns * sizeof(float), cudaMemcpyDeviceToHost),
-          "gatherKernel");
     stored += ns;
   }
+  if (layers < a.nb[2] && stored) {
+    float* p = nullptr;
+    check(cudaMalloc(&p, per * stored * sizeof(float)), "cudaMalloc");
+    result->ptr = p;
+    result->floats = per * stored;
+    check(cudaMemcpy(p, d.blocks.p, per * stored * sizeof(float), cudaMemcpyDeviceToDevice), "blocks");
+  }
+  if (data) {
+    data->resize(per * stored);
+    if (stored)
+      check(cudaMemcpy(data->data(), result->ptr, per * stored * sizeof(float), cudaMemcpyDeviceToHost), "blocks");
+  }
+  check(cudaDeviceSynchronize(), "buildDelta");
+  return result;
 }
 
 }  // namespace od

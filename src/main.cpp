@@ -1080,6 +1080,12 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   std::shared_ptr<const od::EnergyGrids> fixedGrids;
   std::shared_ptr<const od::FftStam> fixedFft;  // posm2_fft, StaM without torsions
   std::shared_ptr<const od::DistanceGrid> fixedDist;
+  od::GridAtoms deltaRefAtoms;  // delta: StaM grid atoms of the reference
+  // delta on the GPU: host copies of the blocks only for the CPU users of the field (posm3/posm4
+  // regions, posm2_fft spectra; spec 15.1.19).
+#ifdef OD_HAVE_CUDA
+  const bool deltaHostData = !gpuGrid || !poseEval[0] || usesSepas || usesFft;
+#endif
 
   std::vector<MobState> ms(mobSets.size());
   for (std::size_t i = 0; i < ms.size(); ++i) {
@@ -1329,7 +1335,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(stamAtoms(true));
         field = od::StamField::full(fixedGrids, fixedDist);
       } else if (gridMode == od::GridMode::Delta) {
-        if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(stamAtoms(true));
+        if (!fixedGrids) {
+          deltaRefAtoms = stamAtoms(true);
+          std::tie(fixedGrids, fixedDist) = build(deltaRefAtoms);
+        }
 #ifdef OD_HAVE_CUDA
         if (gpuGrid) {
           // The reference maps stay on the device; only the differing blocks are copied back.
@@ -1342,17 +1351,21 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
             gpuGrid->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
           }
           const od::GridAtoms a = stamAtoms(false);
+          const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
           std::vector<int> block;
           std::vector<float> data;
-          gpuGrid->buildDelta(od::GridBuildData(geom, a, probe, energyParams(opt)).view,
-                              od::DistBuildData(geom, a, distCap).view, od::kGridClamp, opt.gridDeltaThreshold, block,
-                              data);
-          field = od::StamField::delta(fixedGrids, fixedDist, std::move(block), std::move(data));
+          auto dev = gpuGrid->buildDelta(od::GridBuildData(geom, a, probe, energyParams(opt)).view,
+                                         od::DistBuildData(geom, a, distCap).view, od::kGridClamp,
+                                         opt.gridDeltaThreshold, changed.empty() ? nullptr : changed[0].data(),
+                                         static_cast<int>(changed.size()), block, deltaHostData ? &data : nullptr);
+          field = od::StamField::delta(fixedGrids, fixedDist, std::move(block), std::move(data), std::move(dev));
         } else
 #endif
         {
-          const auto [g, d] = build(stamAtoms(false));
-          field = od::StamField::delta(fixedGrids, fixedDist, *g, *d, opt.gridDeltaThreshold);
+          const od::GridAtoms a = stamAtoms(false);
+          const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
+          const auto [g, d] = build(a);
+          field = od::StamField::delta(fixedGrids, fixedDist, *g, *d, opt.gridDeltaThreshold, &changed);
         }
         blockSum += static_cast<long long>(field.deltaBlockCount());
         blockTotal += static_cast<long long>(field.blockCount());

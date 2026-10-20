@@ -91,6 +91,17 @@ GridAtoms gridAtoms(const EnergySystem& sys, const std::vector<EnergyPart>& part
   return g;
 }
 
+std::vector<Vec3> changedPositions(const GridAtoms& ref, const GridAtoms& cur) {
+  if (ref.size() != cur.size()) fail("changedPositions: different atoms");
+  std::vector<Vec3> out;
+  for (std::size_t a = 0; a < cur.size(); ++a)
+    if (cur.xyz[a] != ref.xyz[a]) {
+      out.push_back(ref.xyz[a]);
+      out.push_back(cur.xyz[a]);
+    }
+  return out;
+}
+
 int EnergyGrids::mapOf(Ad4Type t) const {
   const auto it = std::find(types.begin(), types.end(), t);
   return it == types.end() ? -1 : static_cast<int>(it - types.begin());
@@ -127,6 +138,10 @@ GridBuildData::GridBuildData(const GridGeometry& g, const GridAtoms& stam, std::
     solT.push_back(ad4Params(types[i]).solpar);
     volT.push_back(ad4Params(types[i]).volume);
   }
+  for (std::size_t a = 0; a < stam.size(); ++a) {
+    dsW.push_back(c.desolv * c.qasp * V[a]);
+    for (int i = 0; i < nt; ++i) desolvW.push_back(c.desolv * (solT[i] * V[a] + S[a] * volT[i]));
+  }
   cells = CellList(stam.xyz, 4.0);
   GridBuildView& v = view;
   for (int k = 0; k < 3; ++k) {
@@ -143,6 +158,8 @@ GridBuildData::GridBuildData(const GridGeometry& g, const GridAtoms& stam, std::
   v.V = V.data();
   v.solT = solT.data();
   v.volT = volT.data();
+  v.desolvW = desolvW.data();
+  v.dsW = dsW.data();
   v.AC = AC.data();
   v.BD = BD.data();
   v.reqm = reqm.data();
@@ -416,7 +433,8 @@ StamField StamField::flexres(std::shared_ptr<const EnergyGrids> fixed, std::shar
 }
 
 StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
-                           const EnergyGrids& grids, const DistanceGrid& dist, double threshold) {
+                           const EnergyGrids& grids, const DistanceGrid& dist, double threshold,
+                           const std::vector<Vec3>* changed) {
   StamField f = full(std::move(ref), std::move(refDist));
   f.mode_ = GridMode::Delta;
   const GridGeometry& g = f.grids_->geom;
@@ -439,9 +457,16 @@ StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_p
   for (int c = 0; c < 3; ++c) f.nb_[c] = (g.n[c] + B - 1) / B;
   f.block_.assign(static_cast<std::size_t>(f.nb_[0]) * f.nb_[1] * f.nb_[2], -1);
   const std::size_t bs = static_cast<std::size_t>(B) * B * B;
+  const double reach2 = deltaReach2(g.spacing, std::max(kElecCutoff, dist.cap));
+  const double origin[3] = {g.origin[0], g.origin[1], g.origin[2]};
+  std::vector<float> data;
   for (int bz = 0; bz < f.nb_[2]; ++bz)
     for (int by = 0; by < f.nb_[1]; ++by)
       for (int bx = 0; bx < f.nb_[0]; ++bx) {
+        if (changed && std::none_of(changed->begin(), changed->end(), [&](const Vec3& p) {
+              return deltaBlockReached(origin, g.spacing, bx, by, bz, p.data(), reach2);
+            }))
+          continue;
         bool differs = false;
         for (int m = 0; m < f.mapCount_ && !differs; ++m) {
           const auto s = sampleMap(m), r = refMap(m);
@@ -457,22 +482,24 @@ StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_p
         }
         if (!differs) continue;
         const std::size_t b = (static_cast<std::size_t>(bz) * f.nb_[1] + by) * f.nb_[0] + bx;
-        f.block_[b] = static_cast<int>(f.data_.size() / (bs * f.mapCount_));
-        const std::size_t base = f.data_.size();
-        f.data_.resize(base + bs * f.mapCount_, 0.0f);
+        f.block_[b] = static_cast<int>(data.size() / (bs * f.mapCount_));
+        const std::size_t base = data.size();
+        data.resize(base + bs * f.mapCount_, 0.0f);
         for (int m = 0; m < f.mapCount_; ++m) {
           const auto s = sampleMap(m);
           for (int z = bz * B; z < std::min(g.n[2], bz * B + B); ++z)
             for (int y = by * B; y < std::min(g.n[1], by * B + B); ++y)
               for (int x = bx * B; x < std::min(g.n[0], bx * B + B); ++x)
-                f.data_[base + m * bs + ((z - bz * B) * B + (y - by * B)) * B + (x - bx * B)] = s[g.index(x, y, z)];
+                data[base + m * bs + ((z - bz * B) * B + (y - by * B)) * B + (x - bx * B)] = s[g.index(x, y, z)];
         }
       }
+  f.data_ = std::make_shared<const std::vector<float>>(std::move(data));
   return f;
 }
 
 StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_ptr<const DistanceGrid> refDist,
-                           std::vector<int> block, std::vector<float> data) {
+                           std::vector<int> block, std::vector<float> data,
+                           std::shared_ptr<const DeviceBlocks> device) {
   StamField f = full(std::move(ref), std::move(refDist));
   f.mode_ = GridMode::Delta;
   const GridGeometry& g = f.grids_->geom;
@@ -480,10 +507,13 @@ StamField StamField::delta(std::shared_ptr<const EnergyGrids> ref, std::shared_p
   for (int c = 0; c < 3; ++c) f.nb_[c] = (g.n[c] + B - 1) / B;
   const std::size_t bs = static_cast<std::size_t>(B) * B * B;
   const std::size_t stored = static_cast<std::size_t>(std::count_if(block.begin(), block.end(), [](int b) { return b >= 0; }));
-  if (block.size() != static_cast<std::size_t>(f.nb_[0]) * f.nb_[1] * f.nb_[2] || data.size() != stored * bs * f.mapCount_)
+  const std::size_t floats = stored * bs * f.mapCount_;
+  if (block.size() != static_cast<std::size_t>(f.nb_[0]) * f.nb_[1] * f.nb_[2] ||
+      (device ? device->floats != floats || (!data.empty() && data.size() != floats) : data.size() != floats))
     fail("delta grids: block layout differs from the reference");
   f.block_ = std::move(block);
-  f.data_ = std::move(data);
+  if (!device || !data.empty()) f.data_ = std::make_shared<const std::vector<float>>(std::move(data));
+  f.device_ = std::move(device);
   return f;
 }
 
@@ -511,6 +541,7 @@ FieldModel StamField::model() const {
   v.mapCount = mapCount_;
   fm.block = block_;
   fm.data = data_;
+  fm.deviceData = device_;
   for (const Moved& m : moved_) {
     FieldMoved x{};
     for (int c = 0; c < 3; ++c) x.xyz[c] = m.xyz[c];
@@ -562,12 +593,14 @@ T StamField::map(int m, const Vec3T<T>& p, Vec3T<T>* grad) const {
   if (mode_ != GridMode::Delta) return interpolateT(g, r, p, grad);
   constexpr int B = kDeltaBlock;
   const std::size_t bs = static_cast<std::size_t>(B) * B * B;
+  const float* data = data_ ? data_->data() : nullptr;
   return interpolateAt(
       g,
       [&](int i, int j, int k) {
         const int b = block_[(static_cast<std::size_t>(k / B) * nb_[1] + j / B) * nb_[0] + i / B];
         if (b < 0) return r[g.index(i, j, k)];
-        return data_[(static_cast<std::size_t>(b) * mapCount_ + m) * bs + ((k % B) * B + j % B) * B + i % B];
+        if (!data) fail("delta grids: the blocks are only in device memory");
+        return data[(static_cast<std::size_t>(b) * mapCount_ + m) * bs + ((k % B) * B + j % B) * B + i % B];
       },
       p, grad);
 }
@@ -637,6 +670,7 @@ std::vector<float> StamField::pointMap(int m) const {
                                              : std::span<const float>(grids_->desolvMap);
   std::vector<float> out(r.begin(), r.end());
   if (mode_ == GridMode::Delta) {
+    if (!data_ && deltaBlockCount() > 0) fail("delta grids: the blocks are only in device memory");
     constexpr int B = kDeltaBlock;
     const std::size_t bs = static_cast<std::size_t>(B) * B * B;
     for (int k = 0; k < g.n[2]; ++k)
@@ -644,7 +678,7 @@ std::vector<float> StamField::pointMap(int m) const {
         for (int i = 0; i < g.n[0]; ++i) {
           const int b = block_[(static_cast<std::size_t>(k / B) * nb_[1] + j / B) * nb_[0] + i / B];
           if (b >= 0)
-            out[g.index(i, j, k)] = data_[(static_cast<std::size_t>(b) * mapCount_ + m) * bs + ((k % B) * B + j % B) * B + i % B];
+            out[g.index(i, j, k)] = (*data_)[(static_cast<std::size_t>(b) * mapCount_ + m) * bs + ((k % B) * B + j % B) * B + i % B];
         }
   }
   if (mode_ == GridMode::Flexres && !moved_.empty()) {

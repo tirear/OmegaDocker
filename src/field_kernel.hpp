@@ -53,6 +53,15 @@ struct FieldView {
   double cDesolv, qasp, halfSmooth, rMin, cap;
 };
 
+// Delta blocks in device memory (spec 15.1.19): blocks × maps × kDeltaBlock^3 floats in the
+// layout of FieldModel::data; freed by the implementation's destructor.
+struct DeviceBlocks {
+  int device = 0;
+  const float* ptr = nullptr;
+  std::size_t floats = 0;
+  virtual ~DeviceBlocks() = default;
+};
+
 // Host arrays of a FieldView. The maps are not copied: base keeps the grids that hold them.
 struct FieldModel {
   std::uint64_t id = 0;               // StamField::id()
@@ -60,7 +69,8 @@ struct FieldModel {
   std::shared_ptr<const void> baseDist;
   std::size_t points = 0;             // values per map
   std::vector<int> block;
-  std::vector<float> data;
+  std::shared_ptr<const std::vector<float>> data;  // delta blocks; null: only in device memory
+  std::shared_ptr<const DeviceBlocks> deviceData;  // delta blocks in device memory (optional)
   std::vector<FieldMoved> moved;
   std::vector<int> movedHeavy, cellStart, cellAtoms, heavyStart, heavyAtoms;
   std::vector<double> solT, volT, pairAC, pairBD, pairReqm;
@@ -70,7 +80,7 @@ struct FieldModel {
   // Points the array members of view at the vectors above (after copy or move).
   void bind() {
     view.block = block.data();
-    view.data = data.data();
+    view.data = data ? data->data() : nullptr;
     view.moved = moved.data();
     view.movedHeavy = movedHeavy.data();
     view.cells.start = cellStart.data();
