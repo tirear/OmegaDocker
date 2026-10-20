@@ -2539,8 +2539,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `ssHalfWidth`、`ssOriginalProb` | 15°、0.9 | 推估 | 5、7.5 |
 | `dock9c.diversityRmsd` | 2.0 Å | 常用的 RMSD 門檻 | 9 |
 | `dock9b.maxOverlapAtomNum`、`maxNearDistance` | 1、6 Å | 推估 | 8.5 |
-| `topology.maxBreakDist`、`energy.closureG` | 0.5 Å、200 | 推估 | 4.8、7.9 |
-| `stam.flexMargin` | 4 Å | 推估 | 4 |
+| `topology.maxBreakDist`、`energy.closureG` | 0.5 Å、200 | 推估 | 4.5、4.8 |
+| `stam.flexMargin` | 4 Å | 推估 | 4.4 |
 | `od_0100.unboundCandidateNum` | 20 | 推估 | 10.2 |
 
 ---
