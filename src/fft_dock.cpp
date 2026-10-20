@@ -72,12 +72,16 @@ FftStam buildFftStam(const StamField& field, double clamp) {
 
 void fftCorrelate(const FftStam& s, std::span<const Vec3> f, std::span<const int> map, std::span<const double> q,
                   FftWork& w) {
+  fftProbeSpectra(s, f, map, q, w);
+  fftCombine(s, w);
+}
+
+void fftProbeSpectra(const FftStam& s, std::span<const Vec3> f, std::span<const int> map, std::span<const double> q,
+                     FftWork& w) {
   const Layout l = layout(s);
   // The energy buffer doubles as the input of the forward FFTs (zero outside the spread atoms).
   w.energy.assign(s.realSize(), 0.0f);
-  w.spec.resize(s.complexSize());
-  w.acc.resize(s.complexSize());
-  bool first = true;
+  w.channel.clear();
   const int nt = static_cast<int>(s.spectra.size()) - 2;
   // Base corner and trilinear weights per atom.
   struct Corner {
@@ -111,13 +115,11 @@ void fftCorrelate(const FftStam& s, std::span<const Vec3> f, std::span<const int
     }
   };
   auto channel = [&](int m) {
-    pocketfft::r2c(l.shape, l.sr, l.sc, l.axes, pocketfft::FORWARD, w.energy.data(), w.spec.data(), 1.0f, 1);
-    const auto& sp = s.spectra[m];
-    if (first)
-      for (std::size_t k = 0; k < w.acc.size(); ++k) w.acc[k] = std::conj(w.spec[k]) * sp[k];
-    else
-      for (std::size_t k = 0; k < w.acc.size(); ++k) w.acc[k] += std::conj(w.spec[k]) * sp[k];
-    first = false;
+    const std::size_t c = w.channel.size();
+    w.channel.push_back(m);
+    if (w.spec.size() <= c) w.spec.resize(c + 1);
+    w.spec[c].resize(s.complexSize());
+    pocketfft::r2c(l.shape, l.sr, l.sc, l.axes, pocketfft::FORWARD, w.energy.data(), w.spec[c].data(), 1.0f, 1);
     for (std::size_t idx : w.touched) w.energy[idx] = 0.0f;
     w.touched.clear();
   };
@@ -142,7 +144,24 @@ void fftCorrelate(const FftStam& s, std::span<const Vec3> f, std::span<const int
       if (q[a] != 0) spread(a, static_cast<float>(std::abs(q[a])));
     channel(nt + 1);
   }
-  if (first) return;  // no probe atoms
+}
+
+void fftCombine(const FftStam& s, FftWork& w) {
+  if (w.channel.empty()) {  // no probe atoms
+    w.energy.assign(s.realSize(), 0.0f);
+    return;
+  }
+  w.energy.resize(s.realSize());
+  const Layout l = layout(s);
+  w.acc.resize(s.complexSize());
+  for (std::size_t c = 0; c < w.channel.size(); ++c) {
+    const auto& sp = s.spectra[w.channel[c]];
+    const auto& pc = w.spec[c];
+    if (c == 0)
+      for (std::size_t k = 0; k < w.acc.size(); ++k) w.acc[k] = std::conj(pc[k]) * sp[k];
+    else
+      for (std::size_t k = 0; k < w.acc.size(); ++k) w.acc[k] += std::conj(pc[k]) * sp[k];
+  }
   pocketfft::c2r(l.shape, l.sc, l.sr, l.axes, pocketfft::BACKWARD, w.acc.data(), w.energy.data(),
                  1.0f / static_cast<float>(s.realSize()), 1);
 }

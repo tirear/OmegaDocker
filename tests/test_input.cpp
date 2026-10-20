@@ -3777,6 +3777,62 @@ TEST_CASE("dock9b: posm3 regions and poses (2KJJ, 1L2Y)") {
   for (std::size_t i = 0; i < s4.size(); ++i) CHECK(s4[i].energy == s1[i].energy);
 }
 
+TEST_CASE("dock9b: posm2_fft against several StaM conformations equals each alone (spec 15.1.22)") {
+  FieldSet fs;
+  od::Dock9bParams p = fs.p;
+  p.posm = od::Posm::Posm2Fft;
+  const auto angles = fs.x.mobSys->inputAngles();
+  for (int top : {1, 3}) {
+    INFO(top);
+    p.fftTopPerRot = top;
+    std::vector<od::FftStam> ss;
+    for (const auto& [name, field] : fs.fields) ss.push_back(od::buildFftStam(field, 10.0));
+    std::vector<std::unique_ptr<od::MobmDocker>> own;
+    std::vector<const od::MobmDocker*> dks;
+    for (std::size_t s = 0; s < ss.size(); ++s) {
+      own.push_back(std::make_unique<od::MobmDocker>(*fs.x.mobSys, fs.fields[s].second, p, nullptr, &ss[s]));
+      dks.push_back(own.back().get());
+    }
+    // Reversed and repeated order as well.
+    for (const auto& order : {std::vector<std::size_t>{0, 1, 2}, std::vector<std::size_t>{2, 0, 1, 2}}) {
+      std::vector<const od::MobmDocker*> sel;
+      for (std::size_t s : order) sel.push_back(dks[s]);
+      const auto cs = od::MobmDocker::conformations(sel, angles);
+      REQUIRE(cs.size() == order.size());
+      for (std::size_t k = 0; k < order.size(); ++k) {
+        INFO(fs.fields[order[k]].first);
+        const auto one = dks[order[k]]->conformation(angles);
+        REQUIRE(!one.fftPoses.empty());
+        REQUIRE(cs[k].fftPoses.size() == one.fftPoses.size());
+        CHECK(cs[k].fftEnergy == one.fftEnergy);
+        CHECK(cs[k].coords == one.coords);
+        for (std::size_t i = 0; i < one.fftPoses.size(); ++i) {
+          CHECK(cs[k].fftPoses[i].t == one.fftPoses[i].t);
+          CHECK(cs[k].fftPoses[i].q.w == one.fftPoses[i].q.w);
+        }
+      }
+    }
+    // The StaM conformations give different translations.
+    CHECK(dks[0]->conformation(angles).fftEnergy != dks[2]->conformation(angles).fftEnergy);
+  }
+  // Dockers of different boxes are rejected.
+  od::Dock9bParams p2 = p;
+  p2.boxSize = {40, 40, 40};
+  const od::FftStam s0 = od::buildFftStam(fs.fields[0].second, 10.0);
+  const od::MobmDocker a(*fs.x.mobSys, fs.fields[0].second, p, nullptr, &s0), b(*fs.x.mobSys, fs.fields[0].second, p2, nullptr, &s0);
+  const std::vector<const od::MobmDocker*> mixed{&a, &b};
+  CHECK_THROWS_AS(od::MobmDocker::conformations(mixed, angles), od::Error);
+  // Prepared from a given conformation: as from the angles.
+  std::vector<od::MobmDocker::PairJob> j1(1), j2(1);
+  j1[0].mobAnglesDeg = j2[0].mobAnglesDeg = angles;
+  j2[0].conf = a.conformation(angles);
+  a.prepareJobs(j1);
+  a.prepareJobs(j2);
+  CHECK(!j2[0].conf);
+  CHECK(j1[0].prepared->l2 == j2[0].prepared->l2);
+  CHECK(j1[0].stats.overlap == j2[0].stats.overlap);
+}
+
 TEST_CASE("dock9b: posm2_fft (2KJJ, 1L2Y)") {
   CHECK(od::fftSize(1) == 1);
   CHECK(od::fftSize(11) == 12);
@@ -5242,6 +5298,43 @@ TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
       MESSAGE(std::format("posm2_fft {} spectra {} top {}: kept {}, same translation {}, max |GPU - CPU| energy {:.2e}", name,
                           mname, top, cc.fftPoses.size(), same, worst));
       CHECK(same >= cc.fftPoses.size() * 9 / 10);
+    }
+  }
+  // Several StaM conformations at once (spec 15.1.22): as each alone on the CPU.
+  for (int top : {1, 3, 20}) {
+    INFO(top);
+    std::vector<od::FftStam> ss;
+    for (const auto& [name, field] : fs.fields) ss.push_back(od::buildFftStam(field, 10.0));
+    od::Dock9bParams p = fs.p;
+    p.posm = od::Posm::Posm2Fft;
+    p.fftTopPerRot = top;
+    od::Dock9bParams pg = p;
+    pg.evaluator = &ev;
+    std::vector<std::unique_ptr<od::MobmDocker>> own;
+    std::vector<const od::MobmDocker*> dkc, dkg;
+    for (std::size_t s = 0; s < ss.size(); ++s) {
+      own.push_back(std::make_unique<od::MobmDocker>(*fs.x.mobSys, fs.fields[s].second, p, nullptr, &ss[s]));
+      dkc.push_back(own.back().get());
+      own.push_back(std::make_unique<od::MobmDocker>(*fs.x.mobSys, fs.fields[s].second, pg, nullptr, &ss[s]));
+      dkg.push_back(own.back().get());
+    }
+    const auto cc = od::MobmDocker::conformations(dkc, angles);
+    const auto cg = od::MobmDocker::conformations(dkg, angles);
+    for (std::size_t s = 0; s < ss.size(); ++s) {
+      INFO(fs.fields[s].first);
+      REQUIRE(cg[s].fftPoses.size() == cc[s].fftPoses.size());
+      REQUIRE(!cc[s].fftPoses.empty());
+      std::size_t same = 0;
+      double worst = 0;
+      for (std::size_t k = 0; k < cc[s].fftPoses.size(); ++k) {
+        same += cg[s].fftPoses[k].t == cc[s].fftPoses[k].t;
+        CHECK(cg[s].fftPoses[k].q.w == cc[s].fftPoses[k].q.w);
+        worst = std::max(worst, std::abs(static_cast<double>(cg[s].fftEnergy[k]) - cc[s].fftEnergy[k]));
+        CHECK(cg[s].fftEnergy[k] == doctest::Approx(cc[s].fftEnergy[k]).epsilon(1e-4).scale(50.0));
+      }
+      MESSAGE(std::format("posm2_fft {} StaM sets, {} top {}: kept {}, same translation {}, max |GPU - CPU| energy {:.2e}",
+                          ss.size(), fs.fields[s].first, top, cc[s].fftPoses.size(), same, worst));
+      CHECK(same >= cc[s].fftPoses.size() * 9 / 10);
     }
   }
   ev.idle();

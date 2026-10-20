@@ -153,6 +153,10 @@ class MobmDocker {
     std::vector<float> fftEnergy;  // FFT (clamped-map) grid energy of each kept pose
   };
   Conf conformation(std::span<const double> anglesDeg) const;
+  // posm2_fft (spec 15.1.22): conformation(anglesDeg) of each docker of dks (same MobM, parameters
+  // and grid geometry, e.g. different StaM conformations); the probe spectra of each orientation
+  // are computed once for all of them.
+  static std::vector<Conf> conformations(std::span<const MobmDocker* const> dks, std::span<const double> anglesDeg);
 
   PosRange posRange(const Conf& c, const Quat& q) const;
 
@@ -226,6 +230,7 @@ class MobmDocker {
     std::function<void(std::vector<DockSample>&)> sink;
     Dock9bStats stats;  // result
     std::optional<Prepared> prepared;  // set by prepareJobs; used (and cleared) by dockPairs
+    std::optional<Conf> conf;          // optional: conformation(mobAnglesDeg), e.g. from conformations()
   };
   void dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const;
   // L1poss and 8.5 quick filter of the jobs ahead of dockPairs (e.g. to count their L2poss).
@@ -267,7 +272,8 @@ class MobmDocker {
   std::vector<Quat> hopf_;
   const std::vector<StamSepa>* sepas_ = nullptr;
   const FftStam* fft_ = nullptr;
-  void fftPoses(Conf& c) const;
+  static void fftPoses(std::span<const MobmDocker* const> dks, std::span<Conf* const> cs);
+  Conf baseConformation(std::span<const double> anglesDeg) const;  // conformation without the posm2_fft poses
   int axisAngles_ = 0;  // posm3: rotations about the pair axis
   int transN_ = 0;      // posm3: translations per axis
   std::optional<Pose> posm3Pose(const Conf& c, long long k) const;
@@ -281,7 +287,8 @@ class MobmDocker {
   template <bool InBox>
   bool quickFilterT(const Conf& c, const Pose& pose, Dock9bStats& stats) const;
   bool fitsBox(const RotBox& b, const Pose& pose) const;
-  Prepared prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream, bool posm1Only) const;
+  Prepared prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream, bool posm1Only,
+                   std::optional<Conf> conf = std::nullopt) const;
   Dock9bStats dockPrepared(Prepared pr, std::uint64_t stream, std::size_t chunkSize,
                            const std::function<void(std::vector<DockSample>&)>& sink) const;
   struct BatchItem {
@@ -333,11 +340,12 @@ class PoseEvaluator {
                            long long /*k1*/, std::vector<long long>& /*l2*/, Dock9bStats& /*stats*/) {
     return false;
   }
-  // posm2_fft: orientations per fftTop call; 0: not supported. Binds dk.
-  virtual int fftBatch(const MobmDocker&) { return 0; }
+  // posm2_fft: orientations per fftTop call against the spectra of the dockers dks (spec 15.1.22);
+  // 0: not supported.
+  virtual int fftBatch(std::span<const MobmDocker* const> /*dks*/) { return 0; }
   // n orientations: f (n × probes × 3, grid units, as fftCorrelate), map and q (per probe atom),
-  // translation ranges lo, hi; out (n × top): fftSelect of each, entries beyond the range
-  // count with index SIZE_MAX.
+  // translation ranges lo, hi; out (dks × n × top, docker-major): fftSelect of each, entries
+  // beyond the range count with index SIZE_MAX.
   virtual void fftTop(int /*n*/, int /*probes*/, const double* /*f*/, const int* /*map*/, const double* /*q*/,
                       const std::array<int, 3>* /*lo*/, const std::array<int, 3>* /*hi*/, int /*top*/,
                       std::pair<float, std::size_t>* /*out*/) {}

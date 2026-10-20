@@ -37,9 +37,10 @@ FftStam buildFftStam(const StamField& field, double clamp);
 
 // Per-thread buffers of fftCorrelate.
 struct FftWork {
-  std::vector<float> energy;              // spread atoms of one channel; on return, energy per translation (index layout)
-  std::vector<std::complex<float>> spec;  // spectrum of one channel
-  std::vector<std::complex<float>> acc;   // sum over the channels
+  std::vector<float> energy;  // spread atoms of one channel; on return, energy per translation (index layout)
+  std::vector<int> channel;   // spectra index of each probe spectrum (type maps with probe atoms, then elec, desolv)
+  std::vector<std::vector<std::complex<float>>> spec;  // probe spectrum per channel
+  std::vector<std::complex<float>> acc;                // sum over the channels
   std::vector<std::size_t> touched;
 };
 
@@ -49,6 +50,12 @@ struct FftWork {
 // with all T + f[a] inside the grid; other entries are not meaningful.
 void fftCorrelate(const FftStam& s, std::span<const Vec3> f, std::span<const int> map, std::span<const double> q,
                   FftWork& w);
+// fftCorrelate in two steps (spec 15.1.22): the probe spectra (w.channel, w.spec; only s.pad is
+// used), then the energies against the spectra of s (w.energy). The probe spectra serve every
+// StaM conformation of the same grid geometry; the result equals fftCorrelate bit for bit.
+void fftProbeSpectra(const FftStam& s, std::span<const Vec3> f, std::span<const int> map, std::span<const double> q,
+                     FftWork& w);
+void fftCombine(const FftStam& s, FftWork& w);
 
 // The top lowest (energy, index) of energy (index layout) over the translations lo..hi, ascending.
 void fftSelect(const FftStam& s, const float* energy, const std::array<int, 3>& lo, const std::array<int, 3>& hi,

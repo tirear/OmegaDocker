@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -63,18 +64,20 @@ class GpuDockPrep {
   void filterPosm3(const GpuField& field, const FilterSetup& s, const Posm3Setup& p3, long long k0, long long k1,
                    std::vector<long long>& pass, FilterCounts& cnt);
 
-  // posm2_fft: uploads the spectra when s differs from the current ones.
+  // posm2_fft: uploads the spectra when s differs from the current ones. Several StaM
+  // conformations of the same grid geometry (spec 15.1.22): fftTop correlates with each.
   void setFft(const FftStam& s);
+  void setFft(std::span<const FftStam* const> s);
   // Orientations per fftTop call, limited by the free device memory.
   int fftBatch();
   // Probe spectra: direct (per-axis factors, all channels in one pass) or one FFT per channel;
   // Auto: direct up to 40 probe atoms per channel (spec 15.1.5).
   enum class Spectra { Auto, Direct, Fft };
   void setSpectra(Spectra s);
-  // As PoseEvaluator::fftTop.
+  // As PoseEvaluator::fftTop (out: spectra sets × n × top).
   void fftTop(int n, int probes, const double* f, const int* map, const double* q, const std::array<int, 3>* lo,
               const std::array<int, 3>* hi, int top, std::pair<float, std::size_t>* out);
-  // Frees the work memory (spectra and plans are kept).
+  // Frees the work memory and the spectra (plans are kept).
   void releaseWork();
 
  private:

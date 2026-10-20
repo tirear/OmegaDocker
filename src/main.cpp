@@ -7,6 +7,7 @@
 #include <cmath>
 #include <array>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -970,6 +971,8 @@ void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::u
 
 // gpu.dock9bStamNum = auto (spec 15.1.16): L2poss of a window per pose evaluated at the same time on the GPU.
 constexpr long long kWindowPosesPerResident = 48;
+// posm2_fft: most StaM conformations whose translations are found together (spec 15.1.22).
+constexpr std::size_t kFftStamMax = 16;
 
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
 void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const od::Options& opt,
@@ -1002,6 +1005,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   int stamWindow = 1;
   std::function<std::size_t()> gpuFieldBudget = [] { return std::numeric_limits<std::size_t>::max(); };
   std::function<void(int)> gpuFieldSlots = [](int) {};
+  std::function<std::size_t()> gpuFree = [] { return std::numeric_limits<std::size_t>::max(); };
 #ifdef OD_HAVE_CUDA
   // Grids on the GPU (spec 15.1.10): the same values as the CPU.
   std::shared_ptr<od::GpuGridBuilder> gpuGrid;
@@ -1036,6 +1040,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     gpuFieldBudget = [&opt, gpuField] {
       return (od::gpuFreeMem(opt.gpuDevice) + gpuField->deviceBytes()) / 2;
     };
+    gpuFree = [&opt] { return od::gpuFreeMem(opt.gpuDevice); };
     auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevice);
     for (std::size_t i = 0; i < mobSets.size(); ++i)
       poseEval[i] = std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuField, opt.gpuDevice,
@@ -1182,7 +1187,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       }
       selectSec[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
     };
-    double gridSec = 0, fftSec = 0;
+    double gridSec = 0, fftSec = 0, fftPassSec = 0;
+    std::size_t fftPasses = 0, fftPassMax = 0;
     bool gridsReused = false;
     const auto d0 = std::chrono::steady_clock::now();
     long long movedSum = 0, blockSum = 0, blockTotal = 0;
@@ -1202,12 +1208,13 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       std::vector<float> lowest;
       std::vector<od::MobmDocker::PairJob> jobs;
     };
+    // The members referenced by the dockers stay in place when the item moves.
     struct WindowItem {
       int sid;
       std::unique_ptr<od::StamField> field;
-      std::vector<od::StamSepa> sepas;
+      std::unique_ptr<std::vector<od::StamSepa>> sepas;
       std::shared_ptr<const od::FftStam> fft;
-      std::vector<std::unique_ptr<Group>> groups;  // per MobM; null: no pair
+      std::vector<std::unique_ptr<Group>> groups;  // per MobM; null: no pair; empty: not made yet
     };
     std::vector<WindowItem> window;
     // The pairs of the StaM conformation that joined the window (its last item), prepared per MobM
@@ -1215,9 +1222,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<long long> windowPoses(ms.size(), 0);
     // gpu.dock9bStamNum = auto: L2poss of a full window per MobM (0: unknown, e.g. without a GPU).
     std::vector<long long> poseTarget(ms.size(), -1);
-    const auto prepareItem = [&] {
-      WindowItem& w = window.back();
-      gpuFieldSlots(static_cast<int>(window.size()));
+    // The pair jobs of a StaM conformation per MobM (without the L1poss).
+    const auto makeGroups = [&](WindowItem& w) {
       w.groups.resize(ms.size());
       const int sid = w.sid;
       for (std::size_t i = 0; i < ms.size(); ++i) {
@@ -1241,7 +1247,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           g.mids.push_back(mid);
         }
         if (g.mids.empty()) continue;
-        g.dk = std::make_unique<od::MobmDocker>(mob.sys(), *w.field, dpi, &w.sepas, w.fft.get());
+        g.dk = std::make_unique<od::MobmDocker>(mob.sys(), *w.field, dpi, w.sepas.get(), w.fft.get());
         g.stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
         g.lowest.assign(g.mids.size(), std::numeric_limits<float>::infinity());
         g.jobs.resize(g.mids.size());
@@ -1262,11 +1268,20 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
             }
           };
         }
+        w.groups[i] = std::move(gp);
+      }
+    };
+    const auto prepareItem = [&] {
+      WindowItem& w = window.back();
+      gpuFieldSlots(static_cast<int>(window.size()));
+      if (w.groups.empty()) makeGroups(w);
+      for (std::size_t i = 0; i < ms.size(); ++i) {
+        if (!w.groups[i]) continue;
+        Group& g = *w.groups[i];
         g.dk->prepareJobs(g.jobs);
         for (const auto& j : g.jobs) windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
         if (poseTarget[i] < 0)
-          poseTarget[i] = dpi.evaluator ? kWindowPosesPerResident * static_cast<long long>(dpi.evaluator->residentPoses(*g.dk)) : 0;
-        w.groups[i] = std::move(gp);
+          poseTarget[i] = poseEval[i] ? kWindowPosesPerResident * static_cast<long long>(poseEval[i]->residentPoses(*g.dk)) : 0;
       }
     };
 
@@ -1329,7 +1344,12 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       deltaPending = true;
     };
 #endif
-    for (std::size_t si = 0; si < stamIds.size(); ++si) {
+    // A StaM conformation with its field, regions and spectra (spec 8.1–8.4), in stamIds order.
+    struct Built {
+      WindowItem item;
+      std::size_t bytes = 0, grown = 0;  // fieldBytes, resident memory added
+    };
+    const auto buildItem = [&](std::size_t si) {
       const int sid = stamIds[si];
       const auto g0 = std::chrono::steady_clock::now();
       const std::size_t resident0 = od::residentBytes();
@@ -1411,14 +1431,59 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         fftSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count();
       }
       gridSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
+      const std::size_t resident = od::residentBytes();
+      Built b{{sid, std::move(fieldPtr), std::make_unique<std::vector<od::StamSepa>>(std::move(sepas)), std::move(fft), {}},
+              fieldBytes(field), resident > resident0 ? resident - resident0 : 0};
+      hostPerField = ++fieldsBuilt == 2 ? b.grown : std::max(hostPerField, b.grown);
+      return b;
+    };
+    // posm2_fft (spec 15.1.22): the translations of the pairs of the built StaM conformations,
+    // each MobM conformation against all of them at once.
+    const auto fftShare = [&](std::deque<Built>& items) {
+      const auto f0 = std::chrono::steady_clock::now();
+      for (Built& b : items)
+        if (b.item.groups.empty()) makeGroups(b.item);
+      for (std::size_t i = 0; i < ms.size(); ++i) {
+        std::map<int, std::vector<std::pair<Group*, std::size_t>>> byMid;
+        for (Built& b : items)
+          if (Group* g = b.item.groups[i].get())
+            for (std::size_t j = 0; j < g->mids.size(); ++j) byMid[g->mids[j]].emplace_back(g, j);
+        for (auto& [mid, list] : byMid) {
+          std::vector<const od::MobmDocker*> dks;
+          for (const auto& [g, j] : list) dks.push_back(g->dk.get());
+          auto confs = od::MobmDocker::conformations(dks, list[0].first->mobAngles[list[0].second]);
+          for (std::size_t k = 0; k < list.size(); ++k) list[k].first->jobs[list[k].second].conf = std::move(confs[k]);
+        }
+        if (poseEval[i]) poseEval[i]->prepared();
+      }
+      ++fftPasses;
+      fftPassMax = std::max(fftPassMax, items.size());
+      fftPassSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - f0).count();
+    };
+    std::deque<Built> ahead;
+    for (std::size_t si = 0; si < stamIds.size(); ++si) {
+      if (ahead.empty()) {
+        ahead.push_back(buildItem(si));
+        if (usesFft) {
+          // Built ahead while the spectra take at most a quarter of the free device memory and the
+          // fields fit in the host memory budget.
+          std::size_t specBytes = 0;
+          for (const auto& s : ahead.front().item.fft->spectra) specBytes += s.size() * sizeof(s[0]);
+          while (si + ahead.size() < stamIds.size() && ahead.size() < kFftStamMax &&
+                 (ahead.size() + 1) * specBytes <= gpuFree() / 4 &&
+                 od::residentBytes() + std::max(hostPerField, ahead.back().grown) <= hostBudget)
+            ahead.push_back(buildItem(si + ahead.size()));
+          fftShare(ahead);
+        }
+      }
+      Built built = std::move(ahead.front());
+      ahead.pop_front();
       // Docked together with the following StaM conformations (spec 15.1.16): the window is docked
       // when it is full or when the field of one more conformation could exceed the memory limits.
-      const std::size_t bytes = fieldBytes(field), resident = od::residentBytes();
-      const std::size_t grown = resident > resident0 ? resident - resident0 : 0;
-      hostPerField = ++fieldsBuilt == 2 ? grown : std::max(hostPerField, grown);
+      const std::size_t bytes = built.bytes, resident = od::residentBytes();
       gpuPerField = std::max(gpuPerField, bytes);
       windowBytes += bytes;
-      window.push_back({sid, std::move(fieldPtr), std::move(sepas), std::move(fft), {}});
+      window.push_back(std::move(built.item));
       prepareItem();
       // auto: full when every MobM with L2poss in the window has poseTarget of them.
       bool byPoses = opt.gpuDock9bStamNum == 0, anyPoses = false;
@@ -1459,6 +1524,9 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         what += std::format("; delta blocks stored {} of {} ({:.1f}%)", blockSum, blockTotal, 100.0 * static_cast<double>(blockSum) / static_cast<double>(blockTotal));
       if (usesFft) what += std::format("; posm2_fft StaM spectra {:.2f} s", fftSec);
       od::logInfo(what);
+      if (usesFft && fftPasses > 0)
+        od::logInfo(std::format("  9b posm2_fft translations: {:.2f} s in {} pass(es), up to {} StaM conformation(s) each",
+                                fftPassSec, fftPasses, fftPassMax));
       if (usesSepas && !stamIds.empty()) {
         const double k = static_cast<double>(stamIds.size());
         od::logInfo(std::format("  9b posm3 StaM regions per conformation: shell points {:.0f}, selected {:.0f} "

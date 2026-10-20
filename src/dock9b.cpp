@@ -135,7 +135,8 @@ void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) co
 
 void MobmDocker::prepareJobs(std::vector<PairJob>& jobs) const {
   for (PairJob& j : jobs) {
-    j.prepared = prepare(j.mobAnglesDeg, j.stream, j.posm1Only);
+    j.prepared = prepare(j.mobAnglesDeg, j.stream, j.posm1Only, std::move(j.conf));
+    j.conf.reset();
     j.stats = j.prepared->stats;
   }
 }
@@ -147,8 +148,10 @@ void MobmDocker::dockPairs(std::span<const PairGroup> groups, std::size_t chunkS
   if (!pev) {
     for (const PairGroup& g : groups)
       for (PairJob& j : *g.jobs) {
-        Prepared pr = j.prepared ? std::move(*j.prepared) : g.dk->prepare(j.mobAnglesDeg, j.stream, j.posm1Only);
+        Prepared pr = j.prepared ? std::move(*j.prepared)
+                                 : g.dk->prepare(j.mobAnglesDeg, j.stream, j.posm1Only, std::move(j.conf));
         j.prepared.reset();
+        j.conf.reset();
         j.stats = g.dk->dockPrepared(std::move(pr), j.stream, chunkSize, j.sink);
       }
     return;
@@ -181,8 +184,10 @@ void MobmDocker::dockPairs(std::span<const PairGroup> groups, std::size_t chunkS
   std::vector<std::pair<std::size_t, std::size_t>> order;  // (job, L2pos)
   for (std::size_t j = 0; j < st.size(); ++j) {
     PairJob& job = *st[j].job;
-    st[j].pr = job.prepared ? std::move(*job.prepared) : dks[st[j].group]->prepare(job.mobAnglesDeg, job.stream, job.posm1Only);
+    st[j].pr = job.prepared ? std::move(*job.prepared)
+                            : dks[st[j].group]->prepare(job.mobAnglesDeg, job.stream, job.posm1Only, std::move(job.conf));
     job.prepared.reset();
+    job.conf.reset();
     job.stats = st[j].pr.stats;
     const std::size_t n = st[j].pr.l2.size();
     st[j].res.resize(n);
@@ -442,6 +447,41 @@ MobmDocker::PosRange MobmDocker::posRange(const Conf& c, const Quat& q) const {
 }
 
 MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) const {
+  Conf c = baseConformation(anglesDeg);
+  if (p_.posm == Posm::Posm2Fft) {
+    const MobmDocker* self = this;
+    Conf* cp = &c;
+    fftPoses(std::span<const MobmDocker* const>(&self, 1), std::span<Conf* const>(&cp, 1));
+  }
+  return c;
+}
+
+std::vector<MobmDocker::Conf> MobmDocker::conformations(std::span<const MobmDocker* const> dks,
+                                                        std::span<const double> anglesDeg) {
+  std::vector<Conf> out;
+  if (dks.empty()) return out;
+  const MobmDocker& d0 = *dks[0];
+  if (d0.p_.posm != Posm::Posm2Fft) {
+    for (const MobmDocker* dk : dks) out.push_back(dk->conformation(anglesDeg));
+    return out;
+  }
+  for (const MobmDocker* dk : dks) {
+    const FftStam &a = *dk->fft_, &b = *d0.fft_;
+    if (&dk->sys_ != &d0.sys_ || dk->p_.posm != d0.p_.posm || dk->p_.hopfLevel != d0.p_.hopfLevel ||
+        dk->p_.fftTopPerRot != d0.p_.fftTopPerRot || dk->p_.evaluator != d0.p_.evaluator ||
+        dk->p_.boxCenter != d0.p_.boxCenter || dk->p_.boxSize != d0.p_.boxSize || dk->map_ != d0.map_ ||
+        a.pad != b.pad || a.geom.n != b.geom.n || a.geom.origin != b.geom.origin || a.geom.spacing != b.geom.spacing ||
+        a.spectra.size() != b.spectra.size())
+      throw Error("conformations: dockers of different MobMs, parameters or grid geometries");
+  }
+  out.assign(dks.size(), d0.baseConformation(anglesDeg));
+  std::vector<Conf*> cs;
+  for (Conf& c : out) cs.push_back(&c);
+  fftPoses(dks, cs);
+  return out;
+}
+
+MobmDocker::Conf MobmDocker::baseConformation(std::span<const double> anglesDeg) const {
   Conf c;
   c.anglesDeg.assign(anglesDeg.begin(), anglesDeg.end());
   const std::vector<float> af(anglesDeg.begin(), anglesDeg.end());
@@ -460,7 +500,6 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
     for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfRange[j] = posRange(c, hopf_[j]);
     for (std::size_t j = 0; j < hopf_.size(); ++j) c.hopfOffset[j + 1] = c.hopfOffset[j] + c.hopfRange[j].count();
   }
-  if (p_.posm == Posm::Posm2Fft) fftPoses(c);
   if (p_.posm == Posm::Posm3 || p_.posm == Posm::Posm4) {
     // MobM side: probe atoms with |q| >= sepaChargeThreshold (spec 8.4.4).
     std::vector<int> ms;
@@ -518,36 +557,42 @@ MobmDocker::Conf MobmDocker::conformation(std::span<const double> anglesDeg) con
 }
 
 // posm2_fft (spec 8.4.3): per Hopf orientation, the fftTopPerRot lowest-energy grid translations
-// keeping every probe atom kPosMargin inside the box.
-void MobmDocker::fftPoses(Conf& c) const {
-  const FftStam& s = *fft_;
-  const GridGeometry& g = s.geom;
-  const std::size_t no = hopf_.size(), np = probe_.size(), top = static_cast<std::size_t>(std::max(1, p_.fftTopPerRot));
-  std::vector<std::vector<std::pair<float, std::size_t>>> kept(no);
+// keeping every probe atom kPosMargin inside the box. Several dockers (spec 15.1.22): the same
+// conformation (cs[0] coordinates) against the spectra of each; the probe spectra are shared.
+void MobmDocker::fftPoses(std::span<const MobmDocker* const> dks, std::span<Conf* const> cs) {
+  const MobmDocker& d0 = *dks[0];
+  const Dock9bParams& p = d0.p_;
+  const FftStam& s0 = *d0.fft_;
+  const GridGeometry& g = s0.geom;
+  const Conf& c = *cs[0];
+  const std::size_t G = dks.size();
+  const std::size_t no = d0.hopf_.size(), np = d0.probe_.size(), top = static_cast<std::size_t>(std::max(1, p.fftTopPerRot));
+  // kept[s][o]
+  std::vector<std::vector<std::vector<std::pair<float, std::size_t>>>> kept(G, std::vector<std::vector<std::pair<float, std::size_t>>>(no));
   const Vec3f cf = castVec<float>(c.center);
   // Grid coordinates f (np × 3) of the probe atoms in orientation o and its translation range; false when empty.
   auto geometry = [&](std::size_t o, Vec3* f, std::array<int, 3>& lo, std::array<int, 3>& hi) {
-    const QuatF qf = toFloat(hopf_[o]);
+    const QuatF qf = toFloat(d0.hopf_[o]);
     bool empty = false;
     for (int d = 0; d < 3; ++d) {
       float rlo = 1e30f, rhi = -1e30f;
       for (std::size_t a = 0; a < np; ++a) {
-        const Vec3f& y = c.coords[probe_[a]];
+        const Vec3f& y = c.coords[d0.probe_[a]];
         const float r = rotate(qf, {y[0] - cf[0], y[1] - cf[1], y[2] - cf[2]})[d];
         f[a][d] = r / g.spacing;
         rlo = std::min(rlo, r);
         rhi = std::max(rhi, r);
       }
       // Centre t = origin + T spacing with boxMin + margin <= t + rlo and t + rhi <= boxMax - margin.
-      const double bmin = p_.boxCenter[d] - 0.5 * p_.boxSize[d] + kPosMargin - g.origin[d];
-      const double bmax = p_.boxCenter[d] + 0.5 * p_.boxSize[d] - kPosMargin - g.origin[d];
+      const double bmin = p.boxCenter[d] - 0.5 * p.boxSize[d] + kPosMargin - g.origin[d];
+      const double bmax = p.boxCenter[d] + 0.5 * p.boxSize[d] - kPosMargin - g.origin[d];
       lo[d] = std::max(0, static_cast<int>(std::ceil((bmin - rlo) / g.spacing - 1e-9)));
       hi[d] = std::min(g.n[d] - 1, static_cast<int>(std::floor((bmax - rhi) / g.spacing + 1e-9)));
       if (lo[d] > hi[d]) empty = true;
     }
     return !empty;
   };
-  const int batch = p_.evaluator ? p_.evaluator->fftBatch(*this) : 0;
+  const int batch = p.evaluator ? p.evaluator->fftBatch(dks) : 0;
   if (batch > 0) {
     // Device correlation (spec 15.1.5): the non-empty orientations in batches.
     std::vector<std::array<int, 3>> lo(no), hi(no);
@@ -563,16 +608,19 @@ void MobmDocker::fftPoses(Conf& c) const {
     const std::size_t nb = static_cast<std::size_t>(batch);
     std::vector<Vec3> f(nb * np);
     std::vector<std::array<int, 3>> blo(nb), bhi(nb);
-    std::vector<std::pair<float, std::size_t>> out(nb * top);
+    std::vector<std::pair<float, std::size_t>> out(G * nb * top);
     for (std::size_t b0 = 0; b0 < which.size(); b0 += nb) {
       const std::size_t m = std::min(nb, which.size() - b0);
 #pragma omp parallel for schedule(static)
       for (std::size_t b = 0; b < m; ++b) geometry(which[b0 + b], f.data() + b * np, blo[b], bhi[b]);
-      p_.evaluator->fftTop(static_cast<int>(m), static_cast<int>(np), f[0].data(), map_.data(), charge_.data(), blo.data(),
-                           bhi.data(), static_cast<int>(top), out.data());
-      for (std::size_t b = 0; b < m; ++b)
-        for (std::size_t r = 0; r < top; ++r)
-          if (out[b * top + r].second != SIZE_MAX) kept[which[b0 + b]].push_back(out[b * top + r]);
+      p.evaluator->fftTop(static_cast<int>(m), static_cast<int>(np), f[0].data(), d0.map_.data(), d0.charge_.data(),
+                          blo.data(), bhi.data(), static_cast<int>(top), out.data());
+      for (std::size_t s = 0; s < G; ++s)
+        for (std::size_t b = 0; b < m; ++b)
+          for (std::size_t r = 0; r < top; ++r) {
+            const auto& e = out[(s * m + b) * top + r];
+            if (e.second != SIZE_MAX) kept[s][which[b0 + b]].push_back(e);
+          }
     }
   } else {
 #pragma omp parallel
@@ -583,18 +631,24 @@ void MobmDocker::fftPoses(Conf& c) const {
       for (std::size_t o = 0; o < no; ++o) {
         std::array<int, 3> lo{}, hi{};
         if (!geometry(o, f.data(), lo, hi)) continue;
-        fftCorrelate(s, f, map_, charge_, w);
-        fftSelect(s, w.energy.data(), lo, hi, top, kept[o]);
+        fftProbeSpectra(s0, f, d0.map_, d0.charge_, w);
+        for (std::size_t s = 0; s < G; ++s) {
+          fftCombine(*dks[s]->fft_, w);
+          fftSelect(s0, w.energy.data(), lo, hi, top, kept[s][o]);
+        }
       }
     }
   }
-  for (std::size_t o = 0; o < no; ++o)
-    for (const auto& [e, idx] : kept[o]) {
-      const int i = static_cast<int>(idx % s.pad[0]), j = static_cast<int>(idx / s.pad[0] % s.pad[1]),
-                k = static_cast<int>(idx / s.pad[0] / s.pad[1]);
-      c.fftPoses.push_back({g.point(i, j, k), hopf_[o]});
-      c.fftEnergy.push_back(e);
-    }
+  for (std::size_t s = 0; s < G; ++s) {
+    Conf& cc = *cs[s];
+    for (std::size_t o = 0; o < no; ++o)
+      for (const auto& [e, idx] : kept[s][o]) {
+        const int i = static_cast<int>(idx % s0.pad[0]), j = static_cast<int>(idx / s0.pad[0] % s0.pad[1]),
+                  k = static_cast<int>(idx / s0.pad[0] / s0.pad[1]);
+        cc.fftPoses.push_back({g.point(i, j, k), d0.hopf_[o]});
+        cc.fftEnergy.push_back(e);
+      }
+  }
 }
 
 void MobmDocker::fitBounds(float lo[3], float hi[3]) const {
@@ -983,9 +1037,9 @@ Dock9bStats MobmDocker::dockPair(std::span<const double> mobAnglesDeg, std::uint
 }
 
 MobmDocker::Prepared MobmDocker::prepare(std::span<const double> mobAnglesDeg, std::uint64_t stream,
-                                         bool posm1Only) const {
+                                         bool posm1Only, std::optional<Conf> conf) const {
   Prepared pr;
-  pr.c = conformation(mobAnglesDeg);
+  pr.c = conf ? std::move(*conf) : conformation(mobAnglesDeg);
   const Conf& c = pr.c;
   const long long n = l1Count(c);
   const long long first = posm1Only && p_.posm == Posm::Posm4 ? c.sepaPoses() : 0;

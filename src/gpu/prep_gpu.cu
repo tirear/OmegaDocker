@@ -316,6 +316,45 @@ __global__ void __launch_bounds__(128) directKernel(int n, int probes, int px, i
     for (int z = 0; z < nz; ++z) acc[static_cast<std::size_t>(b) * Nc + kk[z]] = {ar[b - b0][z], ai[b - b0][z]};
 }
 
+// Several spectra sets (spec 15.1.22): acc[s][b][k] = sum_c conj(P[c][b][k]) S[s][chan[c]][k], P the probe
+// spectra (channel-major, B orientations each). Thread: one k, kMacB orientations, kMacS sets at a time.
+constexpr int kMacB = 8;
+constexpr int kMacS = 4;
+__global__ void macMultiKernel(std::size_t Nc, int n, int B, int nc, const int* chan, const cufftComplex* P,
+                               const cufftComplex* S, int channels, int sets, cufftComplex* acc) {
+  const std::size_t k = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (k >= Nc) return;
+  const int b0 = blockIdx.y * kMacB, nb = min(kMacB, n - b0);
+  for (int s0 = 0; s0 < sets; s0 += kMacS) {
+    const int ns = min(kMacS, sets - s0);
+    float ar[kMacS][kMacB], ai[kMacS][kMacB];
+#pragma unroll
+    for (int s = 0; s < kMacS; ++s)
+#pragma unroll
+      for (int b = 0; b < kMacB; ++b) ar[s][b] = ai[s][b] = 0;
+    for (int c = 0; c < nc; ++c) {
+      cufftComplex pv[kMacB];
+#pragma unroll
+      for (int b = 0; b < kMacB; ++b)
+        pv[b] = b < nb ? P[(static_cast<std::size_t>(c) * B + b0 + b) * Nc + k] : cufftComplex{0, 0};
+      const std::size_t m = static_cast<std::size_t>(chan[c]);
+#pragma unroll
+      for (int s = 0; s < kMacS; ++s) {
+        if (s >= ns) break;
+        const cufftComplex sv = S[(static_cast<std::size_t>(s0 + s) * channels + m) * Nc + k];
+#pragma unroll
+        for (int b = 0; b < kMacB; ++b) {
+          ar[s][b] += pv[b].x * sv.x + pv[b].y * sv.y;
+          ai[s][b] += pv[b].x * sv.y - pv[b].y * sv.x;
+        }
+      }
+    }
+    for (int s = 0; s < ns; ++s)
+      for (int b = 0; b < nb; ++b)
+        acc[(static_cast<std::size_t>(s0 + s) * B + b0 + b) * Nc + k] = {ar[s][b], ai[s][b]};
+  }
+}
+
 struct Cand {
   float e;
   unsigned long long i;
@@ -399,8 +438,9 @@ struct GpuDockPrep::Impl {
   DevBuf<unsigned long long> counters;  // passCount, outside, overlap, far
   DevBuf<double> base, delta;           // posm3
   DevBuf<float> box;
-  // posm2_fft
-  std::uint64_t fftId = 0;
+  // posm2_fft; several spectra sets (StaM conformations, spec 15.1.22)
+  std::vector<std::uint64_t> fftIds;
+  int sets = 0, planSets = 0;
   std::array<int, 3> pad{};
   std::size_t N = 0, Nc = 0;
   int channels = 0;
@@ -409,7 +449,7 @@ struct GpuDockPrep::Impl {
   cufftHandle r2c = 0, c2r = 0;
   std::size_t workBytes = 0;
   DevBuf<float> real;
-  DevBuf<cufftComplex> spec, acc, tables;
+  DevBuf<cufftComplex> spec, acc, tables, probeSpec;
   DevBuf<char> work;
   DevBuf<double> f;
   DevBuf<int> atoms, ranges, groupMap, groupStart;
@@ -434,12 +474,21 @@ struct GpuDockPrep::Impl {
     if (spectraMode != Spectra::Auto) return spectraMode == Spectra::Direct;
     return probes <= channels * kDirectAtomsPerFft;
   }
+  void releaseFftWork() {
+    real.release();
+    spec.release();
+    acc.release();
+    probeSpec.release();
+    tables.release();
+    work.release();
+  }
   void destroyPlans() {
     if (planBatch) {
       cufftDestroy(r2c);
       cufftDestroy(c2r);
     }
     planBatch = 0;
+    planSets = 0;
     workBytes = 0;
   }
   void makePlans(int b) {
@@ -577,29 +626,46 @@ void GpuDockPrep::filterPosm3(const GpuField& field, const FilterSetup& s, const
 }
 
 void GpuDockPrep::setFft(const FftStam& s) {
+  const FftStam* p = &s;
+  setFft(std::span<const FftStam* const>(&p, 1));
+}
+
+void GpuDockPrep::setFft(std::span<const FftStam* const> s) {
   Impl& d = *impl_;
-  if (s.id != 0 && s.id == d.fftId) return;
+  if (s.empty()) throw Error("setFft: no spectra");
+  std::vector<std::uint64_t> ids;
+  for (const FftStam* f : s) ids.push_back(f->id);
+  if (std::find(ids.begin(), ids.end(), std::uint64_t{0}) == ids.end() && ids == d.fftIds) return;
+  const FftStam& s0 = *s[0];
+  for (const FftStam* f : s)
+    if (f->pad != s0.pad || f->spectra.size() != s0.spectra.size()) throw Error("setFft: spectra of different grid geometries");
   d.begin();
-  if (s.pad != d.pad) d.destroyPlans();
-  d.pad = s.pad;
-  d.N = s.realSize();
-  d.Nc = s.complexSize();
-  d.channels = static_cast<int>(s.spectra.size());
+  if (s0.pad != d.pad) d.destroyPlans();
+  d.pad = s0.pad;
+  d.N = s0.realSize();
+  d.Nc = s0.complexSize();
+  d.channels = static_cast<int>(s0.spectra.size());
+  d.sets = static_cast<int>(s.size());
   d.spectra.release();
-  d.spectra.reserve(static_cast<std::size_t>(d.channels) * d.Nc);
-  for (int m = 0; m < d.channels; ++m)
-    check(cudaMemcpyAsync(d.spectra.p + static_cast<std::size_t>(m) * d.Nc, s.spectra[m].data(), d.Nc * sizeof(cufftComplex),
-                     cudaMemcpyHostToDevice, d.stream),
-          "upload spectrum");
-  d.fftId = s.id;
+  d.spectra.reserve(static_cast<std::size_t>(d.sets) * d.channels * d.Nc);
+  for (int g = 0; g < d.sets; ++g)
+    for (int m = 0; m < d.channels; ++m)
+      check(cudaMemcpyAsync(d.spectra.p + (static_cast<std::size_t>(g) * d.channels + m) * d.Nc, s[g]->spectra[m].data(),
+                            d.Nc * sizeof(cufftComplex), cudaMemcpyHostToDevice, d.stream),
+            "upload spectrum");
+  d.fftIds = std::move(ids);
 }
 
 int GpuDockPrep::fftBatch() {
   Impl& d = *impl_;
-  if (d.fftId == 0) return 0;
-  if (d.planBatch) return d.planBatch;
+  if (d.fftIds.empty()) return 0;
+  if (d.planBatch && d.planSets == d.sets) return d.planBatch;
   d.begin();
-  const std::size_t per = d.N * sizeof(float) + 2 * d.Nc * sizeof(cufftComplex);
+  d.destroyPlans();
+  d.releaseFftWork();
+  // One set: real, probe spectrum and acc per orientation; several: real, the probe spectra and an acc per set.
+  const std::size_t per = d.sets == 1 ? d.N * sizeof(float) + 2 * d.Nc * sizeof(cufftComplex)
+                                      : d.N * sizeof(float) + static_cast<std::size_t>(d.channels + d.sets) * d.Nc * sizeof(cufftComplex);
   const double avail = 0.5 * static_cast<double>(gpuFreeMem(d.device));
   int b = static_cast<int>(std::clamp(avail / static_cast<double>(per), 1.0, 64.0));
   for (;;) {
@@ -607,6 +673,7 @@ int GpuDockPrep::fftBatch() {
     if (b == 1 || static_cast<double>(per * b + d.workBytes) <= avail) break;
     b /= 2;
   }
+  d.planSets = d.sets;
   return b;
 }
 
@@ -616,11 +683,11 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   if (n <= 0) return;
   Impl& d = *impl_;
   d.begin();
-  if (d.fftId == 0) throw Error("fftTop: no spectra");
+  if (d.fftIds.empty()) throw Error("fftTop: no spectra");
   if (n > fftBatch()) throw Error("fftTop: batch too large");
-  const int B = d.planBatch;
+  const int B = d.planBatch, G = d.sets;
   d.real.reserve(static_cast<std::size_t>(B) * d.N);
-  d.acc.reserve(static_cast<std::size_t>(B) * d.Nc);
+  d.acc.reserve(static_cast<std::size_t>(G) * B * d.Nc);
   d.work.reserve(d.workBytes);
   checkFft(cufftSetWorkArea(d.r2c, d.work.p), "cufftSetWorkArea");
   checkFft(cufftSetWorkArea(d.c2r, d.work.p), "cufftSetWorkArea");
@@ -653,11 +720,43 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   }
   const std::size_t outN = static_cast<std::size_t>(n) * top;
   if (chans.empty()) {
-    for (std::size_t i = 0; i < outN; ++i) out[i] = {0.0f, SIZE_MAX};
+    for (std::size_t i = 0; i < G * outN; ++i) out[i] = {0.0f, SIZE_MAX};
     return;
   }
   const unsigned nbx = static_cast<unsigned>((d.Nc + 255) / 256);
-  if (d.directSpectra(probes, static_cast<int>(chans.size()))) {
+  if (G > 1) {
+    // Several sets (spec 15.1.22): the probe spectrum of each channel once (FFT of the spread
+    // atoms), then the products with every set.
+    const int nc = static_cast<int>(chans.size());
+    d.probeSpec.reserve(static_cast<std::size_t>(nc) * B * d.Nc);
+    check(cudaMemsetAsync(d.real.p, 0, static_cast<std::size_t>(B) * d.N * sizeof(float), d.stream), "memset");
+    std::vector<int> cm;
+    for (int c = 0; c < nc; ++c) {
+      const auto& list = chans[c].second;
+      cm.push_back(chans[c].first);
+      std::vector<int> at;
+      std::vector<float> wt;
+      for (const auto& [a, w] : list) {
+        at.push_back(a);
+        wt.push_back(w);
+      }
+      d.atoms.upload(at, d.stream);
+      d.wts.upload(wt, d.stream);
+      const long long ns = static_cast<long long>(n) * static_cast<long long>(at.size());
+      const unsigned nsb = static_cast<unsigned>((ns + 255) / 256);
+      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
+                                 d.pad[2], d.real.p, d.N, 0);
+      check(cudaGetLastError(), "spreadKernel launch");
+      checkFft(cufftExecR2C(d.r2c, d.real.p, d.probeSpec.p + static_cast<std::size_t>(c) * B * d.Nc), "R2C");
+      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
+                                 d.pad[2], d.real.p, d.N, 1);
+      check(cudaGetLastError(), "spreadKernel (clear) launch");
+    }
+    d.groupMap.upload(cm, d.stream);
+    macMultiKernel<<<dim3(nbx, static_cast<unsigned>((n + kMacB - 1) / kMacB)), 256, 0, d.stream>>>(
+        d.Nc, n, B, nc, d.groupMap.p, d.probeSpec.p, d.spectra.p, d.channels, G, d.acc.p);
+    check(cudaGetLastError(), "macMultiKernel launch");
+  } else if (d.directSpectra(probes, static_cast<int>(chans.size()))) {
     // Direct probe spectra, all channels fused.
     const int len = d.pad[0] / 2 + 1 + d.pad[1] + d.pad[2];
     const std::size_t nTab = static_cast<std::size_t>(n) * probes * len;
@@ -716,62 +815,72 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
       first = false;
     }
   }
-  // Orientations beyond n: their spectra are cleared (the plan transforms B of them).
-  if (n < B)
-    check(cudaMemsetAsync(d.acc.p + static_cast<std::size_t>(n) * d.Nc, 0,
-                          static_cast<std::size_t>(B - n) * d.Nc * sizeof(cufftComplex), d.stream),
-          "memset");
-  checkFft(cufftExecC2R(d.c2r, d.acc.p, d.real.p), "C2R");
   const float scale = 1.0f / static_cast<float>(d.N);
+  std::vector<Cand> c;
   if (top <= kSelMax) {
     d.part.reserve(outN * kSelSlices);
-    d.outC.reserve(outN);
-    selectKernel<<<dim3(kSelSlices, static_cast<unsigned>(n)), kSelThreads, 0, d.stream>>>(d.real.p, d.N, d.pad[0], d.pad[1], d.ranges.p,
-                                                                             scale, top, d.part.p);
-    check(cudaGetLastError(), "selectKernel launch");
-    mergeKernel<<<(n + 63) / 64, 64, 0, d.stream>>>(n, top, d.part.p, d.outC.p);
-    check(cudaGetLastError(), "mergeKernel launch");
-    std::vector<Cand> c(outN);
-    check(cudaMemcpyAsync(c.data(), d.outC.p, outN * sizeof(Cand), cudaMemcpyDeviceToHost, d.stream), "download");
-    for (std::size_t i = 0; i < outN; ++i) out[i] = {c[i].e, c[i].i == ~0ull ? SIZE_MAX : static_cast<std::size_t>(c[i].i)};
-    return;
+    d.outC.reserve(static_cast<std::size_t>(G) * outN);
+    c.resize(static_cast<std::size_t>(G) * outN);
   }
-  // Larger fftTopPerRot: selection on the host (as fftSelect).
-  std::vector<float> e(d.N);
+  std::vector<float> e;
   std::vector<std::pair<float, std::size_t>> best;
-  for (int b = 0; b < n; ++b) {
-    check(cudaMemcpyAsync(e.data(), d.real.p + static_cast<std::size_t>(b) * d.N, d.N * sizeof(float), cudaMemcpyDeviceToHost, d.stream),
-          "download");
-    best.clear();
-    for (int k = lo[b][2]; k <= hi[b][2]; ++k)
-      for (int j = lo[b][1]; j <= hi[b][1]; ++j)
-        for (int i = lo[b][0]; i <= hi[b][0]; ++i) {
-          const std::size_t idx = (static_cast<std::size_t>(k) * d.pad[1] + j) * d.pad[0] + i;
-          const std::pair<float, std::size_t> c{e[idx] * scale, idx};
-          if (best.size() < static_cast<std::size_t>(top)) {
-            best.push_back(c);
-            std::push_heap(best.begin(), best.end());
-          } else if (c < best.front()) {
-            std::pop_heap(best.begin(), best.end());
-            best.back() = c;
-            std::push_heap(best.begin(), best.end());
+  for (int g = 0; g < G; ++g) {
+    cufftComplex* acc = d.acc.p + static_cast<std::size_t>(g) * B * d.Nc;
+    // Orientations beyond n: their spectra are cleared (the plan transforms B of them).
+    if (n < B)
+      check(cudaMemsetAsync(acc + static_cast<std::size_t>(n) * d.Nc, 0, static_cast<std::size_t>(B - n) * d.Nc * sizeof(cufftComplex),
+                            d.stream),
+            "memset");
+    checkFft(cufftExecC2R(d.c2r, acc, d.real.p), "C2R");
+    if (top <= kSelMax) {
+      selectKernel<<<dim3(kSelSlices, static_cast<unsigned>(n)), kSelThreads, 0, d.stream>>>(d.real.p, d.N, d.pad[0], d.pad[1],
+                                                                               d.ranges.p, scale, top, d.part.p);
+      check(cudaGetLastError(), "selectKernel launch");
+      mergeKernel<<<(n + 63) / 64, 64, 0, d.stream>>>(n, top, d.part.p, d.outC.p + static_cast<std::size_t>(g) * outN);
+      check(cudaGetLastError(), "mergeKernel launch");
+      continue;
+    }
+    // Larger fftTopPerRot: selection on the host (as fftSelect).
+    e.resize(d.N);
+    for (int b = 0; b < n; ++b) {
+      check(cudaMemcpyAsync(e.data(), d.real.p + static_cast<std::size_t>(b) * d.N, d.N * sizeof(float), cudaMemcpyDeviceToHost,
+                            d.stream),
+            "download");
+      check(cudaStreamSynchronize(d.stream), "cudaStreamSynchronize");
+      best.clear();
+      for (int k = lo[b][2]; k <= hi[b][2]; ++k)
+        for (int j = lo[b][1]; j <= hi[b][1]; ++j)
+          for (int i = lo[b][0]; i <= hi[b][0]; ++i) {
+            const std::size_t idx = (static_cast<std::size_t>(k) * d.pad[1] + j) * d.pad[0] + i;
+            const std::pair<float, std::size_t> cv{e[idx] * scale, idx};
+            if (best.size() < static_cast<std::size_t>(top)) {
+              best.push_back(cv);
+              std::push_heap(best.begin(), best.end());
+            } else if (cv < best.front()) {
+              std::pop_heap(best.begin(), best.end());
+              best.back() = cv;
+              std::push_heap(best.begin(), best.end());
+            }
           }
-        }
-    std::sort_heap(best.begin(), best.end());
-    for (int r = 0; r < top; ++r)
-      out[static_cast<std::size_t>(b) * top + r] =
-          r < static_cast<int>(best.size()) ? best[r] : std::pair<float, std::size_t>{0.0f, SIZE_MAX};
+      std::sort_heap(best.begin(), best.end());
+      for (int r = 0; r < top; ++r)
+        out[static_cast<std::size_t>(g) * outN + static_cast<std::size_t>(b) * top + r] =
+            r < static_cast<int>(best.size()) ? best[r] : std::pair<float, std::size_t>{0.0f, SIZE_MAX};
+    }
+  }
+  if (top <= kSelMax) {
+    check(cudaMemcpyAsync(c.data(), d.outC.p, c.size() * sizeof(Cand), cudaMemcpyDeviceToHost, d.stream), "download");
+    check(cudaStreamSynchronize(d.stream), "cudaStreamSynchronize");
+    for (std::size_t i = 0; i < c.size(); ++i) out[i] = {c[i].e, c[i].i == ~0ull ? SIZE_MAX : static_cast<std::size_t>(c[i].i)};
   }
 }
 
 void GpuDockPrep::releaseWork() {
   Impl& d = *impl_;
-  d.real.release();
-  d.spec.release();
-  d.acc.release();
-  d.work.release();
+  d.releaseFftWork();
+  d.spectra.release();
+  d.fftIds.clear();
   d.f.release();
-  d.tables.release();
   d.part.release();
   d.outC.release();
   d.poses.release();

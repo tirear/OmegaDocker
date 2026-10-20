@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.81 |
+| 文件版本 | 1.82 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1038,6 +1038,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 平移：重原子中心放在格點上，且所有探針原子在盒子內 0.01 Å（同 8.4 的 `m`）。沒有合法平移的定向略過。
 - 保留：每個定向能量最低的 `fftTopPerRot` 個平移（同能量時格點索引小者優先），依定向順序、定向內能量由低到高排列，作為 L1poss；之後照常 8.5 篩選與最佳化（最佳化使用未限制的網格）。
 - StaM 頻譜每個 StaM 構型計算一次；StaM 沒有可轉動兩面角且非 `flexres` 時跨輪次重複使用。
+- MobM 的探針頻譜只取決於 MobM 構型與定向：1.82 起一次處理多個 StaM 構型，每個（MobM 構型、定向）的探針頻譜只算一次（15.1.22）。
 - 平行化：各定向平行計算（OpenMP），每個 FFT 單執行緒。結果與執行緒數無關。
 
 **實測（1.53）**：2KJJ 預設分子設定檔、MobM `BTN_ideal.sdf`、`box_size` 30 Å（81³ 個格點，FFT 81³）、16 個構型配對、`maxRound` 1、`seed` 3、`fftTopPerRot` 1，其餘為預設值；AMD Ryzen 7 9700X（8 核 16 執行緒）。
@@ -2230,6 +2231,28 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 剩下的時間主要是 9b 最小化（4 個 StaM 構形時 GPU 能量 kernel 約 9 s）；這組設定的 L2poss 有 93% 在最小化時離開網格（盒子相對 1L2Y 較小）。
 - 測試：`dock9b: posm3 regions and poses` 加入 posm4（配對、單點、三點都有，盒子 34 Å）：`posm3Pose(posm3Rot)` 與 `l1Pose` 相同、`quickFilterInBox` 與 `quickFilter` 相同、`prepareJobs` 的 L2poss 與計數等於逐一 `l1Pose` + `quickFilter`；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 posm3、posm4（三種 `grid.mode`，範圍起點不對齊旋轉）。
 
+### 15.1.22 posm2_fft：多個 StaM 構型共用 MobM 探針頻譜（1.82）
+
+- 起因（盒子 40 Å、12 個 StaM 構形、4 個 MobM 構形、`dock9b.rotStep` 15，1.81，GPU）：9b 對接約 173–198 s，其中 `directKernel`（MobM 探針頻譜與 StaM 頻譜的乘積）162 s。MobM 探針頻譜只取決於 MobM 構型與定向，但每個（StaM 構型、MobM 構型）配對都重算一次（12 個 StaM 構型就重算 12 次）。另一種探針頻譜算法（每個通道散佈後做 FFT）179 s，差異不大。
+- 做法：
+  1. **一次處理多個 StaM 構型**（`src/main.cpp`）：posm2_fft 時，依序先建好接下來的 StaM 構型（格點、StaM 頻譜），再對這些構型的所有配對一起產生 L1poss；之後照原本的順序加入視窗、做 8.5 篩選與最佳化。一次最多 16 個（`kFftStamMax`），並在下一個構型的 StaM 頻譜會超過可用裝置記憶體的 1/4、或常駐記憶體加上一個構型的主機記憶體會超過 `memory.hostLimit` 的 90% 時停止。配對的組成與略過（`deterministic`）與之前相同。
+  2. **`MobmDocker::conformations(dks, angles)`**：同一個 MobM 構型對多個 docker（同一 MobM、參數、格點幾何，不同 StaM 構型）的 `conformation`。定向的探針座標與合法平移範圍只算一次；`PairJob::conf` 帶入事先算好的構型，`prepareJobs` 不再重算。
+  3. **CPU**：`fftCorrelate` 拆成 `fftProbeSpectra`（各通道的探針頻譜）與 `fftCombine`（與一個 StaM 構型的頻譜相乘、IFFT）；每個定向算一次探針頻譜，再對每個 StaM 構型各做一次 `fftCombine` 與 `fftSelect`。運算與順序與之前相同，**結果逐位元不變**。每個執行緒保留所有通道的探針頻譜（每個通道 `complexSize` 個 complex float）。
+  4. **GPU**（`GpuDockPrep`）：`setFft` 可放入多組 StaM 頻譜。只有一組時照舊（15.1.5）；多組時，每批定向先以散佈 + R2C 算各通道的探針頻譜（每個通道一次），`macMultiKernel` 算每組的乘積和（每個執行緒 1 個頻率、8 個定向、每次 4 組，探針頻譜與 StaM 頻譜的讀取由多個定向、多組共用），再對每組做 C2R 與篩選。每批的定向數依可用記憶體（每個定向：實數格點 + 各通道探針頻譜 + 每組 1 個乘積和）。`PoseEvaluator::fftBatch` 改為接收多個 docker，`fftTop` 的輸出為（docker、定向、名次）。StaM 頻譜在該批結束後（`prepared`）釋放。
+- 量測（TITAN V，16 執行緒；同一時段交替執行）：
+
+| 設定 | 1.81 | 1.82 |
+|---|---|---|
+| posm2_fft，GPU，40 Å，12 個 StaM 構形 | 173.1 s | 38.1 s |
+| posm2_fft，CPU（`gpu.enable = false`），40 Å，4 個 StaM 構形、`rotStep` 30，第 1／2 輪 | 101.8／84.6 s | 62.8／54.2 s |
+
+  - GPU：L1poss、L2poss 與各項移除計數與 1.81 相同；docking samples 的差異在 GPU 加總順序的變動內（15.1.2）。
+  - CPU：所有輸出檔與檢查點與 1.81 逐位元相同。
+  - GPU 1.82 的時間組成（Nsight Systems，對接 47.8 s 的那次）：cuFFT（C2R 221,184 次、探針頻譜 R2C 129,024 次）約 28 s、`macMultiKernel` 9.7 s（記憶體頻寬限制；每個執行緒 4 個定向時 12.1 s）、9b 最小化 7.6 s。C2R 每個（StaM 構型、定向）必須做一次，是目前最大的部分。
+  - posm1（A）的時間不變（3.89–4.02 s）。
+- 附帶修正：視窗項目改以 `unique_ptr` 持有 posm3 的 StaM 區域（`StamSepa`）。之前存在 `std::vector<WindowItem>` 的元素內，視窗加入新項目而重新配置時，先前 docker 的指標會失效（posm3／posm4 視窗大於 1 時，最小化產生姿勢會讀到已釋放的記憶體）。
+- 測試：`dock9b: posm2_fft against several StaM conformations equals each alone`（CPU：`conformations` 與逐一 `conformation` 逐位元相同，含重複與不同順序；不同盒子會報錯；`PairJob::conf` 的 `prepareJobs` 與由角度產生者相同）；`gpu: 9b quick filter and posm2_fft match the CPU path` 加入 3 組 StaM 頻譜同時計算（`fftTopPerRot` 1、3、20）與 CPU 比較。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2554,3 +2577,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.79 | 2026-10-21 | 9b `delta` 格點加速：區塊留在裝置上（`DeviceBlocks`，GPU 9b 不需主機複本）、只比較變動原子影響得到的區塊（CPU 與 GPU 共用判斷）、去溶劑化係數預先計算、型別圖累加留在暫存器；A 的 9b 格點 4.6 → 2.0 s、對接 4.2 → 2.3 s、整個執行 12.2 → 7.6 s（8.1、15.1.10、15.1.19） |
 | 1.80 | 2026-10-21 | 9b `delta` 格點與主機端工作重疊：`GpuGridBuilder::submitDelta`／`finishDelta`、送出下一個構形後再處理目前構形；delta 串流最低優先權，`GpuDockPrep` 與最小化串流最高優先權；`GpuField::setSlots` 不再重新配置欄位表；A 的 9b 格點 + 對接 4.29 → 4.12 s（平均）（15.1.19、15.1.20） |
 | 1.81 | 2026-10-21 | posm3／posm4：L1poss 依旋轉產生，盒子檢查用每個旋轉的探針原子範圍（完全等價），已在盒子內的姿勢在重疊原子數達上限時即判定；GPU 由旋轉資料產生姿勢（`GpuDockPrep::filterPosm3`）；40 Å、12 個 StaM 構形的 posm3 9b 316 → 49 s，CPU 版輸出逐位元不變（8.5、15.1.5、15.1.21） |
+| 1.82 | 2026-10-21 | posm2_fft：一次處理多個 StaM 構型（最多 16 個），MobM 探針頻譜每個（MobM 構型、定向）只算一次；`MobmDocker::conformations`、`fftProbeSpectra`／`fftCombine`、`GpuDockPrep` 多組頻譜與 `macMultiKernel`；40 Å、12 個 StaM 構形 173 → 38 s，CPU 版輸出逐位元不變；修正 posm3 視窗重新配置時 StaM 區域指標失效（8.4.3、15.1.22） |

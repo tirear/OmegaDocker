@@ -36,7 +36,6 @@ class GpuPoseEvaluator : public PoseEvaluator {
   }
   void bind(const MobmDocker& dk) override {
     if (!field_->touch(dk.field().id())) field_->set(dk.field().model());
-    if (prep_ && dk.fft()) prep_->setFft(*dk.fft());
     slot_.assign(1, std::max(0, field_->slotOf(dk.field().id())));
     setup(dk, dk.field().id());
   }
@@ -220,9 +219,14 @@ class GpuPoseEvaluator : public PoseEvaluator {
     stats.far += cnt.far;
     return true;
   }
-  int fftBatch(const MobmDocker& dk) override {
-    if (!prep_ || !dk.fft()) return 0;
-    bind(dk);
+  int fftBatch(std::span<const MobmDocker* const> dks) override {
+    if (!prep_) return 0;
+    std::vector<const FftStam*> s;
+    for (const MobmDocker* dk : dks) {
+      if (!dk->fft()) return 0;
+      s.push_back(dk->fft());
+    }
+    prep_->setFft(s);
     return prep_->fftBatch();
   }
   void fftTop(int n, int probes, const double* f, const int* map, const double* q, const std::array<int, 3>* lo,
