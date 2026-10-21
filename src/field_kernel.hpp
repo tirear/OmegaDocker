@@ -112,15 +112,16 @@ OD_HD inline float at(const FieldView& f, int m, int i, int j, int k) {
   return f.data[(static_cast<std::size_t>(b) * f.mapCount + m) * bs + ((k % B) * B + j % B) * B + i % B];
 }
 
-// Trilinear interpolation of map m at p; grad (optional): dvalue/dp.
+// Trilinear interpolation of map m at p; grad (optional): dvalue/dp. Divisions by the spacing are
+// multiplications by its reciprocal.
 template <class T>
 OD_HD inline T interpolate(const FieldView& f, int m, const T p[3], T* grad) {
   using std::floor;
-  const T spacing = static_cast<T>(f.spacing);
+  const T isp = T(1) / static_cast<T>(f.spacing);
   int i0[3];
   T fr[3];
   for (int c = 0; c < 3; ++c) {
-    const T u = (p[c] - static_cast<T>(f.origin[c])) / spacing;
+    const T u = (p[c] - static_cast<T>(f.origin[c])) * isp;
     int i = static_cast<int>(floor(u));
     i = i < 0 ? 0 : i > f.n[c] - 2 ? f.n[c] - 2 : i;
     i0[c] = i;
@@ -138,9 +139,9 @@ OD_HD inline T interpolate(const FieldView& f, int m, const T p[3], T* grad) {
   if (grad) {
     const T dx0 = lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], fy);
     const T dx1 = lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], fy);
-    grad[0] = lerp(dx0, dx1, fz) / spacing;
-    grad[1] = lerp(c10 - c00, c11 - c01, fz) / spacing;
-    grad[2] = (c1 - c0) / spacing;
+    grad[0] = lerp(dx0, dx1, fz) * isp;
+    grad[1] = lerp(c10 - c00, c11 - c01, fz) * isp;
+    grad[2] = (c1 - c0) * isp;
   }
   return lerp(c0, c1, fz);
 }
@@ -150,11 +151,11 @@ OD_HD inline T interpolate(const FieldView& f, int m, const T p[3], T* grad) {
 template <class T>
 OD_HD inline void interpolateMaps(const FieldView& f, const int* maps, int count, const T p[3], T* val, T* grad) {
   using std::floor;
-  const T spacing = static_cast<T>(f.spacing);
+  const T isp = T(1) / static_cast<T>(f.spacing);
   int i0[3];
   T fr[3];
   for (int c = 0; c < 3; ++c) {
-    const T u = (p[c] - static_cast<T>(f.origin[c])) / spacing;
+    const T u = (p[c] - static_cast<T>(f.origin[c])) * isp;
     int i = static_cast<int>(floor(u));
     i = i < 0 ? 0 : i > f.n[c] - 2 ? f.n[c] - 2 : i;
     i0[c] = i;
@@ -185,9 +186,9 @@ OD_HD inline void interpolateMaps(const FieldView& f, const int* maps, int count
     if (grad) {
       const T dx0 = lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], fy);
       const T dx1 = lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], fy);
-      grad[3 * q] = lerp(dx0, dx1, fz) / spacing;
-      grad[3 * q + 1] = lerp(c10 - c00, c11 - c01, fz) / spacing;
-      grad[3 * q + 2] = (c1 - c0) / spacing;
+      grad[3 * q] = lerp(dx0, dx1, fz) * isp;
+      grad[3 * q + 1] = lerp(c10 - c00, c11 - c01, fz) * isp;
+      grad[3 * q + 2] = (c1 - c0) * isp;
     }
     val[q] = lerp(c0, c1, fz);
   }

@@ -5241,8 +5241,8 @@ TEST_CASE("gpu: 9b device minimizer with each method matches the CPU") {
       if (!okA) return 1;
       return std::abs(a.energy - b.energy) <= 1e-4 * std::max(1.0f, std::abs(b.energy)) ? 1 : 0;
     };
-    int devAgree = 0, ctlAgree = 0, devSteps = 0, cpuSteps = 0;
-    double devMin = 1e300, cpuMin = 1e300;
+    int devAgree = 0, ctlAgree = 0, devSteps = 0, cpuSteps = 0, nBoth = 0;
+    double devMin = 1e300, cpuMin = 1e300, ctlMin = 1e300, devSum = 0, cpuSum = 0, ctlSum = 0;
     for (int i = 0; i < n; ++i) {
       od::DockSample ds;
       ds.energy = static_cast<float>(dres[i].dterms.inter + dres[i].dterms.interClash + dres[i].terms.vdw +
@@ -5265,12 +5265,24 @@ TEST_CASE("gpu: 9b device minimizer with each method matches the CPU") {
         cpuMin = std::min(cpuMin, static_cast<double>(cpuOut[i].energy));
         cpuSteps += cpuOut[i].steps;
       }
+      if (ctlOk[i]) ctlMin = std::min(ctlMin, static_cast<double>(ctlOut[i].energy));
+      // Mean energy over the starts minimized by all three (each capped at 0: clashing starts).
+      if (dres[i].ok && cpuOk[i] && ctlOk[i]) {
+        ++nBoth;
+        devSum += std::min(0.0, static_cast<double>(ds.energy));
+        cpuSum += std::min(0.0, static_cast<double>(cpuOut[i].energy));
+        ctlSum += std::min(0.0, static_cast<double>(ctlOut[i].energy));
+      }
     }
-    MESSAGE(std::format("{}: same result as the CPU: device {}, CPU control {}; lowest energy device {:.3f}, CPU {:.3f}; "
-                        "steps device {}, CPU {}",
-                        method, devAgree, ctlAgree, devMin, cpuMin, devSteps, cpuSteps));
+    REQUIRE(nBoth > 0);
+    const double devMean = devSum / nBoth, cpuMean = cpuSum / nBoth, ctlMean = ctlSum / nBoth;
+    MESSAGE(std::format("{}: same result as the CPU: device {}, CPU control {}; lowest energy device {:.3f}, CPU {:.3f}, "
+                        "control {:.3f}; mean energy device {:.3f}, CPU {:.3f}, control {:.3f}; steps device {}, CPU {}",
+                        method, devAgree, ctlAgree, devMin, cpuMin, ctlMin, devMean, cpuMean, ctlMean, devSteps, cpuSteps));
     CHECK(devAgree >= ctlAgree - n / 10);
-    CHECK(devMin <= cpuMin + 1.0);
+    // The lowest energy of 128 trajectories varies by more than 1 between the CPU and its control;
+    // the mean is compared (as far from the CPU as the control, with a margin of 0.5).
+    CHECK(std::abs(devMean - cpuMean) <= std::abs(ctlMean - cpuMean) + 0.5);
   }
   ev.idle();
 }

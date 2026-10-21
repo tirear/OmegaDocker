@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -98,37 +99,49 @@ struct PairData {
   int count, tiled;
 };
 
+// Reciprocal of pairTermGpu: float with the hardware approximation (about 2 ulp; positive normal
+// arguments only), double exact.
+template <class T>
+__device__ __forceinline__ T pairRcp(T v) {
+  if constexpr (std::is_same_v<T, float>) return __fdividef(1.0f, v);
+  else return T(1) / v;
+}
+
 // One atom pair (the terms of flat::pairTerm with one reciprocal per function instead of
-// divisions): adds to e[0..4] and clashPairs; d = xi − xj, f = dE/dr / r (0: no gradient).
-// Returns false beyond the cutoff.
+// divisions; float: pairRcp and r, 1 / r from the hardware reciprocal square root): adds to
+// e[0..4] and clashPairs; d = xi − xj, f = dE/dr / r (0: no gradient). Returns false beyond the
+// cutoff.
 template <class T>
 __device__ inline bool pairTermGpu(const EnergyModelView& m, const GpuPair& pr, const PairData<T>& pd, const T* x,
                                    double e[5], int& clashPairs, T d[3], T& f) {
   for (int a = 0; a < 3; ++a) d[a] = x[3 * pr.i + a] - x[3 * pr.j + a];
   const T r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
   if (r2 >= static_cast<T>(kElecCutoff * kElecCutoff)) return false;
-  const T r = sqrt(r2);
+  T r, ir;  // r, 1 / r (0 at r = 0)
+  if constexpr (std::is_same_v<T, float>) {
+    ir = r2 > 0 ? rsqrtf(r2) : 0.0f;
+    r = r2 * ir;
+  } else {
+    r = sqrt(r2);
+    ir = r > 0 ? T(1) / r : T(0);
+  }
   T dedr = 0;
   if (r < static_cast<T>(kVdwCutoff)) {
     const GpuPairParams<T> q = pd.params[pr.tf >> 2];
-    T ee, de;
-    if (q.m == 12 && (q.n == 6 || q.n == 10)) {
-      const T half = static_cast<T>(m.halfSmooth);
-      T s = q.reqm, ds = 0;
-      if (r <= q.reqm - half) {
-        s = r + half;
-        ds = 1;
-      } else if (r >= q.reqm + half) {
-        s = r - half;
-        ds = 1;
-      }
-      const T inv = T(1) / s, inv2 = inv * inv, inv6 = inv2 * inv2 * inv2;
-      const T rm = inv6 * inv6, rn = q.n == 6 ? inv6 : inv6 * inv2 * inv2;
-      ee = q.AC * rm - q.BD * rn;
-      de = ds * (static_cast<T>(q.n) * q.BD * rn - T(12) * q.AC * rm) * inv;
-    } else {
-      ad4VdwHb<T>(r, q.AC, q.BD, q.m, q.n, q.reqm, static_cast<T>(m.halfSmooth), ee, de);
+    // 12-6 or 12-10 (uploadAtoms).
+    const T half = static_cast<T>(m.halfSmooth);
+    T s = q.reqm, ds = 0;
+    if (r <= q.reqm - half) {
+      s = r + half;
+      ds = 1;
+    } else if (r >= q.reqm + half) {
+      s = r - half;
+      ds = 1;
     }
+    const T inv = pairRcp(s), inv2 = inv * inv, inv6 = inv2 * inv2 * inv2;
+    const T rm = inv6 * inv6, rn = q.n == 6 ? inv6 : inv6 * inv2 * inv2;
+    const T ee = q.AC * rm - q.BD * rn;
+    const T de = ds * (static_cast<T>(q.n) * q.BD * rn - T(12) * q.AC * rm) * inv;
     e[pr.tf & 2 ? 1 : 0] += ee;
     dedr += de;
   }
@@ -136,8 +149,8 @@ __device__ inline bool pairTermGpu(const EnergyModelView& m, const GpuPair& pr, 
   const T rMin = static_cast<T>(m.rMin);
   const bool clamp = r < rMin;
   const T rr = clamp ? rMin : r;
-  const T irr = T(1) / rr;
-  const T sh = rr + T(1.26366), ish = T(1) / sh, ish2 = ish * ish;
+  const T irr = clamp ? pairRcp(rMin) : ir;
+  const T sh = rr + T(1.26366), ish = pairRcp(sh), ish2 = ish * ish;
   const T diel = T(1.10859) * ish2 + T(0.010358);
   const GpuAtom<T> ai = pd.atoms[pr.i], aj = pd.atoms[pr.j];
   const T qq = ai.cq * aj.q, sv = ai.sv * aj.vol + aj.sv * ai.vol;
@@ -146,7 +159,7 @@ __device__ inline bool pairTermGpu(const EnergyModelView& m, const GpuPair& pr, 
   const T rr2 = rr * rr;
   const T num = T(12.96) - T(0.1063) * rr2 * (T(1) - T(0.001947) * rr2);
   const T den = T(12.96) + rr2 * (T(0.4137) + rr2 * (T(0.00357) + T(0.000112) * rr2));
-  const T iden = T(1) / den;
+  const T iden = pairRcp(den);
   const T sn = sv * num * iden;
   e[3] += sn;
   if (!clamp) {
@@ -162,7 +175,7 @@ __device__ inline bool pairTermGpu(const EnergyModelView& m, const GpuPair& pr, 
     ++clashPairs;
     dedr += de;
   }
-  f = r > 0 ? dedr * (clamp ? T(1) / r : irr) : T(0);
+  f = dedr * ir;
   return true;
 }
 
@@ -192,6 +205,9 @@ __device__ __forceinline__ void probeTerms(const DockView& dv, const FieldView& 
 // M_t(x) = y + R (x − o_t), o_t the input axis point of torsion t (local vectors only). Work memory: two sets of 12 T per torsion
 // and two sets of parent indices, after the coordinates and torsion cos and sin in shared memory
 // (shared) or per block in buf.
+// Torsion gradient (spec 15.1.29): own[ownOff[u], ownOff[u + 1]) the coordinates whose deepest
+// torsion is u; pos[u] the position of u in a depth-first order of the torsions, whose subtree
+// takes the sub[u] positions from pos[u].
 template <class T>
 struct TorsionData {
   const T* axis;  // per torsion: o, unit k (k = 0: zero-length axis, A_t = identity)
@@ -199,6 +215,7 @@ struct TorsionData {
   const int* deep;  // per coordinate; −1: not moved
   char* buf;
   int rounds, ok, shared;
+  const int *ownOff, *own, *pos, *sub;
 };
 
 // Energy terms and gradients of one sample by the block of NT threads (evaluateKernel,
@@ -349,6 +366,7 @@ __device__ __forceinline__ void evalOne(const EnergyModelView& m, const PairData
         const int* sl = pd.slots + 1024 * static_cast<std::size_t>(tt) + lane;
         T gi[3] = {0, 0, 0}, gj[3] = {0, 0, 0};
         int tfNext = sl[32 * s0], jaNext = __shfl_sync(0xffffffffu, jr, (lane + s0) & 31);
+#pragma unroll 2
         for (int s = s0; s < s1; ++s) {
           const int tf = tfNext, ja = jaNext;
           if (s + 1 < s1) tfNext = sl[32 * (s + 1)];
@@ -462,7 +480,62 @@ __device__ __forceinline__ void evalOne(const EnergyModelView& m, const PairData
         res[k] = r;
       }
     }
-    for (int t = warp; g && t < m.torsionCount; t += kWarps) {
+    if constexpr (Tor) {
+      // dE/dθ_u = k_u · Σ (x − a) × g = k_u · (Σ x × g − a × Σ g) over the coordinates moved by u:
+      // the sums over the coordinates of each torsion, then over its subtree.
+      const int nt = m.torsionCount;
+      char* b = td.shared ? reinterpret_cast<char*>(x + nc + 2 * nt)
+                          : td.buf + static_cast<std::size_t>(blockIdx.x) * (24 * sizeof(T) + 2 * sizeof(int)) * nt;
+      double* S = reinterpret_cast<double*>((reinterpret_cast<std::uintptr_t>(b) + 7) & ~std::uintptr_t(7));
+      for (int u = tid; g && u < nt; u += kThreads) {
+        double s[6] = {0, 0, 0, 0, 0, 0};
+        for (int q = td.ownOff[u]; q < td.ownOff[u + 1]; ++q) {
+          const int i = td.own[q];
+          const double f0 = g[i], f1 = g[cc + i], f2 = g[2 * cc + i];
+          const double x0 = x[3 * i], x1 = x[3 * i + 1], x2 = x[3 * i + 2];
+          s[0] += f0;
+          s[1] += f1;
+          s[2] += f2;
+          s[3] += x1 * f2 - x2 * f1;
+          s[4] += x2 * f0 - x0 * f2;
+          s[5] += x0 * f1 - x1 * f0;
+        }
+        const int pu = td.pos[u];
+        for (int k = 0; k < 6; ++k) S[k * nt + pu] = s[k];
+      }
+      __syncthreads();
+      // Inclusive prefix sums of each component in the depth-first order (a warp per component).
+      for (int c = warp; g && c < 6; c += kWarps) {
+        double* Sc = S + c * nt;
+        double carry = 0;
+        for (int base = 0; base < nt; base += 32) {
+          const int q = base + lane;
+          double v = q < nt ? Sc[q] : 0.0;
+          for (int o = 1; o < 32; o *= 2) {
+            const double w = __shfl_up_sync(0xffffffffu, v, o);
+            if (lane >= o) v += w;
+          }
+          v += carry;
+          if (q < nt) Sc[q] = v;
+          carry = __shfl_sync(0xffffffffu, v, 31);
+        }
+      }
+      __syncthreads();
+      for (int u = tid; g && u < nt; u += kThreads) {
+        T a[3], k[3];
+        double sum = 0;
+        if (flat::torsionUnit(m, u, x, a, k)) {
+          double s[6];
+          const int p0 = td.pos[u], p1 = p0 + td.sub[u];
+          for (int c = 0; c < 6; ++c) s[c] = S[c * nt + p1 - 1] - (p0 > 0 ? S[c * nt + p0 - 1] : 0.0);
+          const double a0 = a[0], a1 = a[1], a2 = a[2];
+          sum = k[0] * (s[3] - (a1 * s[2] - a2 * s[1])) + k[1] * (s[4] - (a2 * s[0] - a0 * s[2])) +
+                k[2] * (s[5] - (a0 * s[1] - a1 * s[0]));
+        }
+        gradT[u] = sum;
+      }
+    }
+    for (int t = warp; !Tor && g && t < m.torsionCount; t += kWarps) {
       T a[3], u[3];
       double sum = 0;
       if (flat::torsionUnit(m, t, x, a, u)) {
@@ -1569,18 +1642,26 @@ struct GpuEnergy::Impl {
   Lane lanes[GpuEnergy::kLanes];
   DevBuf<float> axisF;
   DevBuf<double> axisD;
-  DevBuf<int> tParent, tDeep;
-  int tRounds = 0;
+  DevBuf<int> tParent, tDeep, tAux;
+  int tRounds = 0, tAuxOff[4] = {};
   bool tOk = false;
 
   template <class T>
   TorsionData<T> torsionData(Lane& L, std::size_t n) {
     if (!tOk) return {nullptr, nullptr, nullptr, nullptr, 0, 0, 0};
     L.tbuf.reserve(std::max<std::size_t>(1, n * (24 * sizeof(T) + 2 * sizeof(int)) * static_cast<std::size_t>(view.torsionCount)));
-    if constexpr (std::is_same_v<T, float>)
-      return {axisF.p, tParent.p, tDeep.p, L.tbuf.p, tRounds, 1, 0};
-    else
-      return {axisD.p, tParent.p, tDeep.p, L.tbuf.p, tRounds, 1, 0};
+    TorsionData<T> td{nullptr, tParent.p, tDeep.p, L.tbuf.p, tRounds, 1, 0};
+    if constexpr (std::is_same_v<T, float>) td.axis = axisF.p;
+    else td.axis = axisD.p;
+    setGradientPlan(td);
+    return td;
+  }
+  template <class T>
+  void setGradientPlan(TorsionData<T>& td) const {
+    td.ownOff = tAux.p + tAuxOff[0];
+    td.own = tAux.p + tAuxOff[1];
+    td.pos = tAux.p + tAuxOff[2];
+    td.sub = tAux.p + tAuxOff[3];
   }
 
   // Torsion transforms (TorsionData): tOk false when the conditions do not hold.
@@ -1631,6 +1712,41 @@ struct GpuEnergy::Impl {
     axisF.upload(std::vector<float>(axis.begin(), axis.end()));
     tParent.upload(parent);
     tDeep.upload(deep);
+    // Torsion gradient plan (TorsionData::own, pos, sub); parents have lower indices.
+    {
+      std::vector<std::vector<int>> own(nt), child(nt);
+      for (int a = 0; a < nc; ++a)
+        if (deep[a] >= 0) own[deep[a]].push_back(a);
+      for (int u = 0; u < nt; ++u)
+        if (parent[u] >= 0) child[parent[u]].push_back(u);
+      std::vector<int> aux, pos(nt), sub(nt, 1);
+      for (int u = nt; u-- > 0;)
+        if (parent[u] >= 0) sub[parent[u]] += sub[u];
+      int next = 0;
+      std::vector<int> stack;
+      for (int u = nt; u-- > 0;)
+        if (parent[u] < 0) stack.push_back(u);
+      while (!stack.empty()) {
+        const int u = stack.back();
+        stack.pop_back();
+        pos[u] = next++;
+        for (auto it = child[u].rbegin(); it != child[u].rend(); ++it) stack.push_back(*it);
+      }
+      tAuxOff[0] = 0;
+      int o = 0;
+      for (int u = 0; u < nt; ++u) {
+        aux.push_back(o);
+        o += static_cast<int>(own[u].size());
+      }
+      aux.push_back(o);
+      tAuxOff[1] = static_cast<int>(aux.size());
+      for (const auto& e : own) aux.insert(aux.end(), e.begin(), e.end());
+      tAuxOff[2] = static_cast<int>(aux.size());
+      aux.insert(aux.end(), pos.begin(), pos.end());
+      tAuxOff[3] = static_cast<int>(aux.size());
+      aux.insert(aux.end(), sub.begin(), sub.end());
+      tAux.upload(aux);
+    }
     tRounds = 0;
     while ((1 << tRounds) < maxDepth) ++tRounds;
     tOk = true;
@@ -1714,8 +1830,10 @@ struct GpuEnergy::Impl {
               static_cast<T>(m.vol[i])};
     da.upload(a);
     std::vector<GpuPairParams<T>> pp;
-    for (const FlatPairParams& q : m.pairParams)
+    for (const FlatPairParams& q : m.pairParams) {
+      if (q.m != 12 || (q.n != 6 && q.n != 10)) throw Error("GPU energy: only 12-6 and 12-10 pair potentials");
       pp.push_back({static_cast<T>(q.AC), static_cast<T>(q.BD), static_cast<T>(q.reqm), q.m, q.n});
+    }
     dpp.upload(pp);
   }
   DevBuf<DockProbe> probes;
@@ -1951,7 +2069,8 @@ struct GpuEnergy::Impl {
     args.fwork = minFwork.p;
     args.next = minNext.p;
     check(cudaMemsetAsync(minNext.p, 0, sizeof(int), L.stream), "memset");
-    const TorsionData<float> td{axisF.p, tParent.p, tDeep.p, nullptr, tRounds, tor ? 1 : 0, tor ? 1 : 0};
+    TorsionData<float> td{axisF.p, tParent.p, tDeep.p, nullptr, tRounds, tor ? 1 : 0, tor ? 1 : 0};
+    setGradientPlan(td);
     PairData<float> pdl = pairData<float>();
     pdl.tiled = n > sms ? 1 : 0;
     (tor ? kernelT : kernelS)<<<blocks, NT, shm, L.stream>>>(view, pdl, td, reinterpret_cast<float*>(L.xs.p), L.gs.p, dv,

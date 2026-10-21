@@ -232,14 +232,15 @@ DistanceGrid buildDistanceGrid(const GridGeometry& geom, const GridAtoms& stam, 
 
 namespace {
 
-// at(i, j, k): map value at a grid point.
+// at(i, j, k): map value at a grid point. Divisions by the spacing are multiplications by its
+// reciprocal (as field::interpolate).
 template <class T, class At>
 T interpolateAt(const GridGeometry& geom, const At& at, const Vec3T<T>& p, Vec3T<T>* grad) {
-  const T spacing = static_cast<T>(geom.spacing);
+  const T isp = T(1) / static_cast<T>(geom.spacing);
   std::array<int, 3> i0{};
   std::array<T, 3> f{};
   for (int c = 0; c < 3; ++c) {
-    const T u = (p[c] - static_cast<T>(geom.origin[c])) / spacing;
+    const T u = (p[c] - static_cast<T>(geom.origin[c])) * isp;
     i0[c] = std::clamp(static_cast<int>(std::floor(u)), 0, geom.n[c] - 2);
     f[c] = u - i0[c];
   }
@@ -255,9 +256,9 @@ T interpolateAt(const GridGeometry& geom, const At& at, const Vec3T<T>& p, Vec3T
   if (grad) {
     const T dx0 = lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], fy);
     const T dx1 = lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], fy);
-    (*grad)[0] = lerp(dx0, dx1, fz) / spacing;
-    (*grad)[1] = lerp(c10 - c00, c11 - c01, fz) / spacing;
-    (*grad)[2] = (c1 - c0) / spacing;
+    (*grad)[0] = lerp(dx0, dx1, fz) * isp;
+    (*grad)[1] = lerp(c10 - c00, c11 - c01, fz) * isp;
+    (*grad)[2] = (c1 - c0) * isp;
   }
   return lerp(c0, c1, fz);
 }

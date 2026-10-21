@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.89 |
+| 文件版本 | 1.90 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -2385,6 +2385,30 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - CPU 不忙時 GPU 最小化慢 7–17%（`fire` 快 5%），與 L-BFGS 相同的原因（15.1.26：CPU 最小化時兩個 lane 的核心可重疊）；CPU 被佔用時 GPU 最小化快 10–45%。
 - 測試：新增 `gpu: 9b device minimizer with each method matches the CPU`（五種方法；與 CPU 結果相同的個數 ≥ CPU 對照組 − n/10、最低能量 ≤ CPU + 1、步數 ≤ `maxSteps`、回傳的姿勢以 CPU 重算的能量）。
 
+### 15.1.29 CUDA 版：能量核心最佳化（四）（1.90）
+
+- 量測方法：與 15.1.27 相同，在 `evalOne` 中以 `clock64()` 分段累計（暫時的程式碼，未保留）；例子 A（2KJJ + 1L2Y，64 Å 盒子，`stam.dockingConfSampleNum` 100，`mobm.dockingConfSampleNum` 4，posm1 1000，L2poss 107,574，steps/pose 約 95）。整個執行中 9b 佔 28.5／32.1 s，其中 `minimizeDockKernel` 26.4 s（nsys）；StaM 視窗數 13 → 3 只快 4%（每次啟動的尾端不是主要部分）。Nsight Compute（`SourceCounters` 在此核心無法使用）：每 SM 2 個 block（128 個暫存器）、每排程器發出 0.41 個指令／週期，主要等待為 long scoreboard、branch resolving 與 no instruction；CBU（分支）管線 23–31%。
+- 1.89 的分段（Gcycles，所有 block 合計）：初始座標與兩面角轉換 507、原子對 3,640、閉合與加總 78、探針原子 554、兩面角梯度 503。
+- 做法：
+  - 原子對（`pairTermGpu`，float）：倒數改用硬體近似（`__fdividef`，約 2 ulp），r 與 1/r 由一次 `rsqrtf` 得到（原本 IEEE 的 `sqrt` 與除法有慢速路徑的分支）。double 的運算不變。原子對 3,640 → 2,830。
+  - vdW／H-bond 只保留 12-6 與 12-10（AD4 只有這兩種，`ad4PairParams`）；其他 m、n 在上傳時報錯（`GPU energy: only 12-6 and 12-10 pair potentials`）。分塊迴圈 `#pragma unroll 2`。原子對 → 2,650。
+  - 格點內插（`field::interpolate`、`field::interpolateMaps`、`grid.cpp` 的 `interpolateAt`，CPU 與 GPU 共用）：除以格點間距改為乘以其倒數（CPU 與 GPU 一致，仍逐位元相同）。探針原子 580 → 500。
+  - 兩面角梯度（使用兩面角轉換時，`TorsionData`）：dE/dθ_u = k_u · (Σ x × g − a × Σ g)，Σ 為 u 移動的座標。先算每個兩面角自己的座標（最深的兩面角為 u）的 Σ g 與 Σ x × g（double），再以兩面角的深度優先順序做前綴和（每個分量一個 warp），子樹的和為兩個前綴和之差。原本每個兩面角走過所有移動的座標（總量為各座標的深度和）。兩面角梯度 518 → 304。
+- 結果差異：float 的原子對與 GPU 的兩面角梯度（加總順序）改變，最小化的路徑會分開；與 CPU 結果相同的個數與 CPU 對照組同級（測試）。CPU 版的格點內插改變捨入，CPU 結果與 1.89 不逐位元相同。
+- 嘗試後未採用：原子對以 float 累加後每塊再加入 double（無差異）；i 端原子的座標與常數在分塊中放在暫存器（慢 3%）；`#pragma unroll 4`（暫存器溢出，慢 18%）；兩面角梯度依深度分層由下往上加總（每層一次 `__syncthreads`，深度 27 時慢 45%）；子樹以迴圈加總（304 → 371，比前綴和慢）。
+- 量測（TITAN V，16 執行緒，同一時段交錯執行；9b docking）：
+
+| 例子 | 1.88 GPU 最小化 | 1.90 GPU 最小化 | 1.88 CPU 最小化 | 1.90 CPU 最小化 |
+|---|---|---|---|---|
+| A（兩次） | 28.48／28.45 s | 23.63／23.63 s | 27.84 s | 24.08 s |
+| RB4 posm1 100000（兩次） | 8.54／8.51 s | 7.10／7.08 s | 7.89 s | 7.10 s |
+| RB4 posm3 `rotStep` 25 | 194.10／194.04 s | 161.99 s | 177.00 s | 154.01 s |
+| A，`posm1SampleNum` 50，`gpu.conf9aPrecision = float`：9a | 2.08 s | 1.84 s | — | — |
+
+  - 9b 快 17%；GPU 最小化在 A、posm1 與 CPU 最小化相同或較快，posm3 慢 5%（CPU user 21 s 對 1,326 s）。9a float 快 12%；9a double（預設）不變（2.85 → 2.83 s）。
+- 1.90 分段：初始座標與兩面角轉換 464、原子對 2,650、閉合與加總 78、探針原子 502、兩面角梯度 304（合計比 1.89 少 24%）。
+- 測試：`gpu: 9b device minimizer with each method matches the CPU` 的最低能量檢查（裝置 ≤ CPU + 1）在 128 條路徑的最低值上不穩定（CPU 與其對照組相差可大於 1），改為比較三者都成功的起點的平均能量（每個上限 0）：|裝置 − CPU| ≤ |對照組 − CPU| + 0.5。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2757,3 +2781,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.87 | 2026-10-21 | GPU 最小化器：每次通過只計算一次能量（能量程式碼一份，溢出載入 1264 → 244 bytes）、以基底向量內積計算 L-BFGS 方向、內積與係數放在共用記憶體；能量計算以外的時間 16% → 12%，posm1 快 4.7%；`dock9b.lbfgsMemory` > 62 時回到 CPU 最小化（15.1.27） |
 | 1.88 | 2026-10-21 | `sd`、`cg`、`fire`、`adadelta` 也整個在 GPU 上最小化（`minimizeDockKernel` 共用、`MobmDocker::deviceMinParams`）；結果與 CPU 同級，CPU 不忙時慢 7–17%（fire 快 5%），CPU 被佔用時快 10–45%（14、15.1.28） |
 | 1.89 | 2026-10-21 | 使用 GPU 且 `gpu.dock9bDeviceMin = true`、`dock9b.minMethod = lbfgs` 時 `dock9b.lbfgsMemory` > 62 報錯並結束，不再自動在 CPU 最小化（12、15.1.27、15.1.28） |
+| 1.90 | 2026-10-21 | 能量核心最佳化：float 原子對以硬體倒數與 `rsqrtf`、只保留 12-6／12-10、格點內插乘以間距的倒數（CPU 與 GPU）、兩面角梯度以子樹前綴和計算；9b 快 17%，9a float 快 12%（15.1.29） |
