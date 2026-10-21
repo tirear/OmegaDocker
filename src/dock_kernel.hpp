@@ -42,6 +42,8 @@ struct DockTerms {
 // Whole 9b minimizations with L-BFGS on the device (MobmDocker::minimize, spec 15.1.26).
 // Variables z = (t / sT, rotation vector / sR, torsions in rad / sA); steps limited to maxTrans
 // (Å) and maxAngle (rad); VecMinParams maxSteps, convSteps, deltaE and memory.
+// Largest memory of the device minimizer (larger: minimized on the CPU).
+constexpr int kDeviceLbfgsMaxMemory = 62;
 struct DockMinParams {
   double sT, sR, sA, maxTrans, maxAngle, deltaE;
   int maxSteps, convSteps, memory;

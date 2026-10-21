@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.86 |
+| 文件版本 | 1.87 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1687,7 +1687,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.minMaxStep` | `--dock9b_minMaxStep` | 1000 | 8.6 |
 | `dock9b.minConvSteps` | `--dock9b_minConvSteps` | 10 | 8.6 |
 | `dock9b.minDeltaE` | `--dock9b_minDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
-| `dock9b.lbfgsMemory` | `--dock9b_lbfgsMemory` | 7 | 12 |
+| `dock9b.lbfgsMemory` | `--dock9b_lbfgsMemory` | 7 | 12（CUDA 版 GPU 最小化最多 62，更大時在 CPU 最小化：15.1.27） |
 | `dock9b.scaleTrans`、`dock9b.scaleRot`、`dock9b.scaleTors` | `--dock9b_scaleTrans` 等 | 1、1、1 | 12 |
 | `dock9b.maxTransStep` | `--dock9b_maxTransStep` | 0.5 Å | 12 |
 | `dock9b.maxAngleStep` | `--dock9b_maxAngleStep` | 10° | 12 |
@@ -2333,6 +2333,33 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 後續：其他四種方法（`sd`、`cg`、`fire`、`adadelta`）、9a 的最小化移到 GPU；減少 warp 0 步驟的時間。
 - 測試：`gpu: 9b pose energies and minimization match the CPU path` 加入 GPU 最小化（三種格點模式；與 CPU 結果相同的個數 ≥ CPU 對照組 − n/10；回傳的姿勢以 CPU 重算的能量）；`cli` 加入 `gpu.dock9bDeviceMin`。
 
+### 15.1.27 CUDA 版：GPU 最小化器自身的時間（1.87）
+
+- 目的：1.86 的 `minimizeDockKernel` 中 block 約 15% 的時間不在能量計算（warp 0 的最小化步驟期間其他 warp 閒置）。
+- 量測方法：在核心中以 `clock64()` 分段累計（暫時的程式碼，未保留），RB4 posm1 100000。1.86：能量計算 84%、warp 0 的 two-loop 與步長上限 8.6%、`__syncthreads` 等待 3.7%、其他 3.7%。另以 `ptxas -v` 檢查：1.86 核心有 1264 bytes 溢出載入（spill loads）；能量計算有兩個呼叫點（起點、line search）被各自內聯，兩份程式碼都在最小化器的變數存活時執行。
+- 做法（`src/gpu/energy_gpu.cu`）：
+  - 每個樣本一個迴圈，每次通過只計算一次能量（起點，或 line search 的試驗點），之後依情況接受步、算新方向；能量程式碼只內聯一份。溢出載入 1264 → 244 bytes，這是主要的改善。
+  - 方向以基底向量（儲存的 s、y 與梯度）的內積計算（vector-free L-BFGS）：每接受一步，所有 warp 一起算新的內積（新的 s、y 對其他基底與梯度，與梯度對所有 s、y；packed 下三角 G），warp 0 在係數上執行 two-loop（每個 lane 一部分係數，不讀寫向量），再一次讀取基底向量算出方向，同時計算步長上限。相同的運算順序與停止條件；數學上與 1.86 相同，內積的加總順序不同。
+  - 試驗點、梯度縮放、儲存新的 s、y 與接受點由所有執行緒分擔；z 與 zt 合併（接受時由 z + f·d 重算）。
+  - 工作記憶體的指標每次使用時從共用記憶體讀取（volatile），避免在能量計算期間佔用暫存器。
+  - 內積與係數（G、rho、alpha、係數、順序；memory 7 時約 2.0 KiB）在 SM 的共用記憶體等級（8 KiB × 2^k）不變且駐留 block 數不變時放在共用記憶體；向量仍在全域記憶體。
+  - `dock9b.lbfgsMemory` 上限 62（`kDeviceLbfgsMaxMemory`，係數放在每個 lane 的暫存器中）；更大時 `GpuPoseEvaluator::minimize` 回傳 false，回到 1.85 方式（CPU 最小化、GPU 算能量）。
+- 1.87 分段：能量計算 88%、two-loop 與方向 4.8%、接受與新內積 3.8%、`__syncthreads` 等待 2.6%、其他 0.8%。
+- 量測（TITAN V，16 執行緒，同一時段交錯執行；桌面使用 GPU 約 20–30%）：
+
+| 例子 | 1.85 方式（`gpu.dock9bDeviceMin = false`） | 1.86 GPU 最小化 | 1.87 GPU 最小化 |
+|---|---|---|---|
+| RB4 posm1 100000（兩次） | 7.83／7.86 s | 8.88／8.87 s | 8.47／8.46 s |
+| RB4 posm1，16 個核心被佔用 | 17.11 s | — | 10.06 s |
+| RB4 posm3 `rotStep` 15 | 274.9 s | 312.0 s | 320.7 s |
+| RB4 posm3 `rotStep` 25（1.86、1.87 各 4 次） | 177.2 s | 203.3／197.8／228.2／212.2 s | 176.8／221.5／218.6／219.8 s |
+
+  - posm1：比 1.86 快 4.7%，比 1.85 方式慢 8%（1.86：13%）。
+  - posm3：重複執行的差異（177–228 s）大於版本間的差異；1.86 與 1.87 的平均（210 s、209 s）相同。
+  - 嘗試後未採用：限制暫存器為 80 個（每個多處理器 3 個 block；溢出增加，慢 4%）；向量也放在共用記憶體（共用記憶體等級提高、L1 快取變少，慢 3%）；`evalOne` 不內聯（呼叫的暫存器保存，慢 27%）；改變共用記憶體與 L1 的比例（carveout 50%、100%：慢 4%、11%）；`sincos`、倒數乘法（無差異）。
+- 結果：與 CPU 結果相同的個數與 1.86、CPU 對照組同級（測試：三種格點模式 64／66／65 個，CPU 對照組相同）；結果與 1.86 不逐位元相同（加總順序）。
+- 測試：`gpu: 9b pose energies and minimization match the CPU path` 加入 memory 超過上限時回到 CPU 最小化。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2702,3 +2729,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.84 | 2026-10-21 | 新增 17.3：需要更多案例測試的參數（未校準、只有少數案例的測試、尚未測試三類）；`dock9b.fftStride` 標註需要更多案例（15.1.23） |
 | 1.85 | 2026-10-21 | 單精度原子對 32 × 32 分塊（樣本數多於多處理器數時）、9b 探針原子的格點同點內插、能量項先加總；float 核心 n = 4096 快 1.42–1.53 倍，RB4 posm1 9b 約 −8%、posm3 −5.7%；記錄 16 執行緒超額時的變慢與 `OMP_WAIT_POLICY=passive` 的量測（15.1.24、17.1） |
 | 1.86 | 2026-10-21 | 執行緒池取代每步的 OpenMP 區域，閒置執行緒阻塞不忙等（16 執行緒、1 核心被佔用時 posm1 294 → 9.7 s）（15.1.25）；9b 的 L-BFGS 整個在 GPU 上（`minimizeDockKernel`、`PoseEvaluator::minimize`、`gpu.dock9bDeviceMin` 預設 true），CPU 時間少 13–77 倍，CPU 不忙時慢 12–23%，CPU 被佔用時快（14、15.1.26、16、17.1） |
+| 1.87 | 2026-10-21 | GPU 最小化器：每次通過只計算一次能量（能量程式碼一份，溢出載入 1264 → 244 bytes）、以基底向量內積計算 L-BFGS 方向、內積與係數放在共用記憶體；能量計算以外的時間 16% → 12%，posm1 快 4.7%；`dock9b.lbfgsMemory` > 62 時回到 CPU 最小化（15.1.27） |

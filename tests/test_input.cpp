@@ -5194,6 +5194,10 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
     MESSAGE(std::format("{}: device minimizer: same result as the CPU {}, lowest energy {:.3f}; steps device {}, CPU {}",
                         name, devAgree, devMin, devSteps, cpuSteps));
     CHECK(devAgree >= ctlAgree - n / 10);
+    // Memory above the device limit: minimized on the CPU (the evaluator declines).
+    od::DockMinParams big = mp;
+    big.memory = od::kDeviceLbfgsMaxMemory + 1;
+    CHECK_FALSE(ev.minimize(n, startReq.data(), big, dres.data(), dang.data()));
   }
   ev.idle();
 }

@@ -111,7 +111,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
     });
   }
   bool minimize(int n, const PoseRequest* req, const DockMinParams& p, DockMinResult* out, float* anglesOut) override {
-    if (!deviceMin_) return false;
+    if (!deviceMin_ || p.memory > kDeviceLbfgsMaxMemory) return false;
     const std::size_t nn = static_cast<std::size_t>(n), nt = static_cast<std::size_t>(nt_);
     minStarts_.resize(nn);
     minAngles_.resize(nn * nt);

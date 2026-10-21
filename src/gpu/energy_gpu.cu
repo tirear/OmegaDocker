@@ -567,20 +567,27 @@ __device__ inline double warpAllSum(double v) {
   for (int o = 16; o > 0; o /= 2) v += __shfl_xor_sync(0xffffffffu, v, o);
   return v;
 }
-// a · b by one warp; lane l takes the indices l, l + 32, … (as the vector updates below).
-__device__ inline double warpDot(const double* a, const double* b, int n, int lane) {
-  double s = 0;
-  for (int i = lane; i < n; i += 32) s += a[i] * b[i];
-  return warpAllSum(s);
-}
 
-// Work memory of minimizeDockKernel per block: doubles z, g, d, zt, gt (ng each), S and Y (memory ×
-// ng each), rho and alpha (memory each) and the torsion gradient (nt); floats: trial and best
-// angles (nt each).
-__host__ __device__ inline std::size_t minWorkDoubles(int ng, int nt, int mem) {
-  return (5 + 2 * static_cast<std::size_t>(mem)) * static_cast<std::size_t>(ng) + 2 * static_cast<std::size_t>(mem) +
-         static_cast<std::size_t>(nt);
+// Work memory of minimizeDockKernel per block (P = memory + 1 stored pairs, K = 2P + 1 basis
+// vectors): doubles S and Y (P × ng each), the vectors (minVecDoubles: z, g, d, gt with ng each and
+// the torsion gradient, nt) and the scalars (minScalarDoubles: the dot products of the basis vectors
+// G (packed lower triangle, K (K + 1) / 2), rho (P), alpha (memory), the coefficients (K) and the
+// order of the pairs (P, int)); floats (fwork): trial and best angles (nt each). The scalars are in
+// shared memory when they fit (DockMinArgs::scalarOff).
+__host__ __device__ inline std::size_t minVecDoubles(int ng, int nt) {
+  return 4 * static_cast<std::size_t>(ng) + static_cast<std::size_t>(nt);
 }
+__host__ __device__ inline std::size_t minScalarDoubles(int mem) {
+  const std::size_t P = static_cast<std::size_t>(mem) + 1, K = 2 * P + 1;
+  return K * (K + 1) / 2 + P + static_cast<std::size_t>(mem) + K + (P + 1) / 2;
+}
+// Index of the basis vector pair (u, v) in the packed G.
+__device__ inline int triIndex(int u, int v) { return u >= v ? u * (u + 1) / 2 + v : v * (v + 1) / 2 + u; }
+__host__ __device__ inline std::size_t minWorkDoubles(int ng, int nt, int mem) {
+  return 2 * (static_cast<std::size_t>(mem) + 1) * static_cast<std::size_t>(ng) + minVecDoubles(ng, nt) +
+         minScalarDoubles(mem);
+}
+__host__ __device__ inline std::size_t minWorkWords(int nt) { return 2 * static_cast<std::size_t>(nt); }
 
 struct DockMinArgs {
   DockMinParams p;
@@ -592,40 +599,62 @@ struct DockMinArgs {
   float* fwork;
   int* next;  // sample counter
   int n;
+  int scalarOff;  // >= 0: the scalars (minScalarDoubles) in dynamic shared memory from this byte offset
 };
 
-// Whole 9b minimizations (spec 15.1.26): MobmDocker::minimize with L-BFGS (minimize.cpp runLbfgs)
-// on the device. Each block takes the next sample until none is left; warp 0 runs the minimizer in
-// double precision, all threads evaluate the energy (evalOne). Steps of the minimizer as on the
-// CPU; the vector sums are warp sums (another order of addition).
+// Whole 9b minimizations (spec 15.1.26, 15.1.27): MobmDocker::minimize with L-BFGS (minimize.cpp
+// runLbfgs) on the device. Each block takes the next sample until none is left; all threads
+// evaluate the energy (evalOne) and do the per-element work (trial points, gradients, stored
+// pairs). The L-BFGS direction is computed from the dot products of the basis vectors (the stored
+// pairs s, y and the gradient; vector-free L-BFGS): after each accepted step the warps compute the
+// new dot products together, then warp 0 runs the two-loop recursion on the coefficients of the
+// basis (lane-parallel, no vector memory) and forms the direction in one pass. Steps of the
+// minimizer as on the CPU; the sums are in another order.
 template <int Dock, int NT, bool Tor>
 __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, PairData<float> pd, TorsionData<float> td,
                                                          float* xs, double* gs, DockView dv, DockMinArgs a, int shared) {
   extern __shared__ __align__(16) unsigned char smem[];
   constexpr double kRad = 3.14159265358979323846 / 180.0, kArmijo = 1e-4;
-  constexpr int kMaxBacktrack = 20;
-  const int tid = threadIdx.x, lane = tid & 31;
+  constexpr int kMaxBacktrack = 20, kWarps = NT / 32, kC = (2 * (kDeviceLbfgsMaxMemory + 1) + 1 + 31) / 32, kD = 4;
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const bool w0 = tid < 32;
-  const int nt = m.torsionCount, ng = 6 + nt, M = a.p.memory;
-  const std::size_t nc = 3 * static_cast<std::size_t>(m.coordCount);
+  const int nt = m.torsionCount, ng = 6 + nt, M = a.p.memory, P = M + 1, K = 2 * P + 1, gI = 2 * P;
+  const std::size_t nc = 3 * static_cast<std::size_t>(m.coordCount), sng = static_cast<std::size_t>(ng);
   float* x = shared ? reinterpret_cast<float*>(smem) : xs + blockIdx.x * nc;
   double* g = gs + blockIdx.x * nc;
-  double* z = a.work + blockIdx.x * minWorkDoubles(ng, nt, M);
-  double *gv = z + ng, *d = gv + ng, *zt = d + ng, *gt = zt + ng, *S = gt + ng;
-  double *Y = S + static_cast<std::size_t>(M) * ng, *rho = Y + static_cast<std::size_t>(M) * ng, *alpha = rho + M;
-  double* gradT = alpha + M;
-  float* angT = a.fwork + blockIdx.x * 2 * static_cast<std::size_t>(nt);
-  float* angB = angT + nt;
   const DockMinParams& p = a.p;
+  // The work memory pointers are read from shared memory where they are used (volatile: not kept
+  // in registers across the energy evaluation, where they made the energy loops spill).
+  __shared__ double *sWork, *sVec, *sScalar;
+  __shared__ float *sAngT, *sAngB;
+  // order[0, cnt): stored pairs, oldest first; order[cnt]: the next one.
+#define OD_MINW                                                                                                       \
+  double* const S = *reinterpret_cast<double* volatile*>(&sWork);                                                    \
+  double* const Y = S + P * sng;                                                                                     \
+  double* const z = *reinterpret_cast<double* volatile*>(&sVec);                                                     \
+  double *const gv = z + ng, *const d = gv + ng, *const gt = d + ng, *const gradT = gt + ng;                         \
+  double* const G = *reinterpret_cast<double* volatile*>(&sScalar);                                                  \
+  double *const rho = G + static_cast<std::size_t>(K) * (K + 1) / 2, *const alpha = rho + P;                        \
+  double* const coef = alpha + M;                                                                                    \
+  int* const order = reinterpret_cast<int*>(coef + K);                                                               \
+  float* const angT = *reinterpret_cast<float* volatile*>(&sAngT);                                                  \
+  float* const angB = *reinterpret_cast<float* volatile*>(&sAngB);                                                  \
+  const auto basis = [&](int l) -> const double* { return l < P ? S + l * sng : l < gI ? Y + (l - P) * sng : gv; }; \
+  (void)gv, (void)d, (void)gt, (void)G, (void)rho, (void)alpha, (void)coef, (void)gradT, (void)angB,       \
+      (void)order, (void)basis;
 
   __shared__ DockPose pose, bestPose;
   __shared__ double res[17], bestRes[17], q0[4];
-  __shared__ double e, eT, bestE, slope;
-  __shared__ int sIdx, status, steps, evals, calm, cnt, head, accepted;  // status: 0 running, 1 done, 2 left the grid
+  __shared__ double e, eT, bestE, slope, dScale, fTrial;
+  __shared__ int sIdx, status, steps, evals, calm, cnt, accepted, pending;  // status: 0 running, 1 done, 2 left the grid
 
-  // Pose and angles of the point v (MobmDocker::minimize unpack); warp 0.
-  const auto unpack = [&](const double* v) {
-    if (lane == 0) {
+  // Trial point v = z + f d (pose and angles; MobmDocker::minimize unpack); all threads.
+  const auto trial = [&](double f) {
+    OD_MINW
+    if (tid == 0) {
+      fTrial = f;
+      double v[6];
+      for (int i = 0; i < 6; ++i) v[i] = z[i] + f * d[i];
       const double rv[3] = {v[3] * p.sR, v[4] * p.sR, v[5] * p.sR};
       double r[4], q[4];
       quatFromRotationVector(rv, r);
@@ -634,160 +663,283 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
       for (int i = 0; i < 3; ++i) pose.t[i] = static_cast<float>(v[i] * p.sT);
       for (int i = 0; i < 4; ++i) pose.q[i] = static_cast<float>(q[i]);
     }
-    for (int k = lane; k < nt; k += 32) angT[k] = static_cast<float>(wrapDegDev(v[6 + k] * p.sA / kRad));
+    for (int k = tid; k < nt; k += NT) {
+      const double v = z[6 + k] + f * d[6 + k];
+      angT[k] = static_cast<float>(wrapDegDev(v * p.sA / kRad));
+    }
   };
   // Energy and scaled gradient (gout) of pose and angT; all threads; true unless outside the grid.
-  const auto evaluate = [&](double* gout, double& eout) {
+  const auto evaluate = [&](int which, double& eout) {
     __syncthreads();
-    evalOne<float, Dock, NT, Tor>(m, pd, td, angT, x, g, shared, dv, &pose, res, gradT);
-    if (w0) {
-      for (int i = lane; i < ng; i += 32) gout[i] = i < 3 ? res[11 + i] * p.sT : i < 6 ? res[11 + i] * p.sR : gradT[i - 6] * p.sA;
-      if (lane == 0) {
-        ++evals;
-        eout = res[8] + res[9] + (((res[0] + res[1] + res[2] + res[3]) + res[4]) + res[5]);
-      }
+    {
+      OD_MINW
+      evalOne<float, Dock, NT, Tor>(m, pd, td, angT, x, g, shared, dv, &pose, res, gradT);
+    }
+    OD_MINW
+    double* const gout = which ? gt : gv;
+    for (int i = tid; i < ng; i += NT) gout[i] = i < 3 ? res[11 + i] * p.sT : i < 6 ? res[11 + i] * p.sR : gradT[i - 6] * p.sA;
+    if (tid == 0) {
+      ++evals;
+      eout = res[8] + res[9] + (((res[0] + res[1] + res[2] + res[3]) + res[4]) + res[5]);
     }
     return res[10] == 0;
   };
-  // The current trial point becomes the best one; warp 0.
-  const auto keepBest = [&](double en) {
-    if (lane == 0) {
-      bestPose = pose;
-      bestE = en;
+  // The current trial point becomes the best one: angles and terms (all threads), then pose and
+  // energy (bestPoseE, thread 0, after a barrier when other threads read bestE).
+  const auto keepBest = [&]() {
+    OD_MINW
+    if (tid < 17) bestRes[tid] = res[tid];
+    for (int k = tid; k < nt; k += NT) angB[k] = angT[k];
+  };
+  // New dot products (all warps): with a new pair (the pair order[cnt] against the stored pairs,
+  // itself and the gradient) and of the gradient against the stored pairs; only g.g otherwise.
+  const auto dots = [&](bool withNew) {
+    OD_MINW
+    const int c = cnt, q = order[c], total = withNew ? 6 * c + 6 : 1 + 2 * c;
+    for (int k = warp; k < total; k += kWarps) {
+      int u, v;
+      if (!withNew) {
+        if (k == 0) u = v = gI;
+        else {
+          u = gI;
+          v = (k - 1) % 2 ? P + order[(k - 1) / 2] : order[(k - 1) / 2];
+        }
+      } else if (k < 6 * c) {
+        const int pp = order[k / 6], kind = k % 6;
+        u = kind < 2 ? q : kind < 4 ? P + q : gI;
+        v = kind % 2 ? P + pp : pp;
+      } else {
+        constexpr int ku[6] = {0, 0, 1, 0, 1, 2}, kv[6] = {0, 1, 1, 2, 2, 2};
+        const int kk = k - 6 * c, id[3] = {q, P + q, gI};
+        u = id[ku[kk]];
+        v = id[kv[kk]];
+      }
+      const double* bu = basis(u);
+      const double* bv = basis(v);
+      double sum = 0;
+      for (int i = lane; i < ng; i += 32) sum += bu[i] * bv[i];
+      sum = warpAllSum(sum);
+      if (lane == 0) {
+        G[triIndex(u, v)] = sum;
+      }
     }
-    if (lane < 17) bestRes[lane] = res[lane];
-    for (int k = lane; k < nt; k += 32) angB[k] = angT[k];
+  };
+  // Sum over the basis of coefficient × G row (warp 0, lane-parallel).
+  const auto rowDot = [&](const double (&cr)[kC], int row) {
+    OD_MINW
+    double s = 0;
+#pragma unroll
+    for (int r = 0; r < kC; ++r) {
+      const int l = lane + 32 * r;
+      if (l < K && cr[r] != 0) s += cr[r] * G[triIndex(row, l)];
+    }
+    return warpAllSum(s);
+  };
+  const auto addCoef = [&](double (&cr)[kC], int l, double v) {
+#pragma unroll
+    for (int r = 0; r < kC; ++r)
+      if (l == lane + 32 * r) cr[r] += v;
   };
 
+  if (tid == 0) {
+    sWork = a.work + blockIdx.x * minWorkDoubles(ng, nt, M);
+    sVec = sWork + 2 * P * sng;
+    sScalar = a.scalarOff >= 0 ? reinterpret_cast<double*>(smem + a.scalarOff) : sVec + minVecDoubles(ng, nt);
+    sAngB = a.fwork + blockIdx.x * minWorkWords(nt);
+    sAngT = sAngB + nt;
+  }
   for (;;) {
     if (tid == 0) sIdx = atomicAdd(a.next, 1);
     __syncthreads();
     const int s = sIdx;
     if (s >= a.n) return;
     const DockMinStart& st = a.starts[s];
-    if (w0) {
-      for (int i = lane; i < ng; i += 32)
-        z[i] = i < 3 ? st.t[i] / p.sT : i < 6 ? 0.0 : a.anglesIn[static_cast<std::size_t>(s) * nt + (i - 6)] * kRad / p.sA;
-      if (lane == 0) {
-        for (int i = 0; i < 4; ++i) q0[i] = st.q[i];
-        for (int i = 0; i < 3; ++i) pose.center[i] = st.center[i];
-        pose.field = st.field;
-        status = steps = evals = calm = cnt = head = 0;
-      }
-      __syncwarp();
-      unpack(z);
+    {
+    OD_MINW
+    for (int i = tid; i < ng; i += NT)
+      z[i] = i < 3 ? st.t[i] / p.sT : i < 6 ? 0.0 : a.anglesIn[static_cast<std::size_t>(s) * nt + (i - 6)] * kRad / p.sA;
+    for (int i = tid; i < ng; i += NT) d[i] = 0;
+    for (int k = tid; k < P; k += NT) order[k] = k;
+    if (tid == 0) {
+      for (int i = 0; i < 4; ++i) q0[i] = st.q[i];
+      for (int i = 0; i < 3; ++i) pose.center[i] = st.center[i];
+      pose.field = st.field;
+      status = steps = evals = calm = cnt = pending = 0;
     }
-    if (!evaluate(gv, e)) {
-      if (tid == 0) status = 2;
-    } else if (w0) {
-      __syncwarp();
-      keepBest(e);
     }
     __syncthreads();
-    while (status == 0 && steps < p.maxSteps) {
-      // Direction: L-BFGS two-loop recursion, initial Hessian (s.y / y.y) I.
+    // One evaluation per pass (a single copy of the energy code): the start point, then the trial
+    // points of the line searches; a new direction after the start point and each accepted step.
+    bool first = true;
+    double al = 1;
+    int bt = 0;
+    for (;;) {
+      trial(first ? 0.0 : al * dScale);
+      const bool inside = evaluate(first ? 0 : 1, first ? e : eT);
+      if (first) {
+        if (!inside) {
+          if (tid == 0) status = 2;
+        } else {
+          keepBest();
+          if (tid == 0) {
+            bestPose = pose;
+            bestE = e;
+          }
+          dots(false);
+        }
+        __syncthreads();
+        first = false;
+      } else {
+        // Armijo backtracking.
+        if (tid == 0) {
+          if (!inside) status = 2;
+          accepted = inside && eT <= e + kArmijo * al * slope;
+        }
+        __syncthreads();
+        if (status != 0) break;
+        if (!accepted) {
+          if (++bt < kMaxBacktrack) {
+            al *= 0.5;
+            continue;
+          }
+          break;  // no decrease: converged
+        }
+        // Accept (Run::accept, onAccept): the pair order[cnt], re-base the rotation at the accepted pose.
+        {
+          OD_MINW
+          const bool better = eT < bestE;
+          const int q = order[cnt];
+          double* sq = S + q * sng;
+          double* yq = Y + q * sng;
+          for (int i = tid; i < ng; i += NT) {
+            const double v = z[i] + fTrial * d[i];  // the accepted trial point
+            sq[i] = v - z[i];
+            yq[i] = gt[i] - gv[i];
+            z[i] = i >= 3 && i < 6 ? 0.0 : v;
+            gv[i] = gt[i];
+          }
+          if (better) keepBest();
+          __syncthreads();
+          if (tid == 0) {
+            if (better) {
+              bestPose = pose;
+              bestE = eT;
+            }
+            ++steps;
+            calm = fabs(eT - e) < p.deltaE ? calm + 1 : 0;
+            if (calm >= p.convSteps) status = 1;
+            e = eT;
+            for (int i = 0; i < 4; ++i) q0[i] = pose.q[i];
+            pending = 1;
+          }
+          dots(true);
+        }
+        __syncthreads();
+      }
+      if (status != 0 || steps >= p.maxSteps) break;
       if (w0) {
-        for (int i = lane; i < ng; i += 32) d[i] = gv[i];
+        OD_MINW
+        // The new pair is stored when s.y > 1e-12 (the oldest one is dropped at memory pairs).
+        if (pending) {
+          const int c = cnt, q = order[c];
+          const double sy = G[triIndex(q, P + q)];
+          __syncwarp();
+          if (sy > 1e-12 && lane == 0) {
+            rho[q] = 1 / sy;
+            if (c == M) {
+              const int old = order[0];
+              for (int k = 0; k + 1 < M; ++k) order[k] = order[k + 1];
+              order[M - 1] = q;
+              order[M] = old;
+            } else {
+              cnt = c + 1;
+            }
+          }
+          __syncwarp();
+        }
+        // Direction: L-BFGS two-loop recursion on the coefficients cr of the basis, initial
+        // Hessian (s.y / y.y) I.
+        double cr[kC];
+#pragma unroll
+        for (int r = 0; r < kC; ++r) cr[r] = lane + 32 * r == gI ? 1.0 : 0.0;
         const int c = cnt;
         for (int k = c; k-- > 0;) {
-          const int j = (head + k) % M;
-          const double al = rho[j] * warpDot(S + static_cast<std::size_t>(j) * ng, d, ng, lane);
-          if (lane == 0) alpha[j] = al;
-          for (int i = lane; i < ng; i += 32) d[i] -= al * Y[static_cast<std::size_t>(j) * ng + i];
+          const int j = order[k];
+          const double al = rho[j] * rowDot(cr, j);
+          if (lane == 0) alpha[k] = al;
+          addCoef(cr, P + j, -al);
         }
         if (c > 0) {
-          const int j = (head + c - 1) % M;
-          const double* sj = S + static_cast<std::size_t>(j) * ng;
-          const double* yj = Y + static_cast<std::size_t>(j) * ng;
-          const double gamma = warpDot(sj, yj, ng, lane) / warpDot(yj, yj, ng, lane);
-          for (int i = lane; i < ng; i += 32) d[i] *= gamma;
+          const int j = order[c - 1];
+          const double gamma = G[triIndex(j, P + j)] / G[triIndex(P + j, P + j)];
+#pragma unroll
+          for (int r = 0; r < kC; ++r) cr[r] *= gamma;
         }
         __syncwarp();
         for (int k = 0; k < c; ++k) {
-          const int j = (head + k) % M;
-          const double beta = rho[j] * warpDot(Y + static_cast<std::size_t>(j) * ng, d, ng, lane);
-          for (int i = lane; i < ng; i += 32) d[i] += (alpha[j] - beta) * S[static_cast<std::size_t>(j) * ng + i];
+          const int j = order[k];
+          const double beta = rho[j] * rowDot(cr, P + j);
+          addCoef(cr, j, alpha[k] - beta);
         }
-        for (int i = lane; i < ng; i += 32) d[i] = -d[i];
-        double sl = warpDot(gv, d, ng, lane);
+        // d = -sum cr b; slope g.d from G.
+        double sl = -rowDot(cr, gI);
         if (!(sl < 0)) {  // not a descent direction: restart from steepest descent
-          for (int i = lane; i < ng; i += 32) d[i] = -gv[i];
-          sl = warpDot(gv, d, ng, lane);
-          if (lane == 0) cnt = head = 0;
+#pragma unroll
+          for (int r = 0; r < kC; ++r) cr[r] = lane + 32 * r == gI ? 1.0 : 0.0;
+          sl = -G[triIndex(gI, gI)];
+          if (lane == 0) cnt = 0;
           if (!(sl < 0) && lane == 0) status = 1;  // zero gradient
         }
-        // Step limit (MobmDocker::minimize stepLimit).
-        double lim = 1;
-        for (int i = 6 + lane; i < ng; i += 32) {
-          const double v = p.sA * fabs(d[i]);
-          if (v > p.maxAngle) lim = fmin(lim, p.maxAngle / v);
+#pragma unroll
+        for (int r = 0; r < kC; ++r)
+          if (lane + 32 * r < K) coef[lane + 32 * r] = cr[r];
+        __syncwarp();
+        const int cu = cnt;
+        // Step limit (MobmDocker::minimize stepLimit) while forming d.
+        double lim = 1, tq = 0, rq = 0;
+        for (int base = 0; base < ng; base += 32 * kD) {
+          double acc[kD] = {};
+          for (int b = -1; b < 2 * cu; ++b) {
+            const int l = b < 0 ? gI : b % 2 ? P + order[b / 2] : order[b / 2];
+            const double cl = coef[l];
+            const double* bl = basis(l);
+#pragma unroll
+            for (int r = 0; r < kD; ++r) {
+              const int i = base + lane + 32 * r;
+              if (i < ng) acc[r] += cl * bl[i];
+            }
+          }
+#pragma unroll
+          for (int r = 0; r < kD; ++r) {
+            const int i = base + lane + 32 * r;
+            if (i >= ng) continue;
+            const double v = -acc[r];
+            d[i] = v;
+            if (i < 3) tq += v * v;
+            else if (i < 6) rq += v * v;
+            else {
+              const double av = p.sA * fabs(v);
+              if (av > p.maxAngle) lim = fmin(lim, p.maxAngle / av);
+            }
+          }
         }
         for (int o = 16; o > 0; o /= 2) lim = fmin(lim, __shfl_xor_sync(0xffffffffu, lim, o));
-        __syncwarp();
-        const double tn = p.sT * sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        tq = warpAllSum(tq);
+        rq = warpAllSum(rq);
+        const double tn = p.sT * sqrt(tq);
         if (tn > p.maxTrans) lim = fmin(lim, p.maxTrans / tn);
-        const double rn = p.sR * sqrt(d[3] * d[3] + d[4] * d[4] + d[5] * d[5]);
+        const double rn = p.sR * sqrt(rq);
         if (rn > p.maxAngle) lim = fmin(lim, p.maxAngle / rn);
-        __syncwarp();
-        for (int i = lane; i < ng; i += 32) d[i] *= lim;
-        if (lane == 0) slope = sl * lim;
-      }
-      __syncthreads();
-      if (status != 0) break;
-      // Armijo backtracking.
-      double al = 1;
-      for (int b = 0; b < kMaxBacktrack; ++b, al *= 0.5) {
-        if (w0) {
-          for (int i = lane; i < ng; i += 32) zt[i] = z[i] + al * d[i];
-          __syncwarp();
-          unpack(zt);
-          if (lane == 0) accepted = 0;
-        }
-        const bool inside = evaluate(gt, eT);
-        if (tid == 0) {
-          if (!inside) status = 2;
-          else if (eT <= e + kArmijo * al * slope) accepted = 1;
-        }
-        __syncthreads();
-        if (status != 0 || accepted) break;
-      }
-      if (status != 0) break;
-      if (!accepted) break;  // no decrease: converged
-      if (w0) {
-        double sy = 0;
-        for (int i = lane; i < ng; i += 32) sy += (zt[i] - z[i]) * (gt[i] - gv[i]);
-        sy = warpAllSum(sy);
-        const int c = cnt, h = head;
-        if (sy > 1e-12) {
-          const int j = c == M ? h : (h + c) % M;
-          for (int i = lane; i < ng; i += 32) {
-            S[static_cast<std::size_t>(j) * ng + i] = zt[i] - z[i];
-            Y[static_cast<std::size_t>(j) * ng + i] = gt[i] - gv[i];
-          }
-          if (lane == 0) {
-            rho[j] = 1 / sy;
-            if (c == M) head = (h + 1) % M;
-            else cnt = c + 1;
-          }
-        }
-        // Accept (Run::accept, onAccept): re-base the rotation at the accepted pose.
-        const double eOld = e, eNew = eT;
-        const bool better = eNew < bestE;
-        for (int i = lane; i < ng; i += 32) {
-          z[i] = i >= 3 && i < 6 ? 0.0 : zt[i];
-          gv[i] = gt[i];
-        }
-        __syncwarp();
-        if (better) keepBest(eNew);
         if (lane == 0) {
-          ++steps;
-          e = eNew;
-          for (int i = 0; i < 4; ++i) q0[i] = pose.q[i];
-          calm = fabs(eNew - eOld) < p.deltaE ? calm + 1 : 0;
-          if (calm >= p.convSteps) status = 1;
+          dScale = lim;
+          slope = sl * lim;
+          pending = 0;
         }
       }
       __syncthreads();
+      if (status != 0) break;
+      al = 1;
+      bt = 0;
     }
     if (tid == 0) {
       DockMinResult r{};
@@ -803,10 +955,13 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
       }
       a.out[s] = r;
     }
-    if (status != 2)
+    if (status != 2) {
+      OD_MINW
       for (int k = tid; k < nt; k += NT) a.anglesOut[static_cast<std::size_t>(s) * nt + k] = angB[k];
+    }
     __syncthreads();
   }
+#undef OD_MINW
 }
 
 }  // namespace
@@ -1597,11 +1752,29 @@ struct GpuEnergy::Impl {
         }
       }
     }
+    // The scalars of the minimizer in shared memory when the resident blocks and the shared memory
+    // level of the multiprocessor (8 KiB × 2^k) stay the same: more shared memory leaves less L1
+    // cache for the grids (spec 15.1.27).
+    const bool coords = shm != 0;
+    const auto level = [](std::size_t b) {
+      std::size_t l = 8192;
+      while (l < b) l *= 2;
+      return l;
+    };
+    const std::size_t scalarOff = (shm + 15) & ~std::size_t(15),
+                      withS = scalarOff + minScalarDoubles(args.p.memory) * sizeof(double);
+    args.scalarOff = -1;
+    if (withS <= static_cast<std::size_t>(sharedLimit()) - 4096 &&
+        level(static_cast<std::size_t>(per) * withS) <= level(static_cast<std::size_t>(per) * shm) &&
+        perSm(tor ? kernelT : kernelS, withS) >= per) {
+      args.scalarOff = static_cast<int>(scalarOff);
+      shm = withS;
+    }
     const int blocks = std::min(n, sms * per);
-    if (!shm) L.xs.reserve(static_cast<std::size_t>(blocks) * nc * sizeof(float));
+    if (!coords) L.xs.reserve(static_cast<std::size_t>(blocks) * nc * sizeof(float));
     L.gs.reserve(static_cast<std::size_t>(blocks) * nc);
     minWork.reserve(static_cast<std::size_t>(blocks) * minWorkDoubles(6 + nt, nt, args.p.memory));
-    minFwork.reserve(std::max<std::size_t>(1, static_cast<std::size_t>(blocks) * 2 * nt));
+    minFwork.reserve(std::max<std::size_t>(1, static_cast<std::size_t>(blocks) * minWorkWords(nt)));
     minNext.reserve(1);
     args.work = minWork.p;
     args.fwork = minFwork.p;
@@ -1611,7 +1784,7 @@ struct GpuEnergy::Impl {
     PairData<float> pdl = pairData<float>();
     pdl.tiled = n > sms ? 1 : 0;
     (tor ? kernelT : kernelS)<<<blocks, NT, shm, L.stream>>>(view, pdl, td, reinterpret_cast<float*>(L.xs.p), L.gs.p, dv,
-                                                             args, shm ? 1 : 0);
+                                                             args, coords ? 1 : 0);
     check(cudaGetLastError(), "minimizeDockKernel launch");
   }
 
@@ -1619,7 +1792,7 @@ struct GpuEnergy::Impl {
                     const double* hAngles, int n, DockMinResult* hOut, float* hAnglesOut) {
     if (n <= 0) return;
     if (f.current < 0) throw Error("minimizeDock: no field");
-    if (p.memory < 1) throw Error("minimizeDock: L-BFGS memory < 1");
+    if (p.memory < 1 || p.memory > kDeviceLbfgsMaxMemory) throw Error("minimizeDock: L-BFGS memory outside 1 to " + std::to_string(kDeviceLbfgsMaxMemory));
     check(cudaSetDevice(device), "cudaSetDevice");
     Lane& L = lanes[0];
     if (L.pending) throw Error("minimizeDock: lane 0 busy");
@@ -1645,7 +1818,7 @@ struct GpuEnergy::Impl {
     dv.fields = other ? f.views.p : nullptr;
     DockMinArgs args{p, reinterpret_cast<const DockMinStart*>(L.in.p), reinterpret_cast<const double*>(L.in.p + iAngles),
                      reinterpret_cast<DockMinResult*>(L.out.p), reinterpret_cast<float*>(L.out.p + oAngles),
-                     nullptr, nullptr, nullptr, n};
+                     nullptr, nullptr, nullptr, n, -1};
     const auto run = [&]<int D>() {
       switch (blockThreads(view, dv.probeCount)) {
         case 32: minimizeNT<D, 32>(L, dv, args, n); break;
