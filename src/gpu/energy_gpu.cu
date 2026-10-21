@@ -73,14 +73,15 @@ struct GpuPair {
 inline int pairFlags(const EnergyModel& m, const FlatPair& pr) {
   return pr.type << 2 | (m.pairParams[pr.type].n == 10 ? 2 : 0) | (pr.heavy ? 1 : 0);
 }
+// Aligned to their size: one vector load each.
 template <class T>
-struct GpuAtom {
+struct alignas(4 * sizeof(T)) GpuAtom {
   T cq, q, sv, vol;  // elecCoeff·q, q, desolvCoeff·S, V
 };
+// 12-6, or 12-10 when the pair flags have the hbond bit (pairFlags; uploadAtoms).
 template <class T>
-struct GpuPairParams {
-  T AC, BD, reqm;
-  int m, n;
+struct alignas(4 * sizeof(T)) GpuPairParams {
+  T AC, BD, reqm, unused;
 };
 // Pairs in tiles of 32 × 32 atoms (spec 15.1.24). Tile t: atoms tileI[32t + l] and tileJ[32t + l]
 // (−1: none); at step s, lane l takes atom tileI[32t + l] with tileJ[32t + (l + s) % 32], flags
@@ -139,10 +140,11 @@ __device__ inline bool pairTermGpu(const EnergyModelView& m, const GpuPair& pr, 
       ds = 1;
     }
     const T inv = pairRcp(s), inv2 = inv * inv, inv6 = inv2 * inv2 * inv2;
-    const T rm = inv6 * inv6, rn = q.n == 6 ? inv6 : inv6 * inv2 * inv2;
+    const bool hb = pr.tf & 2;
+    const T rm = inv6 * inv6, rn = hb ? inv6 * inv2 * inv2 : inv6;
     const T ee = q.AC * rm - q.BD * rn;
-    const T de = ds * (static_cast<T>(q.n) * q.BD * rn - T(12) * q.AC * rm) * inv;
-    e[pr.tf & 2 ? 1 : 0] += ee;
+    const T de = ds * ((hb ? T(10) : T(6)) * q.BD * rn - T(12) * q.AC * rm) * inv;
+    e[hb ? 1 : 0] += ee;
     dedr += de;
   }
   // Electrostatics and desolvation (ad4Elec, ad4Desolv): evaluated at rMin below rMin.
@@ -1832,7 +1834,7 @@ struct GpuEnergy::Impl {
     std::vector<GpuPairParams<T>> pp;
     for (const FlatPairParams& q : m.pairParams) {
       if (q.m != 12 || (q.n != 6 && q.n != 10)) throw Error("GPU energy: only 12-6 and 12-10 pair potentials");
-      pp.push_back({static_cast<T>(q.AC), static_cast<T>(q.BD), static_cast<T>(q.reqm), q.m, q.n});
+      pp.push_back({static_cast<T>(q.AC), static_cast<T>(q.BD), static_cast<T>(q.reqm), T(0)});
     }
     dpp.upload(pp);
   }
