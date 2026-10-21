@@ -123,6 +123,32 @@ Param minMethod(std::string key, std::string def, std::string stage, Acc acc) {
 }
 
 template <typename Acc>
+Param lineSearchInit(std::string key, std::string stage, Acc acc) {
+  return {std::move(key), Type::Str, "unit|prev", "unit",
+          stage + " minimization (lbfgs): first trial factor of a line search: 1, or prev: min(1, 2 x the factor of "
+                  "the previous accepted step) (spec 12)",
+          [acc](Options& o, const Tokens& t) {
+            const std::string& s = one(t);
+            parseLineSearchInit(s);
+            acc(o) = s;
+          },
+          [acc](const Options& o) -> std::optional<Tokens> { return Tokens{acc(o)}; }};
+}
+
+template <typename Acc>
+Param lineSearchReduce(std::string key, std::string stage, Acc acc) {
+  return {std::move(key), Type::Str, "halve|interp", "halve",
+          stage + " minimization (cg, lbfgs): a rejected trial factor is halved, or interp: quadratic "
+                  "interpolation within [0.1, 0.5] x the factor (spec 12)",
+          [acc](Options& o, const Tokens& t) {
+            const std::string& s = one(t);
+            parseLineSearchReduce(s);
+            acc(o) = s;
+          },
+          [acc](const Options& o) -> std::optional<Tokens> { return Tokens{acc(o)}; }};
+}
+
+template <typename Acc>
 Param integer(std::string key, std::string hint, std::string def, std::string help, Acc acc) {
   return {std::move(key), Type::Int, std::move(hint), std::move(def), std::move(help),
           [acc](Options& o, const Tokens& t) {
@@ -374,6 +400,11 @@ const std::vector<Param>& params() {
                      OD_ACC(confMinDeltaE)));
     t.push_back(real("conf9a.maxDihedralStep", "<deg>", "10", "9a minimization: largest change of one torsion per step",
                      OD_ACC(confMaxDihedralStep)));
+    t.push_back(lineSearchInit("conf9a.lineSearchInit", "9a", OD_ACC(confLineSearchInit)));
+    t.push_back(lineSearchReduce("conf9a.lineSearchReduce", "9a", OD_ACC(confLineSearchReduce)));
+    t.push_back(integer("conf9a.maxBacktrack", "<n>", "20",
+                        "9a minimization: trial points per cg/lbfgs step (sd: rejected steps in a row) before stopping",
+                        OD_ACC(confMaxBacktrack)));
     t.push_back(real("conf9a.preCloseFactor", "<f>", "1",
                      "9a: samples whose closure deviation exceeds f x topology.maxBreakDist before the minimization are "
                      "discarded without minimizing them; 0: off",
@@ -441,6 +472,11 @@ const std::vector<Param>& params() {
     t.push_back(real("dock9b.minDeltaE", "<E>", "1e-3", "9b minimization: energy change regarded as converged (kcal/mol)",
                      OD_ACC(dockMinDeltaE)));
     t.push_back(integer("dock9b.lbfgsMemory", "<n>", "7", "L-BFGS: number of stored steps", OD_ACC(lbfgsMemory)));
+    t.push_back(lineSearchInit("dock9b.lineSearchInit", "9b", OD_ACC(dockLineSearchInit)));
+    t.push_back(lineSearchReduce("dock9b.lineSearchReduce", "9b", OD_ACC(dockLineSearchReduce)));
+    t.push_back(integer("dock9b.maxBacktrack", "<n>", "20",
+                        "9b minimization: trial points per cg/lbfgs step (sd: rejected steps in a row) before stopping",
+                        OD_ACC(dockMaxBacktrack)));
     t.push_back(real("dock9b.scaleTrans", "<s>", "1", "9b minimization: scale of the translation variables (Å)", OD_ACC(scaleTrans)));
     t.push_back(real("dock9b.scaleRot", "<s>", "1", "9b minimization: scale of the rotation variables (rad)", OD_ACC(scaleRot)));
     t.push_back(real("dock9b.scaleTors", "<s>", "1", "9b minimization: scale of the torsion variables (rad)", OD_ACC(scaleTors)));
@@ -835,6 +871,7 @@ void validateOptions(const Options& o) {
   check(o.dockMinConvSteps >= 1, "dock9b.minConvSteps", ">= 1");
   check(o.dockMinDeltaE >= 0, "dock9b.minDeltaE", ">= 0");
   check(o.lbfgsMemory >= 1, "dock9b.lbfgsMemory", ">= 1");
+  check(o.dockMaxBacktrack >= 1, "dock9b.maxBacktrack", ">= 1");
   check(o.scaleTrans > 0, "dock9b.scaleTrans", "> 0");
   check(o.scaleRot > 0, "dock9b.scaleRot", "> 0");
   check(o.scaleTors > 0, "dock9b.scaleTors", "> 0");
@@ -878,6 +915,7 @@ void validateOptions(const Options& o) {
     check(c->rcdClashWeight > 0, set + ".rcdClashWeight", "> 0");
   }
   check(o.confMinMaxStep >= 0, "conf9a.minMaxStep", ">= 0");
+  check(o.confMaxBacktrack >= 1, "conf9a.maxBacktrack", ">= 1");
   check(o.confMinDeltaE >= 0, "conf9a.minDeltaE", ">= 0");
   check(o.confMaxDihedralStep > 0, "conf9a.maxDihedralStep", "> 0");
   check(o.confPreCloseFactor >= 0, "conf9a.preCloseFactor", ">= 0");

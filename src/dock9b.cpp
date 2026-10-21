@@ -1006,7 +1006,10 @@ DockMinParams MobmDocker::deviceMinParams() const {
           p_.minimizer.maxSteps,
           p_.minimizer.convSteps,
           lbfgs ? p_.minimizer.memory : 1,
-          static_cast<int>(p_.minimizer.method)};
+          static_cast<int>(p_.minimizer.method),
+          p_.minimizer.maxBacktrack,
+          static_cast<int>(p_.minimizer.lineSearchInit),
+          static_cast<int>(p_.minimizer.lineSearchReduce)};
 }
 
 bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const {

@@ -116,6 +116,9 @@ struct Options {
   int dockMinConvSteps = 10;
   double dockMinDeltaE = 1e-3;
   int lbfgsMemory = 7;
+  std::string dockLineSearchInit = "unit";      // unit | prev
+  std::string dockLineSearchReduce = "halve";   // halve | interp
+  int dockMaxBacktrack = 20;
   double scaleTrans = 1, scaleRot = 1, scaleTors = 1;
   double maxTransStep = 0.5;
   double maxAngleStep = 10.0;
@@ -136,6 +139,9 @@ struct Options {
   int confMinMaxStep = 100;
   double confMinDeltaE = 10.0;
   double confMaxDihedralStep = 10.0;
+  std::string confLineSearchInit = "unit";
+  std::string confLineSearchReduce = "halve";
+  int confMaxBacktrack = 20;
   double confPreCloseFactor = 1.0;
   std::optional<std::uint64_t> seed;  // random when not given
 

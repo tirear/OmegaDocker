@@ -2893,6 +2893,83 @@ TEST_CASE("lbfgs: quadratic and Rosenbrock") {
   CHECK(od::minimizeVec(stop, x, p).aborted);
 }
 
+TEST_CASE("minimize: line search options (lineSearchInit, lineSearchReduce, maxBacktrack)") {
+  CHECK(od::parseLineSearchInit("unit") == od::LineSearchInit::Unit);
+  CHECK(od::parseLineSearchInit("prev") == od::LineSearchInit::Prev);
+  CHECK_THROWS_AS(od::parseLineSearchInit("one"), od::Error);
+  CHECK(od::parseLineSearchReduce("halve") == od::LineSearchReduce::Halve);
+  CHECK(od::parseLineSearchReduce("interp") == od::LineSearchReduce::Interp);
+  CHECK_THROWS_AS(od::parseLineSearchReduce("cubic"), od::Error);
+  int evals = 0;
+  std::vector<double> trials;  // first coordinate of each evaluated point
+  const od::VecObjective rosen = [&](std::span<const double> x, double& e, std::vector<double>& g) {
+    ++evals;
+    trials.push_back(x[0]);
+    e = 100 * std::pow(x[1] - x[0] * x[0], 2) + std::pow(1 - x[0], 2);
+    g = {-400 * x[0] * (x[1] - x[0] * x[0]) - 2 * (1 - x[0]), 200 * (x[1] - x[0] * x[0])};
+    return true;
+  };
+  for (od::MinMethod m : {od::MinMethod::Cg, od::MinMethod::Lbfgs})
+    for (auto init : {od::LineSearchInit::Unit, od::LineSearchInit::Prev})
+      for (auto red : {od::LineSearchReduce::Halve, od::LineSearchReduce::Interp}) {
+        INFO(std::string(od::minMethodName(m)), " ", static_cast<int>(init), " ", static_cast<int>(red));
+        od::VecMinParams p;
+        p.method = m;
+        p.maxSteps = 20000;
+        p.deltaE = 1e-14;
+        p.convSteps = 3;
+        p.lineSearchInit = init;
+        p.lineSearchReduce = red;
+        std::vector<double> x{-1.2, 1};
+        const auto r = od::minimizeVec(rosen, x, p);
+        CHECK_FALSE(r.aborted);
+        if (m == od::MinMethod::Lbfgs) {
+          CHECK(x[0] == doctest::Approx(1).epsilon(1e-3));
+          CHECK(x[1] == doctest::Approx(1).epsilon(1e-3));
+        } else {  // cg stops on the valley floor before the minimum
+          CHECK(r.energy < 0.05);
+        }
+      }
+  // Along a quadratic valley: halving gives trial factors 1, 1/2, 1/4, ...; interp jumps to the
+  // minimum of the parabola (within [0.1, 0.5] of the factor).
+  const od::VecObjective steep = [&](std::span<const double> x, double& e, std::vector<double>& g) {
+    ++evals;
+    trials.push_back(x[0]);
+    e = 50 * x[0] * x[0];
+    g = {100 * x[0]};
+    return true;
+  };
+  for (auto red : {od::LineSearchReduce::Halve, od::LineSearchReduce::Interp}) {
+    od::VecMinParams p;
+    p.method = od::MinMethod::Lbfgs;
+    p.maxSteps = 1;
+    p.lineSearchReduce = red;
+    std::vector<double> x{1};
+    trials.clear();
+    od::minimizeVec(steep, x, p);
+    // Start, then trial steps -100, then -50 (halve) or -10 (interp: the exact minimum is at -1).
+    REQUIRE(trials.size() >= 3);
+    CHECK(trials[1] == doctest::Approx(-99));
+    CHECK(trials[2] == doctest::Approx(red == od::LineSearchReduce::Halve ? -49.0 : -9.0));
+  }
+  // maxBacktrack: the trial points of a step that is never accepted.
+  const od::VecObjective rising = [&](std::span<const double> x, double& e, std::vector<double>& g) {
+    ++evals;
+    e = x[0] == 0 ? 0 : 1;
+    g = {1};
+    return true;
+  };
+  for (int mb : {1, 5, 20}) {
+    od::VecMinParams p;
+    p.method = od::MinMethod::Lbfgs;
+    p.maxBacktrack = mb;
+    std::vector<double> x{0};
+    const auto r = od::minimizeVec(rising, x, p);
+    CHECK(r.evaluations == 1 + mb);
+    CHECK(r.steps == 0);
+  }
+}
+
 TEST_CASE("minimize: all methods (quadratic, step limit, best point, abort)") {
   const double a[3] = {1, 10, 100};
   int evals = 0;
@@ -5209,10 +5286,21 @@ TEST_CASE("gpu: 9b device minimizer with each method matches the CPU") {
   od::GpuPoseEvaluator ev(fs.x.mobSys->model(), gfield, 0, 4096);
   const int nt = fs.x.mobSys->torsionCount();
   const auto& field = fs.fields[0].second;
-  for (const char* method : {"sd", "cg", "fire", "lbfgs", "adadelta"}) {
+  struct Case {
+    const char *method, *init, *reduce;
+    int maxBacktrack;
+  };
+  for (const Case cs : {Case{"sd", "unit", "halve", 20}, Case{"cg", "unit", "halve", 20}, Case{"fire", "unit", "halve", 20},
+                        Case{"lbfgs", "unit", "halve", 20}, Case{"adadelta", "unit", "halve", 20},
+                        Case{"lbfgs", "prev", "interp", 10}, Case{"lbfgs", "prev", "halve", 15},
+                        Case{"cg", "unit", "interp", 10}, Case{"sd", "unit", "halve", 5}}) {
+    const std::string method = std::format("{} {} {} {}", cs.method, cs.init, cs.reduce, cs.maxBacktrack);
     INFO(method);
     od::Dock9bParams p = fs.p;
-    p.minimizer.method = od::parseMinMethod(method);
+    p.minimizer.method = od::parseMinMethod(cs.method);
+    p.minimizer.lineSearchInit = od::parseLineSearchInit(cs.init);
+    p.minimizer.lineSearchReduce = od::parseLineSearchReduce(cs.reduce);
+    p.minimizer.maxBacktrack = cs.maxBacktrack;
     p.minimizer.maxSteps = 200;
     const od::MobmDocker dk(*fs.x.mobSys, field, p);
     ev.bind(dk);

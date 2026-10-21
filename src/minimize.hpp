@@ -15,6 +15,13 @@ enum class MinMethod { Sd, Cg, Fire, Lbfgs, Adadelta };
 MinMethod parseMinMethod(std::string_view s);  // sd | cg | fire | lbfgs | adadelta
 const char* minMethodName(MinMethod m);
 
+// Line search of cg and lbfgs (spec 12): start of the backtracking (lbfgs) and how a rejected
+// trial step is shortened.
+enum class LineSearchInit { Unit, Prev };     // 1 | min(1, 2 × the previous accepted factor)
+enum class LineSearchReduce { Halve, Interp };  // × 0.5 | quadratic interpolation within [0.1, 0.5]
+LineSearchInit parseLineSearchInit(std::string_view s);        // unit | prev
+LineSearchReduce parseLineSearchReduce(std::string_view s);    // halve | interp
+
 // Objective of the general minimizer: energy and gradient at x; returns false to
 // abort the minimization (e.g. a pose leaving the grid, spec 8.6).
 using VecObjective = std::function<bool(std::span<const double> x, double& energy, std::vector<double>& grad)>;
@@ -25,6 +32,9 @@ struct VecMinParams {
   int convSteps = 10;     // stop after this many consecutive steps with |dE| < deltaE
   double deltaE = 1e-3;
   int memory = 7;         // lbfgsMemory
+  LineSearchInit lineSearchInit = LineSearchInit::Unit;
+  LineSearchReduce lineSearchReduce = LineSearchReduce::Halve;
+  int maxBacktrack = 20;  // trial points per cg/lbfgs step; sd: rejected steps in a row
   // Largest factor (<= 1) applied to a step, enforcing per-step limits.
   std::function<double(std::span<const double> step)> stepLimit;
   // Called after each accepted step; best: the point is the lowest so far. May re-express x
@@ -52,6 +62,9 @@ struct MinParams {
   double deltaE = 10.0;       // confMinDeltaE: stop when one step changes E by less
   double maxStepDeg = 10.0;   // confMaxDihedralStep: largest change of one angle per step
   MinMethod method = MinMethod::Lbfgs;
+  LineSearchInit lineSearchInit = LineSearchInit::Unit;
+  LineSearchReduce lineSearchReduce = LineSearchReduce::Halve;
+  int maxBacktrack = 20;
 };
 
 struct MinResult {

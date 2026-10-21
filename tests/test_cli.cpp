@@ -52,6 +52,30 @@ TEST_CASE("cli: required options and values") {
     CHECK_THROWS_AS(parse({"--dock9b_minMethod=bfgs"}), od::Error);
     CHECK_THROWS_AS(parse({"--conf9a_minMethod=FIRE"}), od::Error);
   }
+  CHECK(o.dockLineSearchInit == "unit");
+  CHECK(o.dockLineSearchReduce == "halve");
+  CHECK(o.dockMaxBacktrack == 20);
+  CHECK(o.confLineSearchInit == "unit");
+  CHECK(o.confLineSearchReduce == "halve");
+  CHECK(o.confMaxBacktrack == 20);
+  {
+    const auto pl = parse({"--dock9b_lineSearchInit=prev", "--dock9b_lineSearchReduce=interp", "--dock9b_maxBacktrack=10",
+                           "--conf9a_lineSearchInit=prev", "--conf9a_lineSearchReduce=interp", "--conf9a_maxBacktrack=5"});
+    CHECK(pl.dockLineSearchInit == "prev");
+    CHECK(pl.dockLineSearchReduce == "interp");
+    CHECK(pl.dockMaxBacktrack == 10);
+    CHECK(pl.confLineSearchInit == "prev");
+    CHECK(pl.confLineSearchReduce == "interp");
+    CHECK(pl.confMaxBacktrack == 5);
+    CHECK_THROWS_AS(parse({"--dock9b_lineSearchInit=one"}), od::Error);
+    CHECK_THROWS_AS(parse({"--conf9a_lineSearchReduce=cubic"}), od::Error);
+    auto bad = o;
+    bad.dockMaxBacktrack = 0;
+    CHECK_THROWS_AS(od::validateOptions(bad), od::Error);
+    bad = o;
+    bad.confMaxBacktrack = 0;
+    CHECK_THROWS_AS(od::validateOptions(bad), od::Error);
+  }
   CHECK(o.maxTransStep == doctest::Approx(0.5));
   CHECK(o.maxAngleStep == doctest::Approx(10));
   CHECK(o.maxRound == 10);

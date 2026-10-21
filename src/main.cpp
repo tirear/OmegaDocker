@@ -236,7 +236,13 @@ class ConfSet {
     p_.Emax = opt.Emax;
     p_.maxBreakDist = opt.maxBreakDist;
     p_.preCloseFactor = opt.confPreCloseFactor;
-    p_.min = {opt.confMinMaxStep, opt.confMinDeltaE, opt.confMaxDihedralStep, od::parseMinMethod(opt.confMinMethod)};
+    p_.min = {opt.confMinMaxStep,
+              opt.confMinDeltaE,
+              opt.confMaxDihedralStep,
+              od::parseMinMethod(opt.confMinMethod),
+              od::parseLineSearchInit(opt.confLineSearchInit),
+              od::parseLineSearchReduce(opt.confLineSearchReduce),
+              opt.confMaxBacktrack};
     p_.seed = seed;
     p_.stream = stream;
 #ifdef OD_HAVE_CUDA
@@ -502,6 +508,9 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   dp.minimizer.convSteps = opt.dockMinConvSteps;
   dp.minimizer.deltaE = opt.dockMinDeltaE;
   dp.minimizer.memory = opt.lbfgsMemory;
+  dp.minimizer.lineSearchInit = od::parseLineSearchInit(opt.dockLineSearchInit);
+  dp.minimizer.lineSearchReduce = od::parseLineSearchReduce(opt.dockLineSearchReduce);
+  dp.minimizer.maxBacktrack = opt.dockMaxBacktrack;
   dp.scaleTrans = opt.scaleTrans;
   dp.scaleRot = opt.scaleRot;
   dp.scaleTors = opt.scaleTors;

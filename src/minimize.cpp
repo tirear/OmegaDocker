@@ -23,6 +23,18 @@ MinMethod parseMinMethod(std::string_view s) {
   fail("expected sd, cg, fire, lbfgs or adadelta but got '{}'", s);
 }
 
+LineSearchInit parseLineSearchInit(std::string_view s) {
+  if (s == "unit") return LineSearchInit::Unit;
+  if (s == "prev") return LineSearchInit::Prev;
+  fail("expected unit or prev but got '{}'", s);
+}
+
+LineSearchReduce parseLineSearchReduce(std::string_view s) {
+  if (s == "halve") return LineSearchReduce::Halve;
+  if (s == "interp") return LineSearchReduce::Interp;
+  fail("expected halve or interp but got '{}'", s);
+}
+
 const char* minMethodName(MinMethod m) {
   switch (m) {
     case MinMethod::Sd: return "sd";
@@ -37,7 +49,6 @@ const char* minMethodName(MinMethod m) {
 namespace {
 
 constexpr double kArmijo = 1e-4;
-constexpr int kMaxBacktrack = 20;
 
 double dot(const std::vector<double>& a, const std::vector<double>& b) {
   double s = 0;
@@ -108,16 +119,25 @@ class Run {
 
 enum class Search { Accepted, Failed, Aborted };
 
-// Armijo backtracking along d (already step-limited) from the current point; slope = g.d < 0.
+// Armijo backtracking along d (already step-limited) from the current point, starting at the
+// factor a0; slope = g.d < 0. A rejected factor a is halved, or (interp) replaced by the minimum
+// of the quadratic through E(0), g.d and E(a), kept within [0.1 a, 0.5 a].
 Search backtrack(Run& run, const std::vector<double>& d, double slope, std::vector<double>& xNew, double& eNew,
-                 std::vector<double>& gNew, double* used = nullptr) {
-  double a = 1;
-  for (int b = 0; b < kMaxBacktrack; ++b, a *= 0.5) {
+                 std::vector<double>& gNew, double* used = nullptr, double a0 = 1) {
+  double a = a0;
+  for (int b = 0; b < run.p().maxBacktrack; ++b) {
     for (std::size_t i = 0; i < run.n(); ++i) xNew[i] = run.x()[i] + a * d[i];
     if (!run.eval(xNew, eNew, gNew)) return Search::Aborted;
     if (eNew <= run.e() + kArmijo * a * slope) {
       if (used) *used = a;
       return Search::Accepted;
+    }
+    if (run.p().lineSearchReduce == LineSearchReduce::Interp) {
+      const double den = 2 * (eNew - run.e() - slope * a);
+      const double an = den > 0 ? -slope * a * a / den : 0.5 * a;
+      a = std::min(std::max(an, 0.1 * a), 0.5 * a);
+    } else {
+      a *= 0.5;
     }
   }
   return Search::Failed;
@@ -147,7 +167,7 @@ void runSd(Run& run) {
       if (!run.accept(xNew, eNew, gNew)) return;
     } else {
       a *= 0.5;
-      if (++fails >= kMaxBacktrack) return;
+      if (++fails >= run.p().maxBacktrack) return;
     }
   }
 }
@@ -238,7 +258,7 @@ void runLbfgs(Run& run) {
   std::vector<double> d(n), xNew(n), gNew(n), xOld, gOld;
   std::vector<std::vector<double>> S, Y;
   std::vector<double> rho;
-  double eNew;
+  double eNew, used = 1;  // used: factor of the last accepted step
   while (run.more()) {
     d = run.g();
     const std::size_t m = S.size();
@@ -268,7 +288,8 @@ void runLbfgs(Run& run) {
     const double s = run.limit(d);
     for (double& v : d) v *= s;
     slope *= s;
-    if (backtrack(run, d, slope, xNew, eNew, gNew) != Search::Accepted) return;  // no decrease: converged
+    const double a0 = run.p().lineSearchInit == LineSearchInit::Prev ? std::min(1.0, 2 * used) : 1.0;
+    if (backtrack(run, d, slope, xNew, eNew, gNew, &used, a0) != Search::Accepted) return;  // no decrease: converged
     std::vector<double> sv(n), yv(n);
     for (std::size_t i = 0; i < n; ++i) {
       sv[i] = xNew[i] - run.x()[i];
@@ -345,6 +366,9 @@ MinResult minimizeTorsions(const TorsionObjective& f, std::span<double> anglesDe
   vp.maxSteps = p.maxSteps;
   vp.convSteps = 1;
   vp.deltaE = p.deltaE;
+  vp.lineSearchInit = p.lineSearchInit;
+  vp.lineSearchReduce = p.lineSearchReduce;
+  vp.maxBacktrack = p.maxBacktrack;
   const double maxStep = p.maxStepDeg * kRad / u;
   vp.stepLimit = [maxStep](std::span<const double> d) {
     double big = 0;

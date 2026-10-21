@@ -48,6 +48,7 @@ constexpr int kDeviceLbfgsMaxMemory = 62;
 struct DockMinParams {
   double sT, sR, sA, maxTrans, maxAngle, deltaE;
   int maxSteps, convSteps, memory, method;
+  int maxBacktrack, lineSearchInit, lineSearchReduce;  // LineSearchInit, LineSearchReduce as int
 };
 // Start of one minimization: pose (double), centre (the Pose frame) and field as DockPose.
 struct DockMinStart {

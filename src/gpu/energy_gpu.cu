@@ -693,7 +693,7 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
                                                          float* xs, double* gs, DockView dv, DockMinArgs a, int shared) {
   extern __shared__ __align__(16) unsigned char smem[];
   constexpr double kRad = 3.14159265358979323846 / 180.0, kArmijo = 1e-4;
-  constexpr int kMaxBacktrack = 20, kWarps = NT / 32, kC = (2 * (kDeviceLbfgsMaxMemory + 1) + 1 + 31) / 32, kD = 4;
+  constexpr int kWarps = NT / 32, kC = (2 * (kDeviceLbfgsMaxMemory + 1) + 1 + 31) / 32, kD = 4;
   constexpr int kSd = static_cast<int>(MinMethod::Sd), kCg = static_cast<int>(MinMethod::Cg),
                 kFire = static_cast<int>(MinMethod::Fire), kLbfgs = static_cast<int>(MinMethod::Lbfgs),
                 kAda = static_cast<int>(MinMethod::Adadelta);
@@ -867,7 +867,7 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
     // One evaluation per pass (a single copy of the energy code): the start point, then the trial
     // points of the line searches; a new direction after the start point and each accepted step.
     bool first = true;
-    double al = 1;
+    double al = 1, prevAl = 1;  // prevAl: factor of the last accepted step
     int bt = 0;
     for (;;) {
       trial(first ? 0.0 : al * dScale);
@@ -894,8 +894,14 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
         __syncthreads();
         if (status != 0) break;
         if (!accepted && meth != kSd) {
-          if (++bt < kMaxBacktrack) {
-            al *= 0.5;
+          if (++bt < p.maxBacktrack) {
+            if (p.lineSearchReduce == static_cast<int>(LineSearchReduce::Interp)) {
+              const double den = 2 * (eT - e - slope * al);
+              const double an = den > 0 ? -slope * al * al / den : 0.5 * al;
+              al = fmin(fmax(an, 0.1 * al), 0.5 * al);
+            } else {
+              al *= 0.5;
+            }
             continue;
           }
           break;  // no decrease: converged
@@ -903,7 +909,7 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
         if (!accepted) {  // sd: half the step factor, the same point
           if (tid == 0) {
             sdA *= 0.5;
-            if (++sdFails >= kMaxBacktrack) status = 1;
+            if (++sdFails >= p.maxBacktrack) status = 1;
           }
           __syncthreads();
           if (status != 0) break;
@@ -912,6 +918,7 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
           // re-base the rotation at the accepted pose.
           OD_MINW
           const bool better = eT < bestE;
+          prevAl = al;
           const int q = meth == kLbfgs ? order[cnt] : 0;
           double* sq = S + q * sng;
           double* yq = Y + q * sng;
@@ -1184,7 +1191,7 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
       }
       __syncthreads();
       if (status != 0) break;
-      al = 1;
+      al = meth == kLbfgs && p.lineSearchInit == static_cast<int>(LineSearchInit::Prev) ? fmin(1.0, 2 * prevAl) : 1.0;
       bt = 0;
     }
     if (tid == 0) {

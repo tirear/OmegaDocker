@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.91 |
+| 文件版本 | 1.92 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1491,16 +1491,24 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 |---|---|---|
 | 9a | `confMinMethod` | `lbfgs` |
 | 9b | `dockMinMethod` | `lbfgs` |
+| 9a、9b | `conf9a.lineSearchInit`、`dock9b.lineSearchInit` | `unit` |
+| 9a、9b | `conf9a.lineSearchReduce`、`dock9b.lineSearchReduce` | `halve` |
+| 9a、9b | `conf9a.maxBacktrack`、`dock9b.maxBacktrack` | 20 |
 
 - 變數尺度：平移（Å）、旋轉（rad）、兩面角（rad）以 `scaleTrans`、`scaleRot`、`scaleTors` 預先縮放（預設 1、1、1）。
 - 每步最大變化：平移 `maxTransStep`（預設 0.5 Å）、旋轉與兩面角 `maxAngleStep`（預設 10°）。平移以向量長度、旋轉以旋轉向量長度、兩面角以各自的變化量判斷；超過時整個搜尋方向等比例縮小，再進行 line search。
 - L-BFGS 細節（CPU 參考版）：
   - two-loop recursion，初始 Hessian 取 `(sᵀy / yᵀy)·I`；`sᵀy ≤ 10⁻¹²` 的步不存入記憶。
   - 方向不是下降方向時清空記憶，改用最陡下降方向。
-  - Armijo 條件 `E(x + αd) ≤ E(x) + 10⁻⁴·α·∇Eᵀd`，α 從 1 開始每次減半，最多 20 次；仍不滿足時視為收斂並停止。目標函數回報不可行（8.6 移出網格）時立即中止最佳化。
+  - Armijo 條件 `E(x + αd) ≤ E(x) + 10⁻⁴·α·∇Eᵀd`，α 從 1 開始每次減半，最多 20 次；仍不滿足時視為收斂並停止。目標函數回報不可行（8.6 移出網格）時立即中止最佳化。起始值、縮短方式與次數可改（下述 line search 選項）。
+- Line search 選項（1.92；9a 用 `conf9a.*`、9b 用 `dock9b.*`；CPU 與 GPU 規則相同）：
+  - `lineSearchInit`（只用於 `lbfgs`）：`unit`：每步 α 從 1 開始；`prev`：α 從 min(1, 2 × 上一個被接受的步的 α) 開始（第 1 步為 1）。
+  - `lineSearchReduce`（`cg`、`lbfgs`）：`halve`：不滿足 Armijo 條件時 α × 0.5；`interp`：改為通過 E(0)、∇Eᵀd 與 E(α) 的拋物線的最小值 α' = −∇Eᵀd·α² / (2(E(α) − E(0) − ∇Eᵀd·α))，限制在 [0.1α, 0.5α]；分母 ≤ 0 時（或非數值）α × 0.5。
+  - `maxBacktrack`：`cg`、`lbfgs` 每步最多的試驗點數（含第 1 個），用完仍不滿足時視為收斂並停止；`sd` 為連續不成立的次數上限。
+  - 預設（`unit`、`halve`、20）與 1.91 以前相同。這些選項改變最佳化停止的時機與結果，速度與結果的比較見 15.1.31。
 - 各方法細節（CPU 參考版，1.54；9a、9b 共用同一實作）：
   - 共同：每步的變化先依上述每步最大變化等比例縮小（9a 為 `confMaxDihedralStep`）。「被接受的點」為成為目前位置的點；回傳能量最低的被接受點（含起點）。停止：被接受的步數達上限、連續 `convSteps` 步 |ΔE| < `deltaE`（9a 為 1 步、`confMinDeltaE`）、梯度為 0，或下列各方法的停止條件。目標函數回報不可行時立即中止。
-  - `sd`：方向 −∇E，步長因子 a（起始 1；縮小後的步長若較小，a 改為縮小後的值）。Armijo 條件成立則接受並 a × 1.2，否則 a × 0.5；連續 20 次不成立即停止。
+  - `sd`：方向 −∇E，步長因子 a（起始 1；縮小後的步長若較小，a 改為縮小後的值）。Armijo 條件成立則接受並 a × 1.2，否則 a × 0.5；連續 `maxBacktrack`（預設 20）次不成立即停止。
   - `cg`：Polak–Ribière（PR+，β = max(0, ∇Eₖᵀ(∇Eₖ − ∇Eₖ₋₁) / ∇Eₖ₋₁ᵀ∇Eₖ₋₁)）；不是下降方向時改用 −∇E。試探步長取 αₖ₋₁ (∇Eₖ₋₁ᵀdₖ₋₁)/(∇Eₖᵀdₖ)（第 1 步為 1），縮小後以 L-BFGS 相同的 Armijo 回溯；找不到下降即停止。
   - `fire`：7.9 的參數與規則；每步計算一次能量與梯度，每步都接受。
   - `lbfgs`：如上；9a 的記憶步數固定為 7（`dock9b.lbfgsMemory` 只用於 9b）。
@@ -1663,6 +1671,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `conf9a.minMaxStep` | `--conf9a_minMaxStep` | 100 | 7.9 |
 | `conf9a.minDeltaE` | `--conf9a_minDeltaE` | 10 kcal/mol | 7.9 |
 | `conf9a.maxDihedralStep` | `--conf9a_maxDihedralStep` | 10° | 7.9 |
+| `conf9a.lineSearchInit` | `--conf9a_lineSearchInit` | `unit` | 12（`unit`／`prev`） |
+| `conf9a.lineSearchReduce` | `--conf9a_lineSearchReduce` | `halve` | 12（`halve`／`interp`） |
+| `conf9a.maxBacktrack` | `--conf9a_maxBacktrack` | 20 | 12（≥ 1） |
 | `conf9a.preCloseFactor` | `--conf9a_preCloseFactor` | 1 | 7.9（最小化前閉合偏差 > f × `topology.maxBreakDist` 的樣本不最小化，直接捨棄；0：不檢查） |
 | `dock9b.posm` | `--dock9b_posm` | 必填 | 8.4（`posm1`、`posm2`、`posm2_fft`、`posm3`、`posm4`） |
 | `dock9b.posStep` | `--dock9b_posStep` | 1 Å | 8.4 |
@@ -1688,6 +1699,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.minConvSteps` | `--dock9b_minConvSteps` | 10 | 8.6 |
 | `dock9b.minDeltaE` | `--dock9b_minDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
 | `dock9b.lbfgsMemory` | `--dock9b_lbfgsMemory` | 7 | 12（CUDA 版使用 GPU 且 `gpu.dock9bDeviceMin = true`、`dock9b.minMethod = lbfgs` 時最多 62，更大時報錯並結束：15.1.27、15.1.28） |
+| `dock9b.lineSearchInit` | `--dock9b_lineSearchInit` | `unit` | 12（`unit`／`prev`） |
+| `dock9b.lineSearchReduce` | `--dock9b_lineSearchReduce` | `halve` | 12（`halve`／`interp`） |
+| `dock9b.maxBacktrack` | `--dock9b_maxBacktrack` | 20 | 12（≥ 1） |
 | `dock9b.scaleTrans`、`dock9b.scaleRot`、`dock9b.scaleTors` | `--dock9b_scaleTrans` 等 | 1、1、1 | 12 |
 | `dock9b.maxTransStep` | `--dock9b_maxTransStep` | 0.5 Å | 12 |
 | `dock9b.maxAngleStep` | `--dock9b_maxAngleStep` | 10° | 12 |
@@ -2427,6 +2441,77 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 約 2/3 的步驟第一個試驗點就被接受；每個接受的步驟平均約 1.9 次評估。回溯 20 次失敗（收斂）佔評估次數約 4–5%。
   - 減少評估次數的方法（較好的起始步長、較少的回溯上限、離開格點的試驗點改為縮短步長）會改變最小化的結果，需另行決定，未實作。
 
+### 15.1.31 Line search 選項與 CPU／GPU 效能（1.92）
+
+AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V；GPU 同時用於桌面顯示，時間有約 ±10% 的變動。例子 A：StaM 2KJJ（100 個構型）＋ MobM 1L2Y（4 個），posm1 1000，盒子 64 Å；RB4：2KJJ（4）＋ 1L2Y（4），盒子 48 Å，posm1 100000 或 posm3（`rotStep` 40）；`maxRound` 1，seed 3。
+
+**(1) 同樣的樣本數**（`f2` = `prev`，`qi` = `interp`，`b` = `maxBacktrack`；best1%：能量最低 1% 對接樣本的平均；越低越好）
+
+| 組合 | A 9b 時間 | A 評估／成功樣本 | A p50 | A best1% | A 9c 第 1 名 | RB4 posm1 時間 | RB4 best1% | RB4 posm3 時間 | posm3 best1% |
+|---|---|---|---|---|---|---|---|---|---|
+| 預設（`unit`、`halve`、20） | 26.94 s | 398 | −29.34 | −44.88 | −44.52 | 8.08 s | −42.63 | 115.98 s | −42.83 |
+| `prev` | 17.01 | 258 | −27.70 | −43.87 | −45.76 | 5.50 | −41.57 | 91.17 | −41.48 |
+| `prev`（4 倍，未採用） | 18.40 | 291 | −28.24 | −44.20 | −46.25 | 5.97 | −42.08 | — | — |
+| `interp` | 21.39 | 349 | −28.72 | −44.91 | −45.94 | 6.21 | −42.39 | 102.12 | −42.29 |
+| `prev` + `interp` | 14.44 | 201 | −26.95 | −43.65 | −43.99 | 4.73 | −40.97 | 77.25 | −40.62 |
+| `maxBacktrack` 15 | 20.60 | 337 | −28.84 | −44.77 | −44.52 | 6.22 | −42.58 | 101.86 | −42.53 |
+| `maxBacktrack` 10 | 16.03 | 239 | −27.53 | −44.40 | −44.34 | 4.87 | −41.59 | 79.17 | −41.52 |
+| `maxBacktrack` 5 | 9.16 | 102 | −23.15 | −43.02 | −44.10 | 2.47 | −37.56 | 40.87 | −36.50 |
+
+- 回溯用完即視為收斂，`maxBacktrack` 越小越早停止（每個成功樣本的步數：預設 194、15 為 179、10 為 144、5 為 71）；5 的能量明顯較差。15 的 9c 前 5 名與預設相同。
+- `prev` 的步較小，停止條件（連續 `minConvSteps` 步 |ΔE| < `minDeltaE`）較早成立，步數也減少；速度主要來自較早停止，每個樣本的能量較高。`interp` 每個樣本的能量最接近預設。
+- 步較小時移出網格的樣本略少（posm3 成功樣本：預設 259k，`prev` + `interp` 305k）。
+- 線搜尋統計（預設）：約 2/3 的步第 1 個試驗點就被接受；每個被接受的步平均約 1.9 次評估（15.1.30）。
+
+**(2) 同樣的時間**（較快的組合增加 `posm1SampleNum`，使 9b 時間與預設相近）：9c 第 1 名
+
+| 組合 | A（seed 3／4／5） | RB4 posm1（seed 3／4／5） |
+|---|---|---|
+| 預設 | −44.52／−43.94／−50.90 | 18.82／22.10／8.29 |
+| `interp` | −45.94／−44.42／−48.90 | 18.26／19.54／11.44 |
+| `prev` | −45.76／−43.70／−45.35 | 18.72／21.04／8.00 |
+| `prev` + `interp` | −45.87／−43.08／−48.44 | 18.38／23.39／11.41 |
+| `maxBacktrack` 15 | −44.52／−43.48／−50.90 | 18.82／21.67／8.29 |
+| `maxBacktrack` 10 | −45.45／−43.50／−52.02 | 18.82／21.67／8.29 |
+
+- seed 之間的差異（A 約 7、RB4 約 14 kcal/mol）大於組合之間的差異，看不出較好的組合；預設維持不變，需以標準資料測試（17.3）。
+
+**(3) 9a**（例子 A 的 StaM 群）：9a 的停止條件為 1 步 |ΔE| < `confMinDeltaE`（10 kcal/mol），line search 選項主要改變通過率與所需的 L1 數，時間 2.7–3.9 s（預設 2.85 s），沒有一致的加速：
+
+| 組合 | L1 | L2 | 步數／樣本 | 9a 時間 |
+|---|---|---|---|---|
+| 預設 | 39,800 | 266 | 27.0 | 2.85 s |
+| `interp` | 65,736 | 353 | 29.0 | 3.86 s |
+| `prev` | 65,736 | 288 | 22.9 | 3.41 s |
+| `prev` + `interp` | 65,736 | 234 | 24.2 | 2.83 s |
+| `maxBacktrack` 10 | 39,800 | 265 | 26.3 | 2.68 s |
+| `maxBacktrack` 5 | 65,736 | 371 | 22.1 | 3.03 s |
+
+**(4) CPU 與 GPU**（預設參數，16 執行緒；CPU 版為不含 CUDA 的建置）
+
+| 例子 | 階段 | CPU | GPU | 倍數 |
+|---|---|---|---|---|
+| A | 9a StaM 群 | 42.68 s | 3.24 s | 13 |
+| A | 9b 網格（100 個構型） | 45.28 s | 0.25 s | 181 |
+| A | 9b 對接 | 432.51 s | 26.05 s | 17 |
+| A | 9d 重新計算 | 7.63 s | 0.38 s | 20 |
+| A | 全部（含讀入等） | 531.1 s | 30.2 s | 18 |
+| RB4 posm1 | 9b 對接 | 132.68 s | 7.85 s | 17 |
+| RB4 posm1 | 全部 | 139.8 s | 8.6 s | 16 |
+
+- CPU 版以 `-march=native` 編譯（AVX-512）：RB4 posm1 9b 125.5 → 110.3 s（快 12%），網格 1.91 → 1.61 s。未採用為預設（執行檔只能在同類 CPU 上執行）。
+- GPU `energy_gpu.cu` 以 `-use_fast_math` 編譯（AutoDock-GPU 的設定）：例子 A 23.2 s、RB4 7.0 s，與目前相同（1.90 已改用硬體倒數）。未採用。
+
+**(5) 與 AutoDock-GPU 1.6、OmegaDocker 0.33.0 的比較**
+
+- AutoDock-GPU 1.6：
+  - 網格每點存 4 個值（(x, y, z)、(x, y+1, z)、(x, y, z+1)、(x, y+1, z+1)），三線性內插的 8 個角以 2 次連續讀取取得（`processgrid.cpp`、`calcMergeEneGra.cu`）；記憶體為 4 倍。本程式每個角分別讀取（`interpolateMaps`），可考慮同樣的排列（delta 區塊與多構型視窗的記憶體也會變為 4 倍）。
+  - `TENSOR=ON`：以 Tensor Core（wmma_extension 的 TCEC）做 block 內能量與梯度的加總；TITAN V（sm_70）可用。本程式的加總以 warp shuffle 進行，佔 kernel 時間的比例小，預期效果有限。
+  - `-use_fast_math`：見 (4)，無差異。
+  - 一個 block 處理一個個體；預設的局部搜尋為 ADADELTA（每步 1 次評估、無 line search）；本程式已有 `adadelta`（12），但在 1.54 的測試中步數多、較慢。
+  - 原子數上限 256 與相關的固定大小陣列不適用於本程式。
+- OmegaDocker 0.33.0（`olderVersions/new33d_github`）：以 AutoDock-GPU 1.5.2 為基礎，主要改動為每 block 1024 threads、最小化與座標輸出分成不同 kernel、kernel 4 產生子代時先篩選能量、條件判斷的簡化。這些在 0.40 已有對應（可變 block 大小、整個最小化在 GPU、9b 快速篩選與 `E_max`），沒有新的可借鑑之處。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2668,6 +2753,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.fftStride` | 1 | 1L2Y（40、48 Å）、BTN（30 Å），單輪；寡肽的前 10 名位置與 stride 1 多數不同 | 不同 MobM 大小、盒子、多輪；與實驗結構比對 | 15.1.23 |
 | `dock9b.rotStep` | 7.5° | posm2_fft，BTN，15° 與 7.5° 各一次 | 各 posm、較大的 MobM | 8.4.3 |
 | `conf9a.minMethod`、`dock9b.minMethod` | `lbfgs` | 5 種方法，2KJJ + BTN | 寡肽、較大的系統 | 12 |
+| `{conf9a,dock9b}.lineSearchInit`、`lineSearchReduce`、`maxBacktrack` | `unit`、`halve`、20 | 2KJJ + 1L2Y（posm1、posm3），seed 3–5；同樣時間下的差異小於 seed 的差異，看不出較好的組合 | 有實驗結構的標準資料：同樣時間下與實驗結構的 RMSD、能量；9a 的影響 | 12、15.1.31 |
 | `dock9b.sepa*`（posm3／posm4） | 見 14 | 2KJJ + BTN；`sepaPotPercentile` 註明實測後可改為固定門檻 | 不同電荷分布的 StaM／MobM | 8.4.4、8.4.4.1 |
 | `{stam,mobm}.rcdMaxIter`、`rcdStallTolerance`、`rcdClash` | 20000、10⁻⁴ rad、`none` | 2KJJ 的耦合組（loop A:8–15 + 雙硫鍵） | 其他 loop 長度、多個雙硫鍵 | 7.11、7.11.1 |
 | `energy.clashDistance` | 1.8 Å | 閉合後碰撞檢查門檻的比較（2KJJ） | 對接結果（9b 重疊篩選、排序）的影響 | 7.9、7.11.1 |
@@ -2801,3 +2887,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.89 | 2026-10-21 | 使用 GPU 且 `gpu.dock9bDeviceMin = true`、`dock9b.minMethod = lbfgs` 時 `dock9b.lbfgsMemory` > 62 報錯並結束，不再自動在 CPU 最小化（12、15.1.27、15.1.28） |
 | 1.90 | 2026-10-21 | 能量核心最佳化：float 原子對以硬體倒數與 `rsqrtf`、只保留 12-6／12-10、格點內插乘以間距的倒數（CPU 與 GPU）、兩面角梯度以子樹前綴和計算；9b 快 17%，9a float 快 12%（15.1.29） |
 | 1.91 | 2026-10-21 | 原子常數與原子對參數對齊（約 1%）；記錄未採用的嘗試（暫存器限制、試驗點只算能量）與 9b 線搜尋、posm3 離開格點的統計（15.1.30） |
+| 1.92 | 2026-10-21 | line search 選項 `{conf9a,dock9b}.lineSearchInit`、`lineSearchReduce`、`maxBacktrack`（12，CPU 與 GPU）；比較結果、CPU／GPU 效能與 AutoDock-GPU 1.6、0.33.0 的比較（15.1.31）；17.3 加入 line search 選項 |
