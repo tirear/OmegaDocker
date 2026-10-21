@@ -5162,10 +5162,7 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
     CHECK(agree >= ctlAgree - n / 10);
     // Whole minimizations on the device (L-BFGS, spec 15.1.26).
     REQUIRE(fs.p.minimizer.method == od::MinMethod::Lbfgs);
-    const od::DockMinParams mp{fs.p.scaleTrans,         fs.p.scaleRot,           fs.p.scaleTors,
-                               fs.p.maxTransStep,       fs.p.maxAngleStep * std::numbers::pi / 180.0,
-                               fs.p.minimizer.deltaE,   fs.p.minimizer.maxSteps, fs.p.minimizer.convSteps,
-                               fs.p.minimizer.memory};
+    const od::DockMinParams mp = dk.deviceMinParams();
     std::vector<od::PoseRequest> startReq;
     for (int i = 0; i < n; ++i) startReq.push_back({poses[i], c.center, c.anglesDeg.data()});
     std::vector<od::DockMinResult> dres(n);
@@ -5198,6 +5195,82 @@ TEST_CASE("gpu: 9b pose energies and minimization match the CPU path") {
     od::DockMinParams big = mp;
     big.memory = od::kDeviceLbfgsMaxMemory + 1;
     CHECK_FALSE(ev.minimize(n, startReq.data(), big, dres.data(), dang.data()));
+  }
+  ev.idle();
+}
+
+TEST_CASE("gpu: 9b device minimizer with each method matches the CPU") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FieldSet fs;
+  auto gfield = std::make_shared<od::GpuField>(0);
+  od::GpuPoseEvaluator ev(fs.x.mobSys->model(), gfield, 0, 4096);
+  const int nt = fs.x.mobSys->torsionCount();
+  const auto& field = fs.fields[0].second;
+  for (const char* method : {"sd", "cg", "fire", "lbfgs", "adadelta"}) {
+    INFO(method);
+    od::Dock9bParams p = fs.p;
+    p.minimizer.method = od::parseMinMethod(method);
+    p.minimizer.maxSteps = 200;
+    const od::MobmDocker dk(*fs.x.mobSys, field, p);
+    ev.bind(dk);
+    const auto c = dk.conformation(fs.x.mobSys->inputAngles());
+    const auto poses = filteredPoses(dk, c, 128);
+    REQUIRE(poses.size() == 128);
+    const int n = static_cast<int>(poses.size());
+    // The CPU, and the CPU from starts shifted by 1e-5 Å as control (spec 15.1.26).
+    std::vector<od::DockSample> cpuOut(n), ctlOut(n);
+    std::vector<char> cpuOk(n), ctlOk(n);
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < n; ++i) {
+      od::Dock9bStats s;
+      cpuOk[i] = dk.minimize(c, poses[i], cpuOut[i], s);
+      od::Pose shifted = poses[i];
+      shifted.t[0] += 1e-5;
+      ctlOk[i] = dk.minimize(c, shifted, ctlOut[i], s);
+    }
+    std::vector<od::PoseRequest> req;
+    for (int i = 0; i < n; ++i) req.push_back({poses[i], c.center, c.anglesDeg.data()});
+    std::vector<od::DockMinResult> dres(n);
+    std::vector<float> dang(static_cast<std::size_t>(n) * nt);
+    REQUIRE(ev.minimize(n, req.data(), dk.deviceMinParams(), dres.data(), dang.data()));
+    const auto same = [](bool okA, const od::DockSample& a, bool okB, const od::DockSample& b) {
+      if (okA != okB) return 0;
+      if (!okA) return 1;
+      return std::abs(a.energy - b.energy) <= 1e-4 * std::max(1.0f, std::abs(b.energy)) ? 1 : 0;
+    };
+    int devAgree = 0, ctlAgree = 0, devSteps = 0, cpuSteps = 0;
+    double devMin = 1e300, cpuMin = 1e300;
+    for (int i = 0; i < n; ++i) {
+      od::DockSample ds;
+      ds.energy = static_cast<float>(dres[i].dterms.inter + dres[i].dterms.interClash + dres[i].terms.vdw +
+                                     dres[i].terms.hbond + dres[i].terms.elec + dres[i].terms.desolv + dres[i].terms.clash);
+      devAgree += same(dres[i].ok != 0, ds, cpuOk[i], cpuOut[i]);
+      ctlAgree += same(ctlOk[i], ctlOut[i], cpuOk[i], cpuOut[i]);
+      if (dres[i].ok) {
+        devMin = std::min(devMin, static_cast<double>(ds.energy));
+        devSteps += dres[i].steps;
+        CHECK(dres[i].steps <= p.minimizer.maxSteps);
+        // The returned angles and pose give the returned energy.
+        od::Pose rp;
+        for (int k = 0; k < 3; ++k) rp.t[k] = dres[i].t[k];
+        rp.q = {dres[i].q[0], dres[i].q[1], dres[i].q[2], dres[i].q[3]};
+        const std::vector<double> ra(dang.begin() + static_cast<std::ptrdiff_t>(i) * nt,
+                                     dang.begin() + static_cast<std::ptrdiff_t>(i + 1) * nt);
+        CHECK(std::abs(dk.evaluate(c, rp, ra).ranking() - ds.energy) <= 1e-3 * std::max(1.0f, std::abs(ds.energy)));
+      }
+      if (cpuOk[i]) {
+        cpuMin = std::min(cpuMin, static_cast<double>(cpuOut[i].energy));
+        cpuSteps += cpuOut[i].steps;
+      }
+    }
+    MESSAGE(std::format("{}: same result as the CPU: device {}, CPU control {}; lowest energy device {:.3f}, CPU {:.3f}; "
+                        "steps device {}, CPU {}",
+                        method, devAgree, ctlAgree, devMin, cpuMin, devSteps, cpuSteps));
+    CHECK(devAgree >= ctlAgree - n / 10);
+    CHECK(devMin <= cpuMin + 1.0);
   }
   ev.idle();
 }

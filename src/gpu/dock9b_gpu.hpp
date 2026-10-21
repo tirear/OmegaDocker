@@ -21,7 +21,7 @@ namespace od {
 class GpuPoseEvaluator : public PoseEvaluator {
  public:
   // batch: requested poses per call, limited to 90% of the free device memory.
-  // deviceMin: L-BFGS minimizations entirely on the GPU (minimize, spec 15.1.26).
+  // deviceMin: minimizations entirely on the GPU (minimize, spec 15.1.26, 15.1.28).
   GpuPoseEvaluator(const EnergyModel& model, std::shared_ptr<GpuField> field, int device, int batch,
                    std::shared_ptr<GpuDockPrep> prep = nullptr, bool deviceMin = true)
       : gpu_(model, device),
@@ -111,7 +111,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
     });
   }
   bool minimize(int n, const PoseRequest* req, const DockMinParams& p, DockMinResult* out, float* anglesOut) override {
-    if (!deviceMin_ || p.memory > kDeviceLbfgsMaxMemory) return false;
+    if (!deviceMin_ || (p.method == static_cast<int>(MinMethod::Lbfgs) && p.memory > kDeviceLbfgsMaxMemory)) return false;
     const std::size_t nn = static_cast<std::size_t>(n), nt = static_cast<std::size_t>(nt_);
     minStarts_.resize(nn);
     minAngles_.resize(nn * nt);

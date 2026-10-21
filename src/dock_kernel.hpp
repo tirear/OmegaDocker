@@ -39,14 +39,15 @@ struct DockTerms {
   int outside;
 };
 
-// Whole 9b minimizations with L-BFGS on the device (MobmDocker::minimize, spec 15.1.26).
+// Whole 9b minimizations on the device (MobmDocker::minimize, spec 15.1.26, 15.1.28).
 // Variables z = (t / sT, rotation vector / sR, torsions in rad / sA); steps limited to maxTrans
-// (Å) and maxAngle (rad); VecMinParams maxSteps, convSteps, deltaE and memory.
-// Largest memory of the device minimizer (larger: minimized on the CPU).
+// (Å) and maxAngle (rad); VecMinParams maxSteps, convSteps, deltaE and memory (L-BFGS); method:
+// MinMethod as int.
+// Largest L-BFGS memory of the device minimizer (larger: minimized on the CPU).
 constexpr int kDeviceLbfgsMaxMemory = 62;
 struct DockMinParams {
   double sT, sR, sA, maxTrans, maxAngle, deltaE;
-  int maxSteps, convSteps, memory;
+  int maxSteps, convSteps, memory, method;
 };
 // Start of one minimization: pose (double), centre (the Pose frame) and field as DockPose.
 struct DockMinStart {

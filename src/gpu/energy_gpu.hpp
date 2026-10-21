@@ -80,7 +80,7 @@ class GpuEnergy {
   static constexpr int kLanes = 2;
   void submitDock(int lane, const GpuField& field, const float* angles, const DockPose* poses, int n, bool grad);
   void completeDock(int lane, FlatTerms* terms, DockTerms* dterms, double* grad);
-  // Whole 9b minimizations with L-BFGS (spec 15.1.26) against field with the probe atoms of
+  // Whole 9b minimizations (spec 15.1.26, 15.1.28) against field with the probe atoms of
   // setProbes: starts and anglesDeg (n × torsionCount); out and anglesOut (n × torsionCount, the
   // float angles of each result). Synchronous.
   void minimizeDock(const GpuField& field, const DockMinParams& p, const DockMinStart* starts, const double* anglesDeg,

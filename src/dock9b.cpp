@@ -66,12 +66,9 @@ void MobmDocker::minimizeBatched(PoseEvaluator& pev, std::span<const MobmDocker*
   if (dks.size() == 1) pev.bind(*dks[0]);
   else pev.bindAll(dks);
   const int m = static_cast<int>(items.size());
-  // L-BFGS: whole minimizations on the device when the evaluator supports it (spec 15.1.26).
-  const Dock9bParams& p0 = dks[0]->p_;
-  if (p0.minimizer.method == MinMethod::Lbfgs) {
-    const DockMinParams mp{p0.scaleTrans,         p0.scaleRot,          p0.scaleTors,
-                           p0.maxTransStep,       p0.maxAngleStep * kDeg, p0.minimizer.deltaE,
-                           p0.minimizer.maxSteps, p0.minimizer.convSteps, p0.minimizer.memory};
+  // Whole minimizations on the device when the evaluator supports it (spec 15.1.26, 15.1.28).
+  {
+    const DockMinParams mp = dks[0]->deviceMinParams();
     const std::size_t nt = static_cast<std::size_t>(dks[0]->sys_.torsionCount());
     std::vector<PoseRequest> sr(static_cast<std::size_t>(m));
     parallelRange(m, [&](long long i) {
@@ -993,6 +990,23 @@ std::vector<DockProbe> MobmDocker::probes() const {
 
 DockView MobmDocker::dockView(const std::vector<DockProbe>& probes, const FieldView& field) const {
   return {static_cast<int>(probes.size()), probes.data(), p_.clashDistance, p_.clashBase, p_.clashK, field, nullptr};
+}
+
+DockMinParams MobmDocker::deviceMinParams() const {
+  // As minimize: adadelta in AutoDock-GPU units.
+  const bool ada = p_.minimizer.method == MinMethod::Adadelta;
+  const double uT = ada ? field_.geom().spacing : 1.0, uA = ada ? kDeg : 1.0;
+  const bool lbfgs = p_.minimizer.method == MinMethod::Lbfgs;
+  return {p_.scaleTrans * uT,
+          p_.scaleRot * uA,
+          p_.scaleTors * uA,
+          p_.maxTransStep,
+          p_.maxAngleStep * kDeg,
+          p_.minimizer.deltaE,
+          p_.minimizer.maxSteps,
+          p_.minimizer.convSteps,
+          lbfgs ? p_.minimizer.memory : 1,
+          static_cast<int>(p_.minimizer.method)};
 }
 
 bool MobmDocker::minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const {

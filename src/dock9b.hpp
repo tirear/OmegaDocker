@@ -205,6 +205,8 @@ class MobmDocker {
   bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats) const;
   // Same with the energies of ev.
   bool minimize(const Conf& c, const Pose& start, DockSample& out, Dock9bStats& stats, const PoseEval& ev) const;
+  // Parameters of the same minimization on the device (PoseEvaluator::minimize).
+  DockMinParams deviceMinParams() const;
 
   // All of 9b for one conformation pair: L1poss -> 8.5 -> minimization.
   // Appends the docking samples to out (in L1poss order).
@@ -332,7 +334,7 @@ class PoseEvaluator {
   virtual int lanes() const { return 1; }
   virtual void submit(int /*lane*/, int /*n*/, const PoseRequest* /*req*/) {}
   virtual void complete(int /*lane*/, MobmDocker::PoseEnergy* /*out*/, double* /*grad*/) {}
-  // Whole L-BFGS minimizations on the device (spec 15.1.26) from the poses and angles of req with
+  // Whole minimizations on the device (spec 15.1.26, 15.1.28) from the poses and angles of req with
   // the parameters p; out and anglesOut (n × torsions). false: not supported (the minimization
   // then runs on the host with evaluate or submit and complete).
   virtual bool minimize(int /*n*/, const PoseRequest* /*req*/, const DockMinParams& /*p*/, DockMinResult* /*out*/,

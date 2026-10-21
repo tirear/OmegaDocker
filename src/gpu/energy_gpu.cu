@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "error.hpp"
+#include "minimize.hpp"
 #include "pool.hpp"
 
 namespace od {
@@ -573,7 +574,8 @@ __device__ inline double warpAllSum(double v) {
 // the torsion gradient, nt) and the scalars (minScalarDoubles: the dot products of the basis vectors
 // G (packed lower triangle, K (K + 1) / 2), rho (P), alpha (memory), the coefficients (K) and the
 // order of the pairs (P, int)); floats (fwork): trial and best angles (nt each). The scalars are in
-// shared memory when they fit (DockMinArgs::scalarOff).
+// shared memory when they fit (DockMinArgs::scalarOff). The other methods keep their vectors in
+// the memory of S and Y (cg: g and d of the previous step; fire: v; adadelta: E[g²] and E[Δx²]).
 __host__ __device__ inline std::size_t minVecDoubles(int ng, int nt) {
   return 4 * static_cast<std::size_t>(ng) + static_cast<std::size_t>(nt);
 }
@@ -602,20 +604,24 @@ struct DockMinArgs {
   int scalarOff;  // >= 0: the scalars (minScalarDoubles) in dynamic shared memory from this byte offset
 };
 
-// Whole 9b minimizations (spec 15.1.26, 15.1.27): MobmDocker::minimize with L-BFGS (minimize.cpp
-// runLbfgs) on the device. Each block takes the next sample until none is left; all threads
-// evaluate the energy (evalOne) and do the per-element work (trial points, gradients, stored
-// pairs). The L-BFGS direction is computed from the dot products of the basis vectors (the stored
-// pairs s, y and the gradient; vector-free L-BFGS): after each accepted step the warps compute the
-// new dot products together, then warp 0 runs the two-loop recursion on the coefficients of the
-// basis (lane-parallel, no vector memory) and forms the direction in one pass. Steps of the
-// minimizer as on the CPU; the sums are in another order.
+// Whole 9b minimizations (spec 15.1.26–15.1.28): MobmDocker::minimize with the five methods of
+// minimize.cpp (runSd, runCg, runFire, runLbfgs, runAdadelta) on the device. Each block takes the
+// next sample until none is left; all threads evaluate the energy (evalOne) and do the per-element
+// work (trial points, gradients, stored vectors); warp 0 computes each new step (lane-parallel).
+// The L-BFGS direction is computed from the dot products of the basis vectors (the stored pairs s,
+// y and the gradient; vector-free L-BFGS): after each accepted step the warps compute the new dot
+// products together, then warp 0 runs the two-loop recursion on the coefficients of the basis (no
+// vector memory) and forms the direction in one pass. Steps of the minimizers as on the CPU; the
+// sums are in another order.
 template <int Dock, int NT, bool Tor>
 __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, PairData<float> pd, TorsionData<float> td,
                                                          float* xs, double* gs, DockView dv, DockMinArgs a, int shared) {
   extern __shared__ __align__(16) unsigned char smem[];
   constexpr double kRad = 3.14159265358979323846 / 180.0, kArmijo = 1e-4;
   constexpr int kMaxBacktrack = 20, kWarps = NT / 32, kC = (2 * (kDeviceLbfgsMaxMemory + 1) + 1 + 31) / 32, kD = 4;
+  constexpr int kSd = static_cast<int>(MinMethod::Sd), kCg = static_cast<int>(MinMethod::Cg),
+                kFire = static_cast<int>(MinMethod::Fire), kLbfgs = static_cast<int>(MinMethod::Lbfgs),
+                kAda = static_cast<int>(MinMethod::Adadelta);
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const bool w0 = tid < 32;
   const int nt = m.torsionCount, ng = 6 + nt, M = a.p.memory, P = M + 1, K = 2 * P + 1, gI = 2 * P;
@@ -623,6 +629,7 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
   float* x = shared ? reinterpret_cast<float*>(smem) : xs + blockIdx.x * nc;
   double* g = gs + blockIdx.x * nc;
   const DockMinParams& p = a.p;
+  const int meth = p.method;
   // The work memory pointers are read from shared memory where they are used (volatile: not kept
   // in registers across the energy evaluation, where they made the energy loops spill).
   __shared__ double *sWork, *sVec, *sScalar;
@@ -647,6 +654,10 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
   __shared__ double res[17], bestRes[17], q0[4];
   __shared__ double e, eT, bestE, slope, dScale, fTrial;
   __shared__ int sIdx, status, steps, evals, calm, cnt, accepted, pending;  // status: 0 running, 1 done, 2 left the grid
+  // sd: step factor, rejected steps in a row; cg: alpha and slope of the previous step, slope of the
+  // current direction, no previous step; fire: dt, alpha, steps with P > 0 in a row.
+  __shared__ double sdA, cgAlpha, cgPrevSlope, cgSlope, fireDt, fireAlpha;
+  __shared__ int sdFails, cgFirst, fireNpos;
 
   // Trial point v = z + f d (pose and angles; MobmDocker::minimize unpack); all threads.
   const auto trial = [&](double f) {
@@ -760,7 +771,17 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
       z[i] = i < 3 ? st.t[i] / p.sT : i < 6 ? 0.0 : a.anglesIn[static_cast<std::size_t>(s) * nt + (i - 6)] * kRad / p.sA;
     for (int i = tid; i < ng; i += NT) d[i] = 0;
     for (int k = tid; k < P; k += NT) order[k] = k;
+    if (meth != kLbfgs)
+      for (int i = tid; i < ng; i += NT) S[i] = Y[i] = 0;
     if (tid == 0) {
+      sdA = 1;
+      sdFails = 0;
+      cgAlpha = 1;
+      cgPrevSlope = 0;
+      cgFirst = 1;
+      fireDt = 0.1;
+      fireAlpha = 0.1;
+      fireNpos = 0;
       for (int i = 0; i < 4; ++i) q0[i] = st.q[i];
       for (int i = 0; i < 3; ++i) pose.center[i] = st.center[i];
       pose.field = st.field;
@@ -785,36 +806,49 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
             bestPose = pose;
             bestE = e;
           }
-          dots(false);
+          if (meth == kLbfgs) dots(false);
         }
         __syncthreads();
         first = false;
       } else {
-        // Armijo backtracking.
+        // Armijo rule (sd: one trial per step; cg, lbfgs: backtracking); fire and adadelta accept every step.
         if (tid == 0) {
           if (!inside) status = 2;
-          accepted = inside && eT <= e + kArmijo * al * slope;
+          accepted = inside && (meth == kFire || meth == kAda || eT <= e + kArmijo * al * slope);
         }
         __syncthreads();
         if (status != 0) break;
-        if (!accepted) {
+        if (!accepted && meth != kSd) {
           if (++bt < kMaxBacktrack) {
             al *= 0.5;
             continue;
           }
           break;  // no decrease: converged
         }
-        // Accept (Run::accept, onAccept): the pair order[cnt], re-base the rotation at the accepted pose.
-        {
+        if (!accepted) {  // sd: half the step factor, the same point
+          if (tid == 0) {
+            sdA *= 0.5;
+            if (++sdFails >= kMaxBacktrack) status = 1;
+          }
+          __syncthreads();
+          if (status != 0) break;
+        } else {
+          // Accept (Run::accept, onAccept): lbfgs the pair order[cnt], cg the previous g and d;
+          // re-base the rotation at the accepted pose.
           OD_MINW
           const bool better = eT < bestE;
-          const int q = order[cnt];
+          const int q = meth == kLbfgs ? order[cnt] : 0;
           double* sq = S + q * sng;
           double* yq = Y + q * sng;
           for (int i = tid; i < ng; i += NT) {
             const double v = z[i] + fTrial * d[i];  // the accepted trial point
-            sq[i] = v - z[i];
-            yq[i] = gt[i] - gv[i];
+            if (meth == kLbfgs) {
+              sq[i] = v - z[i];
+              yq[i] = gt[i] - gv[i];
+            } else if (meth == kCg) {
+              S[i] = gv[i];
+              Y[i] = d[i];
+            }
             z[i] = i >= 3 && i < 6 ? 0.0 : v;
             gv[i] = gt[i];
           }
@@ -830,14 +864,151 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
             if (calm >= p.convSteps) status = 1;
             e = eT;
             for (int i = 0; i < 4; ++i) q0[i] = pose.q[i];
-            pending = 1;
+            pending = meth == kLbfgs;
+            if (meth == kSd) {
+              sdFails = 0;
+              sdA *= 1.2;
+            } else if (meth == kCg) {
+              cgAlpha = fTrial;
+              cgPrevSlope = cgSlope;
+              cgFirst = 0;
+            }
           }
-          dots(true);
+          if (meth == kLbfgs) dots(true);
         }
         __syncthreads();
       }
       if (status != 0 || steps >= p.maxSteps) break;
-      if (w0) {
+      if (w0 && meth != kLbfgs) {
+        OD_MINW
+        // Largest factor (<= 1) of the step f d (MobmDocker::minimize stepLimit).
+        const auto limitOf = [&](double f) {
+          double lim = 1, tq = 0, rq = 0;
+          for (int i = lane; i < ng; i += 32) {
+            const double v = f * d[i];
+            if (i < 3) tq += v * v;
+            else if (i < 6) rq += v * v;
+            else {
+              const double av = p.sA * fabs(v);
+              if (av > p.maxAngle) lim = fmin(lim, p.maxAngle / av);
+            }
+          }
+          for (int o = 16; o > 0; o /= 2) lim = fmin(lim, __shfl_xor_sync(0xffffffffu, lim, o));
+          tq = warpAllSum(tq);
+          rq = warpAllSum(rq);
+          const double tn = p.sT * sqrt(tq);
+          if (tn > p.maxTrans) lim = fmin(lim, p.maxTrans / tn);
+          const double rn = p.sR * sqrt(rq);
+          if (rn > p.maxAngle) lim = fmin(lim, p.maxAngle / rn);
+          return lim;
+        };
+        const auto wdot = [&](const double* u, const double* v) {
+          double s = 0;
+          for (int i = lane; i < ng; i += 32) s += u[i] * v[i];
+          return warpAllSum(s);
+        };
+        if (meth == kSd) {  // runSd
+          const double a0 = sdA;
+          for (int i = lane; i < ng; i += 32) d[i] = -a0 * gv[i];
+          __syncwarp();
+          const double s = limitOf(1.0);
+          double sl = 0;
+          for (int i = lane; i < ng; i += 32) {
+            d[i] *= s;
+            sl += gv[i] * d[i];
+          }
+          sl = warpAllSum(sl);
+          if (lane == 0) {
+            sdA = a0 * s;
+            dScale = 1;
+            slope = sl;
+            if (!(sl < 0)) status = 1;  // zero gradient
+          }
+        } else if (meth == kCg) {  // runCg: S previous g, Y previous d
+          const bool firstStep = cgFirst;
+          if (firstStep) {
+            for (int i = lane; i < ng; i += 32) d[i] = -gv[i];
+          } else {
+            double num = 0, den = 0;
+            for (int i = lane; i < ng; i += 32) {
+              num += gv[i] * (gv[i] - S[i]);
+              den += S[i] * S[i];
+            }
+            const double beta = fmax(0.0, warpAllSum(num) / warpAllSum(den));
+            for (int i = lane; i < ng; i += 32) d[i] = -gv[i] + beta * Y[i];
+          }
+          __syncwarp();
+          double sl = wdot(gv, d);
+          if (!(sl < 0)) {  // not a descent direction: restart
+            for (int i = lane; i < ng; i += 32) d[i] = -gv[i];
+            __syncwarp();
+            sl = wdot(gv, d);
+            if (!(sl < 0) && lane == 0) status = 1;
+          }
+          const double a0 = firstStep ? 1.0 : cgAlpha * cgPrevSlope / sl;
+          const double s = limitOf(a0);
+          if (lane == 0) {
+            dScale = a0 * s;
+            slope = a0 * s * sl;
+            cgSlope = sl;
+          }
+        } else if (meth == kFire) {  // runFire: S velocity
+          constexpr int kNmin = 5;
+          constexpr double kFinc = 1.1, kFdec = 0.5, kAlpha0 = 0.1, kFalpha = 0.99, kDtMax = 1.0;
+          double* v = S;
+          double P = 0, vn = 0, fn = 0;
+          for (int i = lane; i < ng; i += 32) {
+            P -= gv[i] * v[i];
+            vn += v[i] * v[i];
+            fn += gv[i] * gv[i];
+          }
+          P = warpAllSum(P);
+          vn = warpAllSum(vn);
+          fn = warpAllSum(fn);
+          double dt = fireDt, fa = fireAlpha;
+          int np = fireNpos;
+          if (P > 0) {
+            vn = sqrt(vn);
+            fn = sqrt(fn);
+            if (fn > 0)
+              for (int i = lane; i < ng; i += 32) v[i] = (1 - fa) * v[i] - fa * vn * gv[i] / fn;
+            if (++np > kNmin) {
+              dt = fmin(dt * kFinc, kDtMax);
+              fa *= kFalpha;
+            }
+          } else {
+            for (int i = lane; i < ng; i += 32) v[i] = 0;
+            dt *= kFdec;
+            fa = kAlpha0;
+            np = 0;
+          }
+          for (int i = lane; i < ng; i += 32) {
+            v[i] -= dt * gv[i];
+            d[i] = dt * v[i];
+          }
+          __syncwarp();
+          const double s = limitOf(1.0);
+          if (lane == 0) {
+            fireDt = dt;
+            fireAlpha = fa;
+            fireNpos = np;
+            dScale = s;
+          }
+        } else {  // runAdadelta: S E[g²], Y E[Δx²]
+          constexpr double kRho = 0.8, kEps = 1e-2;
+          for (int i = lane; i < ng; i += 32) {
+            S[i] = kRho * S[i] + (1 - kRho) * gv[i] * gv[i];
+            d[i] = -gv[i] * sqrt((Y[i] + kEps) / (S[i] + kEps));
+          }
+          __syncwarp();
+          const double s = limitOf(1.0);
+          for (int i = lane; i < ng; i += 32) {
+            const double st = d[i] * s;
+            Y[i] = kRho * Y[i] + (1 - kRho) * st * st;
+          }
+          if (lane == 0) dScale = s;
+        }
+      } else if (w0) {
         OD_MINW
         // The new pair is stored when s.y > 1e-12 (the oldest one is dropped at memory pairs).
         if (pending) {
