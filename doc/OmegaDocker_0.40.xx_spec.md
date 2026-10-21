@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.88 |
+| 文件版本 | 1.89 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1618,7 +1618,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.conf9aRcdMinBatch` | `--gpu_conf9aRcdMinBatch` | 1024 | 15.1.18（≥ 1；L1 批次至少這麼多樣本才用 GPU） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
 | `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：視窗的 L2poss 達 48 × GPU 同時計算的姿勢數為止；整數 n：最多 n 個；都受記憶體限制） |
-| `gpu.dock9bDeviceMin` | `--gpu_dock9bDeviceMin` | `true` | 15.1.26、15.1.28（9b 的整個最小化在 GPU 上，五種 `dock9b.minMethod` 都支援；`lbfgsMemory` > 62 時在 CPU；false：最小化在 CPU、能量由 GPU 計算） |
+| `gpu.dock9bDeviceMin` | `--gpu_dock9bDeviceMin` | `true` | 15.1.26、15.1.28（9b 的整個最小化在 GPU 上，五種 `dock9b.minMethod` 都支援；`lbfgsMemory` > 62 且 `minMethod = lbfgs` 時報錯並結束；false：最小化在 CPU、能量由 GPU 計算） |
 | `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
@@ -1687,7 +1687,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.minMaxStep` | `--dock9b_minMaxStep` | 1000 | 8.6 |
 | `dock9b.minConvSteps` | `--dock9b_minConvSteps` | 10 | 8.6 |
 | `dock9b.minDeltaE` | `--dock9b_minDeltaE` | 1×10⁻³ kcal/mol | 8.6 |
-| `dock9b.lbfgsMemory` | `--dock9b_lbfgsMemory` | 7 | 12（CUDA 版 GPU 最小化最多 62，更大時在 CPU 最小化：15.1.27） |
+| `dock9b.lbfgsMemory` | `--dock9b_lbfgsMemory` | 7 | 12（CUDA 版使用 GPU 且 `gpu.dock9bDeviceMin = true`、`dock9b.minMethod = lbfgs` 時最多 62，更大時報錯並結束：15.1.27、15.1.28） |
 | `dock9b.scaleTrans`、`dock9b.scaleRot`、`dock9b.scaleTors` | `--dock9b_scaleTrans` 等 | 1、1、1 | 12 |
 | `dock9b.maxTransStep` | `--dock9b_maxTransStep` | 0.5 Å | 12 |
 | `dock9b.maxAngleStep` | `--dock9b_maxAngleStep` | 10° | 12 |
@@ -2343,7 +2343,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 試驗點、梯度縮放、儲存新的 s、y 與接受點由所有執行緒分擔；z 與 zt 合併（接受時由 z + f·d 重算）。
   - 工作記憶體的指標每次使用時從共用記憶體讀取（volatile），避免在能量計算期間佔用暫存器。
   - 內積與係數（G、rho、alpha、係數、順序；memory 7 時約 2.0 KiB）在 SM 的共用記憶體等級（8 KiB × 2^k）不變且駐留 block 數不變時放在共用記憶體；向量仍在全域記憶體。
-  - `dock9b.lbfgsMemory` 上限 62（`kDeviceLbfgsMaxMemory`，係數放在每個 lane 的暫存器中）；更大時 `GpuPoseEvaluator::minimize` 回傳 false，回到 1.85 方式（CPU 最小化、GPU 算能量）。
+  - `dock9b.lbfgsMemory` 上限 62（`kDeviceLbfgsMaxMemory`，係數放在每個 lane 的暫存器中）；更大時 `GpuPoseEvaluator::minimize` 回傳 false，回到 1.85 方式（CPU 最小化、GPU 算能量）。1.89 起：程式啟動時（`selectGpu`，選定 GPU 之後）即報錯並結束，不再自動回到 CPU（15.1.28）。
 - 1.87 分段：能量計算 88%、two-loop 與方向 4.8%、接受與新內積 3.8%、`__syncthreads` 等待 2.6%、其他 0.8%。
 - 量測（TITAN V，16 執行緒，同一時段交錯執行；桌面使用 GPU 約 20–30%）：
 
@@ -2369,6 +2369,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `fire`：N_min 5、f_inc 1.1、f_dec 0.5、α₀ 0.1、f_α 0.99、dt₀ 0.1、dt_max 1.0；每一步都接受。
   - `adadelta`：ρ 0.8、ε 10⁻²，AutoDock-GPU 單位（平移以格點間距、角度以度為單位，`MobmDocker::deviceMinParams`）；每一步都接受。
 - 介面：`MobmDocker::deviceMinParams()` 給出與 `minimize` 相同的縮放（`minimizeBatched` 與測試共用）；`DockMinParams` 加 `method`；非 L-BFGS 方法 `memory` 傳 1。`GpuPoseEvaluator::minimize` 只在 L-BFGS 且 `lbfgsMemory` > 62 時拒絕。
+- 參數檢查（1.89）：使用 GPU（`gpu.enable = true`、有 CUDA 裝置）、`gpu.dock9bDeviceMin = true`、`dock9b.minMethod = lbfgs` 且 `dock9b.lbfgsMemory` > 62 時，`selectGpu` 報錯並結束（`dock9b.lbfgsMemory <n>: at most 62 with gpu.dock9bDeviceMin = true ...`）。其他方法不使用 `lbfgsMemory`，不檢查；未使用 GPU 時（CPU 版、`gpu.enable = false`、無裝置）不檢查。`--resume` 時以接續後的參數檢查（`gpu.*` 可改變）。
 - 暫存器：加入四種方法後核心溢出載入 244 → 228 bytes（L-BFGS 的結果與 1.87 逐位元相同）。
 - 結果：與 CPU 結果相同的個數與 CPU 對照組同級（測試，128 個姿勢、`maxSteps` 200：sd 68／69、cg 57／59、fire 115／112、lbfgs 62／64、adadelta 46／48；裝置／CPU 對照組）。RB4 posm1：各方法的 L2poss、left grid、docking samples、steps/pose 與 CPU 最小化相同或只差 1–3 個樣本，最低能量相同或接近（adadelta 前 3 個姿勢相同）。
 - 量測（RB4 posm1 100000，TITAN V，16 執行緒，同一時段；桌面使用 GPU 約 20–30%）：
@@ -2755,3 +2756,4 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 1.86 | 2026-10-21 | 執行緒池取代每步的 OpenMP 區域，閒置執行緒阻塞不忙等（16 執行緒、1 核心被佔用時 posm1 294 → 9.7 s）（15.1.25）；9b 的 L-BFGS 整個在 GPU 上（`minimizeDockKernel`、`PoseEvaluator::minimize`、`gpu.dock9bDeviceMin` 預設 true），CPU 時間少 13–77 倍，CPU 不忙時慢 12–23%，CPU 被佔用時快（14、15.1.26、16、17.1） |
 | 1.87 | 2026-10-21 | GPU 最小化器：每次通過只計算一次能量（能量程式碼一份，溢出載入 1264 → 244 bytes）、以基底向量內積計算 L-BFGS 方向、內積與係數放在共用記憶體；能量計算以外的時間 16% → 12%，posm1 快 4.7%；`dock9b.lbfgsMemory` > 62 時回到 CPU 最小化（15.1.27） |
 | 1.88 | 2026-10-21 | `sd`、`cg`、`fire`、`adadelta` 也整個在 GPU 上最小化（`minimizeDockKernel` 共用、`MobmDocker::deviceMinParams`）；結果與 CPU 同級，CPU 不忙時慢 7–17%（fire 快 5%），CPU 被佔用時快 10–45%（14、15.1.28） |
+| 1.89 | 2026-10-21 | 使用 GPU 且 `gpu.dock9bDeviceMin = true`、`dock9b.minMethod = lbfgs` 時 `dock9b.lbfgsMemory` > 62 報錯並結束，不再自動在 CPU 最小化（12、15.1.27、15.1.28） |

@@ -193,6 +193,10 @@ bool selectGpu(const od::Options& opt) {
     return false;
   }
   if (opt.gpuDevice >= n) od::fail("gpu.device {}: only {} CUDA device(s)", opt.gpuDevice, n);
+  if (opt.gpuDock9bDeviceMin && opt.dockMinMethod == "lbfgs" && opt.lbfgsMemory > od::kDeviceLbfgsMaxMemory)
+    od::fail("dock9b.lbfgsMemory {}: at most {} with gpu.dock9bDeviceMin = true (set gpu.dock9bDeviceMin = false to "
+             "minimize on the CPU)",
+             opt.lbfgsMemory, od::kDeviceLbfgsMaxMemory);
   const auto info = od::gpuDeviceInfo(opt.gpuDevice);
   od::logInfo(std::format("9a/9b minimization energies: GPU {} {} (sm_{}{}, {} MiB free of {} MiB)", opt.gpuDevice, info.name, info.major,
                           info.minor, info.freeMem >> 20, info.totalMem >> 20));
