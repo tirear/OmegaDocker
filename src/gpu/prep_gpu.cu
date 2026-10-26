@@ -188,13 +188,14 @@ __global__ void __launch_bounds__(kFilterThreads) filterKernel(FilterArgs a) {
   if (threadIdx.x >= 1 && threadIdx.x < 4 && cnt[threadIdx.x]) atomicAdd(a.counts + threadIdx.x - 1, cnt[threadIdx.x]);
 }
 
-// posm2_fft kernels (fftCorrelate, fftSelect).
+// posm2_fft kernels (fftCorrelate, fftSelect). Device layout of a batch of B orientations (spec
+// 15.1.36): [z][orientation][y][x], real and complex alike, so that the z planes of all orientations
+// are contiguous. rpl: floats per real plane (py px rounded up to even: cuFFT needs 8-byte aligned real data).
+
+// Trilinear spreading of atom j of orientation b into its z plane k (only = k; -1: both planes);
 // zero: clears the touched points instead.
-__global__ void spreadKernel(int n, int na, const int* atoms, const float* wts, int probes, const double* f, int px,
-                             int py, int pz, float* real, std::size_t N, int zero) {
-  const long long id = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (id >= static_cast<long long>(n) * na) return;
-  const int b = static_cast<int>(id / na), j = static_cast<int>(id % na);
+__device__ void spreadAtom(int b, int j, int only, const int* atoms, const float* wts, int probes, const double* f, int px,
+                           int py, int pz, float* real, int B, std::size_t rpl, bool zero) {
   const double* fa = f + (static_cast<std::size_t>(b) * probes + atoms[j]) * 3;
   const int p[3] = {px, py, pz};
   int base[3];
@@ -205,9 +206,10 @@ __global__ void spreadKernel(int n, int na, const int* atoms, const float* wts, 
     u[d] = static_cast<float>(fa[d] - fl);
   }
   const float wt = wts[j];
-  float* r = real + static_cast<std::size_t>(b) * N;
   for (int dz = 0; dz < 2; ++dz) {
     const int k = (base[2] + dz) % pz;
+    if (only >= 0 && k != only) continue;
+    float* r = real + (static_cast<std::size_t>(k) * B + b) * rpl;
     const float wz = dz ? u[2] : 1.0f - u[2];
     for (int dy = 0; dy < 2; ++dy) {
       const int jj = (base[1] + dy) % py;
@@ -215,19 +217,35 @@ __global__ void spreadKernel(int n, int na, const int* atoms, const float* wts, 
       for (int dx = 0; dx < 2; ++dx) {
         const int i = (base[0] + dx) % px;
         const float wx = dx ? u[0] : 1.0f - u[0];
-        float* v = r + (static_cast<std::size_t>(k) * py + jj) * px + i;
+        float* v = r + static_cast<std::size_t>(jj) * px + i;
         if (zero) *v = 0.0f;
-        else atomicAdd(v, wt * wx * wy * wz);
+        else *v += wt * wx * wy * wz;
       }
     }
   }
 }
+// One thread per (orientation, z plane) adding the atoms in order: every point is summed by one
+// thread in a fixed order, so the sums do not depend on the batch composition (spec 15.1.36).
+__global__ void spreadKernel(int n, int na, const int* atoms, const float* wts, int probes, const double* f, int px,
+                             int py, int pz, float* real, int B, std::size_t rpl) {
+  const long long id = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (id >= static_cast<long long>(n) * pz) return;
+  const int b = static_cast<int>(id / pz), k = static_cast<int>(id % pz);
+  for (int j = 0; j < na; ++j) spreadAtom(b, j, k, atoms, wts, probes, f, px, py, pz, real, B, rpl, false);
+}
+__global__ void clearKernel(int n, int na, const int* atoms, const float* wts, int probes, const double* f, int px,
+                            int py, int pz, float* real, int B, std::size_t rpl) {
+  const long long id = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (id >= static_cast<long long>(n) * na) return;
+  spreadAtom(static_cast<int>(id / na), static_cast<int>(id % na), -1, atoms, wts, probes, f, px, py, pz, real, B, rpl, true);
+}
 
-// acc (+)= conj(spec) S; blockIdx.y: orientation.
-__global__ void macKernel(std::size_t Nc, const cufftComplex* spec, const cufftComplex* S, cufftComplex* acc, int first) {
+// acc (+)= conj(spec) S; blockIdx.y: orientation; pl: complex points per z plane.
+__global__ void macKernel(std::size_t Nc, std::size_t pl, int B, const cufftComplex* spec, const cufftComplex* S,
+                          cufftComplex* acc, int first) {
   const std::size_t k = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (k >= Nc) return;
-  const std::size_t id = static_cast<std::size_t>(blockIdx.y) * Nc + k;
+  const std::size_t id = (k / pl * B + blockIdx.y) * pl + k % pl;
   const cufftComplex a = spec[id], s = S[k];
   const float re = a.x * s.x + a.y * s.y, im = a.x * s.y - a.y * s.x;
   if (first) acc[id] = {re, im};
@@ -266,7 +284,7 @@ constexpr int kDirectAtomsPerFft = 40;
 __global__ void __launch_bounds__(128) directKernel(int n, int probes, int px, int py, int pz, const cufftComplex* tables,
                                                     const cufftComplex* spectra, std::size_t Nc, int nt, int groups,
                                                     const int* groupMap, const int* groupStart, const int* atom,
-                                                    const float* q, cufftComplex* acc) {
+                                                    const float* q, int B, cufftComplex* acc) {
   const int hx = px / 2 + 1, len = hx + py + pz, zg = (pz + kDirectZ - 1) / kDirectZ;
   const long long id = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (id >= static_cast<long long>(hx) * py * zg) return;
@@ -312,19 +330,22 @@ __global__ void __launch_bounds__(128) directKernel(int n, int probes, int px, i
       }
     }
   }
+  const std::size_t pl = static_cast<std::size_t>(hx) * py, in = static_cast<std::size_t>(ky) * hx + kx;
   for (int b = b0; b < b1; ++b)
-    for (int z = 0; z < nz; ++z) acc[static_cast<std::size_t>(b) * Nc + kk[z]] = {ar[b - b0][z], ai[b - b0][z]};
+    for (int z = 0; z < nz; ++z) acc[(static_cast<std::size_t>(kz0 + z) * B + b) * pl + in] = {ar[b - b0][z], ai[b - b0][z]};
 }
 
 // Several spectra sets (spec 15.1.22): acc[s][b][k] = sum_c conj(P[c][b][k]) S[s][chan[c]][k], P the probe
-// spectra (channel-major, B orientations each). Thread: one k, kMacB orientations, kMacS sets at a time.
+// spectra (channel-major, B orientations each; stride: elements per channel or set). Thread: one k, kMacB orientations, kMacS sets at a time.
 constexpr int kMacB = 8;
 constexpr int kMacS = 4;
-__global__ void macMultiKernel(std::size_t Nc, int n, int B, int nc, const int* chan, const cufftComplex* P,
-                               const cufftComplex* S, int channels, int sets, cufftComplex* acc) {
+__global__ void macMultiKernel(std::size_t Nc, std::size_t pl, std::size_t stride, int n, int B, int nc, const int* chan,
+                               const cufftComplex* P, const cufftComplex* S, int channels, int sets, cufftComplex* acc) {
   const std::size_t k = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (k >= Nc) return;
   const int b0 = blockIdx.y * kMacB, nb = min(kMacB, n - b0);
+  // Offset of (orientation b0, point k) in a [z][orientation][y][x] batch.
+  const std::size_t at = (k / pl * B + b0) * pl + k % pl;
   for (int s0 = 0; s0 < sets; s0 += kMacS) {
     const int ns = min(kMacS, sets - s0);
     float ar[kMacS][kMacB], ai[kMacS][kMacB];
@@ -336,7 +357,7 @@ __global__ void macMultiKernel(std::size_t Nc, int n, int B, int nc, const int* 
       cufftComplex pv[kMacB];
 #pragma unroll
       for (int b = 0; b < kMacB; ++b)
-        pv[b] = b < nb ? P[(static_cast<std::size_t>(c) * B + b0 + b) * Nc + k] : cufftComplex{0, 0};
+        pv[b] = b < nb ? P[static_cast<std::size_t>(c) * stride + at + b * pl] : cufftComplex{0, 0};
       const std::size_t m = static_cast<std::size_t>(chan[c]);
 #pragma unroll
       for (int s = 0; s < kMacS; ++s) {
@@ -351,7 +372,7 @@ __global__ void macMultiKernel(std::size_t Nc, int n, int B, int nc, const int* 
     }
     for (int s = 0; s < ns; ++s)
       for (int b = 0; b < nb; ++b)
-        acc[(static_cast<std::size_t>(s0 + s) * B + b0 + b) * Nc + k] = {ar[s][b], ai[s][b]};
+        acc[static_cast<std::size_t>(s0 + s) * stride + at + b * pl] = {ar[s][b], ai[s][b]};
   }
 }
 
@@ -364,21 +385,24 @@ __device__ inline bool less(const Cand& a, const Cand& b) { return a.e < b.e || 
 constexpr int kSelThreads = 256;
 constexpr int kSelMax = 16;     // fftTopPerRot handled on the device
 constexpr int kSelSlices = 16;  // blocks per orientation
+// z planes per 2D transform call (spec 15.1.36), largest first.
+constexpr int kPlaneRuns[] = {8, 4, 2, 1};
+constexpr int kPlaneRunNum = 4;
 
 // Block (slice, orientation): the top lowest candidates of its share of the translations.
-__global__ void __launch_bounds__(kSelThreads) selectKernel(const float* real, std::size_t N, int px, int py,
+__global__ void __launch_bounds__(kSelThreads) selectKernel(const float* real, int B, std::size_t rpl, int px, int py,
                                                               const int* range, float scale, int top, Cand* part) {
   const int b = blockIdx.y, tid = threadIdx.x;
   const int* rg = range + 6 * b;
   const int wx = rg[3] - rg[0] + 1, wy = rg[4] - rg[1] + 1, wz = rg[5] - rg[2] + 1;
   const int count = wx * wy * wz;
-  const float* r = real + static_cast<std::size_t>(b) * N;
   Cand loc[kSelMax];
   int m = 0;
   for (int t = blockIdx.x * kSelThreads + tid; t < count; t += kSelSlices * kSelThreads) {
     const int i = rg[0] + t % wx, j = rg[1] + t / wx % wy, k = rg[2] + t / wx / wy;
     const unsigned long long idx = (static_cast<unsigned long long>(k) * py + j) * px + i;
-    const Cand c{r[idx] * scale, idx};
+    const float* r = real + (static_cast<std::size_t>(k) * B + b) * rpl + static_cast<std::size_t>(j) * px + i;
+    const Cand c{*r * scale, idx};
     if (m == top && !less(c, loc[m - 1])) continue;
     int p = m < top ? m++ : m - 1;
     while (p > 0 && less(c, loc[p - 1])) {
@@ -446,8 +470,20 @@ struct GpuDockPrep::Impl {
   int channels = 0;
   DevBuf<cufftComplex> spectra;
   int planBatch = 0;
-  cufftHandle r2c = 0, c2r = 0;
+  // Spec 15.1.36: 2D (y, x) transforms of runs of z planes of every orientation (plans for
+  // kPlaneRuns[i] planes each), and the transform along z of all (orientation, y, x).
+  cufftHandle r2c[kPlaneRunNum]{}, c2r[kPlaneRunNum]{}, zc = 0;
   std::size_t workBytes = 0;
+  std::size_t realPlane() const { return (static_cast<std::size_t>(pad[0]) * pad[1] + 1) & ~std::size_t{1}; }
+  std::size_t complexPlane() const { return static_cast<std::size_t>(pad[0] / 2 + 1) * pad[1]; }
+  // Per orientation of a batch.
+  std::size_t realBatch() const { return realPlane() * pad[2]; }
+  std::size_t complexBatch() const { return complexPlane() * pad[2]; }
+  std::vector<cufftHandle> handles() const {
+    std::vector<cufftHandle> h{zc};
+    for (int i = 0; i < kPlaneRunNum; ++i) h.insert(h.end(), {r2c[i], c2r[i]});
+    return h;
+  }
   DevBuf<float> real;
   DevBuf<cufftComplex> spec, acc, tables, probeSpec;
   DevBuf<char> work;
@@ -483,28 +519,82 @@ struct GpuDockPrep::Impl {
     work.release();
   }
   void destroyPlans() {
-    if (planBatch) {
-      cufftDestroy(r2c);
-      cufftDestroy(c2r);
-    }
+    if (planBatch)
+      for (cufftHandle h : handles()) cufftDestroy(h);
     planBatch = 0;
     planSets = 0;
     workBytes = 0;
   }
   void makePlans(int b) {
     destroyPlans();
-    int dims[3] = {pad[2], pad[1], pad[0]};
-    std::size_t w1 = 0, w2 = 0;
-    checkFft(cufftCreate(&r2c), "cufftCreate");
-    checkFft(cufftCreate(&c2r), "cufftCreate");
+    const int px = pad[0], py = pad[1], pz = pad[2], hx = px / 2 + 1;
+    int d2[2] = {py, px}, re[2] = {py, px}, ce[2] = {py, hx}, d1[1] = {pz};
+    const int pl = py * hx, rpl = static_cast<int>(realPlane());
     planBatch = b;
-    checkFft(cufftSetAutoAllocation(r2c, 0), "cufftSetAutoAllocation");
-    checkFft(cufftSetAutoAllocation(c2r, 0), "cufftSetAutoAllocation");
-    checkFft(cufftMakePlanMany(r2c, 3, dims, nullptr, 1, 0, nullptr, 1, 0, CUFFT_R2C, b, &w1), "plan R2C");
-    checkFft(cufftMakePlanMany(c2r, 3, dims, nullptr, 1, 0, nullptr, 1, 0, CUFFT_C2R, b, &w2), "plan C2R");
-    checkFft(cufftSetStream(r2c, stream), "cufftSetStream");
-    checkFft(cufftSetStream(c2r, stream), "cufftSetStream");
-    workBytes = std::max(w1, w2);
+    std::size_t w = 0;
+    checkFft(cufftCreate(&zc), "cufftCreate");
+    for (int i = 0; i < kPlaneRunNum; ++i) {
+      checkFft(cufftCreate(&r2c[i]), "cufftCreate");
+      checkFft(cufftCreate(&c2r[i]), "cufftCreate");
+    }
+    for (cufftHandle h : handles()) checkFft(cufftSetAutoAllocation(h, 0), "cufftSetAutoAllocation");
+    for (int i = 0; i < kPlaneRunNum; ++i) {
+      std::size_t w1 = 0, w2 = 0;
+      const int k = std::min(kPlaneRuns[i], pz);
+      checkFft(cufftMakePlanMany(r2c[i], 2, d2, re, 1, rpl, ce, 1, pl, CUFFT_R2C, k * b, &w1), "plan R2C");
+      checkFft(cufftMakePlanMany(c2r[i], 2, d2, ce, 1, pl, re, 1, rpl, CUFFT_C2R, k * b, &w2), "plan C2R");
+      w = std::max({w, w1, w2});
+    }
+    std::size_t w3 = 0;
+    checkFft(cufftMakePlanMany(zc, 1, d1, d1, b * pl, 1, d1, b * pl, 1, CUFFT_C2C, b * pl, &w3), "plan C2C");
+    for (cufftHandle h : handles()) checkFft(cufftSetStream(h, stream), "cufftSetStream");
+    workBytes = std::max(w, w3);
+  }
+  // Exact cover of the planes with mask set: (first plane, plan index), largest runs first.
+  std::vector<std::pair<int, int>> chunks(const std::vector<char>& mask) const {
+    std::vector<std::pair<int, int>> s;
+    const int pz = pad[2];
+    for (int z = 0; z < pz;) {
+      if (!mask[z]) {
+        ++z;
+        continue;
+      }
+      int len = 0;
+      while (z + len < pz && mask[z + len]) ++len;
+      for (int i = 0; len > 0;) {
+        const int k = std::min(kPlaneRuns[i], pz);
+        if (k > len) {
+          ++i;
+          continue;
+        }
+        s.push_back({z, i});
+        z += k;
+        len -= k;
+      }
+    }
+    return s;
+  }
+  // Forward transform of a batch (real -> out): 2D on the chunks (the other planes are zero), then z.
+  void forward(float* realIn, cufftComplex* out, const std::vector<std::pair<int, int>>& runs) {
+    const std::size_t B = planBatch, rp = realPlane(), cp = complexPlane();
+    int end = 0;
+    auto clear = [&](int z0, int z1) {
+      if (z1 > z0)
+        check(cudaMemsetAsync(out + z0 * B * cp, 0, (z1 - z0) * B * cp * sizeof(cufftComplex), stream), "memset");
+    };
+    for (const auto& [s, i] : runs) {
+      checkFft(cufftExecR2C(r2c[i], realIn + s * B * rp, out + s * B * cp), "R2C");
+      clear(end, s);
+      end = s + std::min(kPlaneRuns[i], pad[2]);
+    }
+    clear(end, pad[2]);
+    checkFft(cufftExecC2C(zc, out, out, CUFFT_FORWARD), "C2C");
+  }
+  // Inverse transform of a batch (in -> real, in is overwritten): z, then 2D on the chunks only.
+  void inverse(cufftComplex* in, float* realOut, const std::vector<std::pair<int, int>>& runs) {
+    const std::size_t B = planBatch, rp = realPlane(), cp = complexPlane();
+    checkFft(cufftExecC2C(zc, in, in, CUFFT_INVERSE), "C2C");
+    for (const auto& [s, i] : runs) checkFft(cufftExecC2R(c2r[i], in + s * B * cp, realOut + s * B * rp), "C2R");
   }
 
   void runFilter(FilterArgs a, int mode, std::vector<long long>& out, FilterCounts& cnt) {
@@ -664,8 +754,9 @@ int GpuDockPrep::fftBatch() {
   d.destroyPlans();
   d.releaseFftWork();
   // One set: real, probe spectrum and acc per orientation; several: real, the probe spectra and an acc per set.
-  const std::size_t per = d.sets == 1 ? d.N * sizeof(float) + 2 * d.Nc * sizeof(cufftComplex)
-                                      : d.N * sizeof(float) + static_cast<std::size_t>(d.channels + d.sets) * d.Nc * sizeof(cufftComplex);
+  const std::size_t per = d.sets == 1 ? d.realBatch() * sizeof(float) + 2 * d.complexBatch() * sizeof(cufftComplex)
+                                      : d.realBatch() * sizeof(float) +
+                                            static_cast<std::size_t>(d.channels + d.sets) * d.complexBatch() * sizeof(cufftComplex);
   const double avail = 0.5 * static_cast<double>(gpuFreeMem(d.device));
   int b = static_cast<int>(std::clamp(avail / static_cast<double>(per), 1.0, 64.0));
   for (;;) {
@@ -686,11 +777,11 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   if (d.fftIds.empty()) throw Error("fftTop: no spectra");
   if (n > fftBatch()) throw Error("fftTop: batch too large");
   const int B = d.planBatch, G = d.sets;
-  d.real.reserve(static_cast<std::size_t>(B) * d.N);
-  d.acc.reserve(static_cast<std::size_t>(G) * B * d.Nc);
+  d.real.reserve(static_cast<std::size_t>(B) * d.realBatch());
+  const std::size_t cb = static_cast<std::size_t>(B) * d.complexBatch();
+  d.acc.reserve(G * cb);
   d.work.reserve(d.workBytes);
-  checkFft(cufftSetWorkArea(d.r2c, d.work.p), "cufftSetWorkArea");
-  checkFft(cufftSetWorkArea(d.c2r, d.work.p), "cufftSetWorkArea");
+  for (cufftHandle h : d.handles()) checkFft(cufftSetWorkArea(h, d.work.p), "cufftSetWorkArea");
   d.f.upload(f, static_cast<std::size_t>(n) * probes * 3, d.stream);
   std::vector<int> rg(6 * static_cast<std::size_t>(n));
   for (int b = 0; b < n; ++b)
@@ -699,6 +790,15 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
       rg[6 * b + 3 + c] = hi[b][c];
     }
   d.ranges.upload(rg, d.stream);
+  // z planes (spec 15.1.36): those the probe atoms touch (forward) and those of the translations (inverse).
+  std::vector<char> inMask(d.pad[2], 0), outMask(d.pad[2], 0);
+  for (std::size_t i = 0; i < static_cast<std::size_t>(n) * probes; ++i) {
+    const int z = ((static_cast<int>(std::floor(f[3 * i + 2])) % d.pad[2]) + d.pad[2]) % d.pad[2];
+    inMask[z] = inMask[(z + 1) % d.pad[2]] = 1;
+  }
+  for (int b = 0; b < n; ++b)
+    for (int z = lo[b][2]; z <= hi[b][2]; ++z) outMask[z] = 1;
+  const auto inChunks = d.chunks(inMask), outChunks = d.chunks(outMask);
   // Channels as fftCorrelate: the type maps with probe atoms, then elec and desolv when charged.
   const int nt = d.channels - 2;
   std::vector<std::pair<int, std::vector<std::pair<int, float>>>> chans;
@@ -724,12 +824,13 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
     return;
   }
   const unsigned nbx = static_cast<unsigned>((d.Nc + 255) / 256);
+  const std::size_t pl = static_cast<std::size_t>(d.pad[1]) * (d.pad[0] / 2 + 1);
   if (G > 1) {
     // Several sets (spec 15.1.22): the probe spectrum of each channel once (FFT of the spread
     // atoms), then the products with every set.
     const int nc = static_cast<int>(chans.size());
-    d.probeSpec.reserve(static_cast<std::size_t>(nc) * B * d.Nc);
-    check(cudaMemsetAsync(d.real.p, 0, static_cast<std::size_t>(B) * d.N * sizeof(float), d.stream), "memset");
+    d.probeSpec.reserve(nc * cb);
+    check(cudaMemsetAsync(d.real.p, 0, static_cast<std::size_t>(B) * d.realBatch() * sizeof(float), d.stream), "memset");
     std::vector<int> cm;
     for (int c = 0; c < nc; ++c) {
       const auto& list = chans[c].second;
@@ -744,17 +845,17 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
       d.wts.upload(wt, d.stream);
       const long long ns = static_cast<long long>(n) * static_cast<long long>(at.size());
       const unsigned nsb = static_cast<unsigned>((ns + 255) / 256);
-      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
-                                 d.pad[2], d.real.p, d.N, 0);
+      spreadKernel<<<static_cast<unsigned>((static_cast<long long>(n) * d.pad[2] + 127) / 128), 128, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0],
+                                                     d.pad[1], d.pad[2], d.real.p, B, d.realPlane());
       check(cudaGetLastError(), "spreadKernel launch");
-      checkFft(cufftExecR2C(d.r2c, d.real.p, d.probeSpec.p + static_cast<std::size_t>(c) * B * d.Nc), "R2C");
-      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
-                                 d.pad[2], d.real.p, d.N, 1);
-      check(cudaGetLastError(), "spreadKernel (clear) launch");
+      d.forward(d.real.p, d.probeSpec.p + c * cb, inChunks);
+      clearKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
+                                d.pad[2], d.real.p, B, d.realPlane());
+      check(cudaGetLastError(), "clearKernel launch");
     }
     d.groupMap.upload(cm, d.stream);
     macMultiKernel<<<dim3(nbx, static_cast<unsigned>((n + kMacB - 1) / kMacB)), 256, 0, d.stream>>>(
-        d.Nc, n, B, nc, d.groupMap.p, d.probeSpec.p, d.spectra.p, d.channels, G, d.acc.p);
+        d.Nc, pl, cb, n, B, nc, d.groupMap.p, d.probeSpec.p, d.spectra.p, d.channels, G, d.acc.p);
     check(cudaGetLastError(), "macMultiKernel launch");
   } else if (d.directSpectra(probes, static_cast<int>(chans.size()))) {
     // Direct probe spectra, all channels fused.
@@ -784,12 +885,12 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
     const long long nthr = static_cast<long long>(d.pad[0] / 2 + 1) * d.pad[1] * ((d.pad[2] + kDirectZ - 1) / kDirectZ);
     const dim3 grid(static_cast<unsigned>((nthr + 127) / 128), static_cast<unsigned>((n + kDirectOrients - 1) / kDirectOrients));
     directKernel<<<grid, 128, 0, d.stream>>>(n, probes, d.pad[0], d.pad[1], d.pad[2], d.tables.p, d.spectra.p, d.Nc, nt,
-                                static_cast<int>(gm.size()), d.groupMap.p, d.groupStart.p, d.atoms.p, d.wts.p, d.acc.p);
+                                static_cast<int>(gm.size()), d.groupMap.p, d.groupStart.p, d.atoms.p, d.wts.p, B, d.acc.p);
     check(cudaGetLastError(), "directKernel launch");
   } else {
     // FFT of the spread atoms per channel; the touched points are cleared after each one.
-    d.spec.reserve(static_cast<std::size_t>(B) * d.Nc);
-    check(cudaMemsetAsync(d.real.p, 0, static_cast<std::size_t>(B) * d.N * sizeof(float), d.stream), "memset");
+    d.spec.reserve(cb);
+    check(cudaMemsetAsync(d.real.p, 0, static_cast<std::size_t>(B) * d.realBatch() * sizeof(float), d.stream), "memset");
     bool first = true;
     for (const auto& [m, list] : chans) {
       std::vector<int> at;
@@ -802,14 +903,14 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
       d.wts.upload(wt, d.stream);
       const long long ns = static_cast<long long>(n) * static_cast<long long>(at.size());
       const unsigned nsb = static_cast<unsigned>((ns + 255) / 256);
-      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
-                                 d.pad[2], d.real.p, d.N, 0);
+      spreadKernel<<<static_cast<unsigned>((static_cast<long long>(n) * d.pad[2] + 127) / 128), 128, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0],
+                                                     d.pad[1], d.pad[2], d.real.p, B, d.realPlane());
       check(cudaGetLastError(), "spreadKernel launch");
-      checkFft(cufftExecR2C(d.r2c, d.real.p, d.spec.p), "R2C");
-      spreadKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
-                                 d.pad[2], d.real.p, d.N, 1);
-      check(cudaGetLastError(), "spreadKernel (clear) launch");
-      macKernel<<<dim3(nbx, static_cast<unsigned>(n)), 256, 0, d.stream>>>(d.Nc, d.spec.p, d.spectra.p + static_cast<std::size_t>(m) * d.Nc,
+      d.forward(d.real.p, d.spec.p, inChunks);
+      clearKernel<<<nsb, 256, 0, d.stream>>>(n, static_cast<int>(at.size()), d.atoms.p, d.wts.p, probes, d.f.p, d.pad[0], d.pad[1],
+                                d.pad[2], d.real.p, B, d.realPlane());
+      check(cudaGetLastError(), "clearKernel launch");
+      macKernel<<<dim3(nbx, static_cast<unsigned>(n)), 256, 0, d.stream>>>(d.Nc, pl, B, d.spec.p, d.spectra.p + static_cast<std::size_t>(m) * d.Nc,
                                                               d.acc.p, first ? 1 : 0);
       check(cudaGetLastError(), "macKernel launch");
       first = false;
@@ -825,15 +926,15 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
   std::vector<float> e;
   std::vector<std::pair<float, std::size_t>> best;
   for (int g = 0; g < G; ++g) {
-    cufftComplex* acc = d.acc.p + static_cast<std::size_t>(g) * B * d.Nc;
+    cufftComplex* acc = d.acc.p + g * cb;
     // Orientations beyond n: their spectra are cleared (the plan transforms B of them).
     if (n < B)
-      check(cudaMemsetAsync(acc + static_cast<std::size_t>(n) * d.Nc, 0, static_cast<std::size_t>(B - n) * d.Nc * sizeof(cufftComplex),
-                            d.stream),
+      check(cudaMemset2DAsync(acc + n * pl, B * pl * sizeof(cufftComplex), 0, (B - n) * pl * sizeof(cufftComplex), d.pad[2],
+                              d.stream),
             "memset");
-    checkFft(cufftExecC2R(d.c2r, acc, d.real.p), "C2R");
+    d.inverse(acc, d.real.p, outChunks);
     if (top <= kSelMax) {
-      selectKernel<<<dim3(kSelSlices, static_cast<unsigned>(n)), kSelThreads, 0, d.stream>>>(d.real.p, d.N, d.pad[0], d.pad[1],
+      selectKernel<<<dim3(kSelSlices, static_cast<unsigned>(n)), kSelThreads, 0, d.stream>>>(d.real.p, B, d.realPlane(), d.pad[0], d.pad[1],
                                                                                d.ranges.p, scale, top, d.part.p);
       check(cudaGetLastError(), "selectKernel launch");
       mergeKernel<<<(n + 63) / 64, 64, 0, d.stream>>>(n, top, d.part.p, d.outC.p + static_cast<std::size_t>(g) * outN);
@@ -843,8 +944,9 @@ void GpuDockPrep::fftTop(int n, int probes, const double* f, const int* map, con
     // Larger fftTopPerRot: selection on the host (as fftSelect).
     e.resize(d.N);
     for (int b = 0; b < n; ++b) {
-      check(cudaMemcpyAsync(e.data(), d.real.p + static_cast<std::size_t>(b) * d.N, d.N * sizeof(float), cudaMemcpyDeviceToHost,
-                            d.stream),
+      const std::size_t rp = static_cast<std::size_t>(d.pad[1]) * d.pad[0], rpl = d.realPlane();
+      check(cudaMemcpy2DAsync(e.data(), rp * sizeof(float), d.real.p + b * rpl, B * rpl * sizeof(float), rp * sizeof(float), d.pad[2],
+                              cudaMemcpyDeviceToHost, d.stream),
             "download");
       check(cudaStreamSynchronize(d.stream), "cudaStreamSynchronize");
       best.clear();
