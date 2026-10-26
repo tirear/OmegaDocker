@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <thread>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -3566,7 +3567,7 @@ TEST_CASE("sysmem: cgroup memory limit, resident memory and MemAvailable") {
   fs::remove_all(root);
 }
 
-TEST_CASE("sysmem: cgroup CPU quota, CPU order by core, CPU list text") {
+TEST_CASE("sysmem: cgroup CPU quota, CPU order by core, CPU list text, cpu.threadNum limit") {
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / std::format("od_test_cgcpu_{}", ::getpid());
   fs::remove_all(root);
@@ -3614,6 +3615,23 @@ TEST_CASE("sysmem: cgroup CPU quota, CPU order by core, CPU list text") {
   CHECK(od::cpuListText({0, 1, 2, 3, 8, 10, 11}) == "0-3,8,10-11");
   CHECK(od::cpuListText({}) == "unknown");
   fs::remove_all(root);
+  // cpu.threadNum above the CPUs this process may use: the error names the limit and its sources.
+  od::CpuLimit l;
+  l.cpus = {0, 1, 2, 3, 4, 5, 6, 7};
+  l.count = 8;
+  CHECK(od::cpuThreadsError(8, l).empty());
+  CHECK(od::cpuThreadsError(9, l) ==
+        "cpu.threadNum 9 is more than the 8 CPU(s) this process may use (affinity mask: 8 CPU(s) 0-7; no cgroup CPU quota)");
+  l.quota = 3;
+  l.quotaSource = "/sys/fs/cgroup/cpu.max";
+  l.count = 3;
+  CHECK(od::cpuThreadsError(3, l).empty());
+  CHECK(od::cpuThreadsError(4, l) == "cpu.threadNum 4 is more than the 3 CPU(s) this process may use (affinity mask: 8 CPU(s) "
+                                     "0-7; cgroup CPU quota 3 (/sys/fs/cgroup/cpu.max))");
+  CHECK(od::cpuThreadsError(100, od::CpuLimit{}).empty());
+  const od::CpuLimit real = od::cpuLimit();
+  CHECK(real.count > 0);
+  CHECK_THROWS_WITH_AS(od::applyCpuThreads(real.count + 1), doctest::Contains("CPU(s) this process may use"), od::Error);
 }
 
 TEST_CASE("runBatchedAsync: every task completes; submit and complete alternate per group") {
@@ -5746,8 +5764,140 @@ TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
                           ss.size(), fs.fields[s].first, top, stride, cc[s].fftPoses.size(), same, worst));
       CHECK(same >= cc[s].fftPoses.size() * 9 / 10);
     }
+    // The orientations divided among two evaluators (spec 15.1.35): the same as one.
+    {
+      const int dev1 = od::gpuDeviceCount() > 1 ? 1 : 0;
+      // The probe spectra as ev (FFT, the last mode set above).
+      std::vector<std::unique_ptr<od::GpuPoseEvaluator>> evs;
+      for (int d : {0, dev1}) {
+        auto pr = std::make_shared<od::GpuDockPrep>(d);
+        pr->setSpectra(od::GpuDockPrep::Spectra::Fft);
+        evs.push_back(std::make_unique<od::GpuPoseEvaluator>(fs.x.mobSys->model(), std::make_shared<od::GpuField>(d), d, 1024, pr));
+      }
+      od::MultiGpuPoseEvaluator multi(std::move(evs));
+      od::Dock9bParams pm = p;
+      pm.evaluator = &multi;
+      std::vector<const od::MobmDocker*> dkm;
+      for (std::size_t s = 0; s < ss.size(); ++s) {
+        own.push_back(std::make_unique<od::MobmDocker>(*fs.x.mobSys, fs.fields[s].second, pm, nullptr, &ss[s]));
+        dkm.push_back(own.back().get());
+      }
+      const auto cm = od::MobmDocker::conformations(dkm, angles);
+      for (std::size_t s = 0; s < ss.size(); ++s) {
+        REQUIRE(cm[s].fftPoses.size() == cg[s].fftPoses.size());
+        std::size_t same = 0;
+        for (std::size_t k = 0; k < cg[s].fftPoses.size(); ++k)
+          same += cm[s].fftPoses[k].t == cg[s].fftPoses[k].t && cm[s].fftPoses[k].q.w == cg[s].fftPoses[k].q.w &&
+                  cm[s].fftEnergy[k] == cg[s].fftEnergy[k];
+        CHECK(same == cg[s].fftPoses.size());
+      }
+      multi.idle();
+    }
   }
   ev.idle();
+}
+
+// Minimizations taken over by another device (spec 15.1.35): the poses given away by a running
+// kernel (GpuEnergy::stealDock) and minimized elsewhere give the results of one call; with two
+// devices, DockStealHub between evaluators.
+TEST_CASE("gpu: 9b minimizations taken over by another device give the same results") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FieldSet fs;
+  const int nt = fs.x.mobSys->torsionCount();
+  const auto& field = fs.fields[0].second;
+  od::Dock9bParams p = fs.p;
+  p.minimizer.maxSteps = 300;
+  const od::MobmDocker dk(*fs.x.mobSys, field, p);
+  const auto c = dk.conformation(fs.x.mobSys->inputAngles());
+  const auto base = filteredPoses(dk, c, 400);
+  // Enough poses for the kernel to run while the requests arrive.
+  std::vector<od::PoseRequest> req;
+  for (int rep = 0; rep < 40; ++rep)
+    for (const auto& ps : base) req.push_back({ps, c.center, c.anglesDeg.data()});
+  const int n = static_cast<int>(req.size());
+  const auto e = [](const od::DockMinResult& r) {
+    return static_cast<double>(r.terms.vdw + r.terms.hbond + r.terms.elec + r.terms.desolv + r.dterms.inter);
+  };
+  std::vector<od::DockMinResult> r0(n);
+  std::vector<float> a0(static_cast<std::size_t>(n) * nt);
+  {
+    od::GpuPoseEvaluator ev(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, n);
+    ev.bind(dk);
+    REQUIRE(ev.minimize(n, req.data(), dk.deviceMinParams(), r0.data(), a0.data()));
+  }
+  const auto compare = [&](const std::vector<od::DockMinResult>& r, const char* what) {
+    int ok = 0, same = 0;
+    for (int i = 0; i < n; ++i) {
+      CHECK(r[i].ok == r0[i].ok);
+      ok += r0[i].ok != 0;
+      same += r0[i].ok && std::abs(e(r[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
+    }
+    MESSAGE(std::format("{}: {} minimized, same energy {}", what, ok, same));
+    CHECK(same >= ok * 9 / 10);
+  };
+  // GpuEnergy: a request while the kernel runs gives away a tail; [0, end) from the call.
+  {
+    od::GpuPoseEvaluator owner(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, n);
+    od::GpuPoseEvaluator helper(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, n);
+    owner.bind(dk);
+    helper.bind(dk);
+    // Nothing runs: no poses.
+    CHECK(owner.energy().stealDock(0.5, 1) == std::pair{0, 0});
+    std::vector<od::DockMinResult> r(n);
+    std::vector<float> a(static_cast<std::size_t>(n) * nt);
+    auto hub = std::make_shared<od::DockStealHub>();
+    owner.setSteal(hub, 0);
+    std::pair<int, int> got{0, 0};
+    std::thread th([&] {
+      int taken = 0, end = 0;
+      double sec = 0;
+      while (!owner.energy().dockProgress(taken, end, sec) || taken == 0) std::this_thread::sleep_for(std::chrono::microseconds(50));
+      CHECK(end == n);
+      got = owner.energy().stealDock(0.5, 1);
+      if (got.first < got.second)
+        REQUIRE(helper.minimize(got.second - got.first, req.data() + got.first, dk.deviceMinParams(), r.data() + got.first,
+                                a.data() + static_cast<std::size_t>(got.first) * nt));
+    });
+    REQUIRE(owner.minimize(n, req.data(), dk.deviceMinParams(), r.data(), a.data()));
+    th.join();
+    MESSAGE(std::format("stealDock: poses [{}, {}) of {}", got.first, got.second, n));
+    CHECK(got.first > 0);
+    CHECK(got.second == n);
+    CHECK(got.first < n);
+    compare(r, "stealDock");
+  }
+  if (od::gpuDeviceCount() < 2) {
+    MESSAGE("one CUDA device; DockStealHub between devices skipped");
+    return;
+  }
+  // DockStealHub: device 1 takes over poses of the call on device 0.
+  {
+    auto hub = std::make_shared<od::DockStealHub>();
+    od::GpuPoseEvaluator owner(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, n);
+    od::GpuPoseEvaluator helper(fs.x.mobSys->model(), std::make_shared<od::GpuField>(1), 1, n);
+    owner.setSteal(hub, 0);
+    helper.setSteal(hub, 0);
+    owner.bind(dk);
+    std::vector<od::DockMinResult> r(n);
+    std::vector<float> a(static_cast<std::size_t>(n) * nt);
+    std::atomic<bool> done{false};
+    std::thread th([&] {
+      while (!done.load())
+        if (!hub->helpOnce(1, [&](int) { return &helper; })) hub->wait(1);
+    });
+    REQUIRE(owner.minimize(n, req.data(), dk.deviceMinParams(), r.data(), a.data()));
+    done = true;
+    th.join();
+    const auto st = hub->stats();
+    MESSAGE(std::format("DockStealHub: {} poses taken over in {} part(s)", st.poses, st.steals));
+    CHECK(st.steals >= 1);
+    CHECK(st.poses > 0);
+    CHECK(!hub->anyCall());
+    compare(r, "DockStealHub");
+  }
 }
 
 TEST_CASE("gpu: energy grids equal the CPU grids") {

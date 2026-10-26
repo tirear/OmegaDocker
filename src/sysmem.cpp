@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include "sysmem.hpp"
+#include "error.hpp"
+#include <format>
 
 #include <algorithm>
 #include <cmath>
@@ -170,24 +172,46 @@ std::vector<int> orderCpusByCore(std::vector<int> cpus, const std::string& sysCp
   return cpus;
 }
 
-CpuThreads applyCpuThreads(long long n) {
-  std::vector<int> avail;
+CpuLimit cpuLimit() {
+  CpuLimit l;
   cpu_set_t set;
   CPU_ZERO(&set);
   if (sched_getaffinity(0, sizeof(set), &set) == 0)
     for (int c = 0; c < CPU_SETSIZE; ++c)
-      if (CPU_ISSET(c, &set)) avail.push_back(c);
+      if (CPU_ISSET(c, &set)) l.cpus.push_back(c);
+  l.quota = cgroupCpuLimit(&l.quotaSource);
+  l.count = static_cast<int>(l.cpus.size());
+  if (l.quota && (l.count == 0 || *l.quota < l.count)) l.count = *l.quota;
+  return l;
+}
+
+std::string cpuThreadsError(long long n, const CpuLimit& l) {
+  if (l.count <= 0 || n <= l.count) return {};
+  std::string s = std::format("cpu.threadNum {} is more than the {} CPU(s) this process may use (affinity mask: ", n, l.count);
+  s += l.cpus.empty() ? std::string("unknown") : std::format("{} CPU(s) {}", l.cpus.size(), cpuListText(l.cpus));
+  s += l.quota ? std::format("; cgroup CPU quota {} ({})", *l.quota, l.quotaSource) : std::string("; no cgroup CPU quota");
+  return s + ")";
+}
+
+CpuThreads applyCpuThreads(long long n) {
+  const CpuLimit l = cpuLimit();
+  const std::vector<int>& avail = l.cpus;
+  cpu_set_t set;
   CpuThreads r;
   if (n > 0) {
-    r.threads = static_cast<int>(std::min<long long>(n, 1 << 20));
+    if (const std::string e = cpuThreadsError(n, l); !e.empty()) throw Error(e);
+    r.threads = static_cast<int>(n);
     r.source = "cpu.threadNum";
   } else {
     r.threads = omp_get_max_threads();
     r.source = std::getenv("OMP_NUM_THREADS") ? "OMP_NUM_THREADS" : "affinity mask";
-    std::string src;
-    if (const auto q = cgroupCpuLimit(&src); q && *q < r.threads) {
-      r.threads = *q;
-      r.source = "cgroup " + src;
+    if (l.quota && *l.quota < r.threads) {
+      r.threads = *l.quota;
+      r.source = "cgroup " + l.quotaSource;
+    }
+    if (!avail.empty() && r.threads > static_cast<int>(avail.size())) {
+      r.threads = static_cast<int>(avail.size());
+      r.source = "affinity mask";
     }
   }
   r.cpus = avail;

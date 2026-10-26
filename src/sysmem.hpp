@@ -53,10 +53,22 @@ struct CpuThreads {
   std::vector<int> cpus;  // the CPUs this process is bound to (sched_setaffinity)
 };
 
-// cpu.threadNum: n > 0, otherwise (auto) omp_get_max_threads() (OMP_NUM_THREADS or the CPUs of the
-// affinity mask) limited by the cgroup CPU quota. Sets the OpenMP and thread pool thread count and,
-// when fewer than the CPUs of the affinity mask, binds the process to the first of them
-// (orderCpusByCore). Call before any parallel work.
+// The CPUs this process may use: those of the affinity mask, at most the cgroup CPU quota.
+struct CpuLimit {
+  int count = 0;          // 0: unknown
+  std::vector<int> cpus;  // affinity mask
+  std::optional<int> quota;
+  std::string quotaSource;
+};
+CpuLimit cpuLimit();
+
+// Error text when n threads exceed the limit; empty when within it (or the limit is unknown).
+std::string cpuThreadsError(long long n, const CpuLimit& l);
+
+// cpu.threadNum: n > 0 (more than cpuLimit() → Error), otherwise (auto) omp_get_max_threads()
+// (OMP_NUM_THREADS or the CPUs of the affinity mask) limited by cpuLimit(). Sets the OpenMP and
+// thread pool thread count and, when fewer than the CPUs of the affinity mask, binds the process to
+// the first of them (orderCpusByCore). Call before any parallel work.
 CpuThreads applyCpuThreads(long long n);
 
 // "0-3,8": the CPUs as ranges.

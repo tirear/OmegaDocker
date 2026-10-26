@@ -8,6 +8,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <cmath>
 #include <string>
@@ -666,6 +669,14 @@ __host__ __device__ inline std::size_t minWorkDoubles(int ng, int nt, int mem) {
 }
 __host__ __device__ inline std::size_t minWorkWords(int nt) { return 2 * static_cast<std::size_t>(nt); }
 
+// Requests of stealDock in mapped host memory (spec 15.1.35): req and the parameters written by the
+// host, the reply (seq = req, newEnd, oldEnd) and taken by the kernel.
+struct DockSteal {
+  volatile int req, giveMin;
+  volatile float frac;
+  volatile int reply, newEnd, oldEnd, taken;
+};
+
 struct DockMinArgs {
   DockMinParams p;
   const DockMinStart* starts;
@@ -674,7 +685,11 @@ struct DockMinArgs {
   float* anglesOut;  // n × nt: angles of the result
   double* work;
   float* fwork;
-  int* next;  // sample counter
+  // Sample counter: low 32 bits the next sample, high 32 bits the end (the samples from the end on
+  // were given away, spec 15.1.35).
+  unsigned long long* next;
+  DockSteal* steal;  // mapped host memory (null: no stealing)
+  int* stealSeen;    // the last request handled
   int n;
   int scalarOff;  // >= 0: the scalars (minScalarDoubles) in dynamic shared memory from this byte offset
 };
@@ -835,7 +850,36 @@ __global__ void __launch_bounds__(NT) minimizeDockKernel(EnergyModelView m, Pair
     sAngT = sAngB + nt;
   }
   for (;;) {
-    if (tid == 0) sIdx = atomicAdd(a.next, 1);
+    if (tid == 0) {
+      if (a.steal) {
+        const int r = a.steal->req;
+        const int seen = *reinterpret_cast<volatile int*>(a.stealSeen);
+        if (r != seen && atomicCAS(a.stealSeen, seen, r) == seen) {
+          // Gives away the last part of the untaken samples.
+          unsigned long long old = *reinterpret_cast<volatile unsigned long long*>(a.next);
+          int ne, oe;
+          for (;;) {
+            const int s0 = static_cast<int>(old & 0xffffffffULL);
+            oe = static_cast<int>(old >> 32);
+            const int give = oe > s0 ? static_cast<int>(static_cast<float>(oe - s0) * a.steal->frac) : 0;
+            ne = give >= a.steal->giveMin && give > 0 ? oe - give : oe;
+            if (ne == oe) break;
+            const unsigned long long nw = (static_cast<unsigned long long>(ne) << 32) | (old & 0xffffffffULL);
+            const unsigned long long got = atomicCAS(a.next, old, nw);
+            if (got == old) break;
+            old = got;
+          }
+          a.steal->newEnd = ne;
+          a.steal->oldEnd = oe;
+          __threadfence_system();
+          a.steal->reply = r;
+        }
+      }
+      const unsigned long long old = atomicAdd(a.next, 1ULL);
+      const int s0 = static_cast<int>(old & 0xffffffffULL), e0 = static_cast<int>(old >> 32);
+      sIdx = s0 < e0 ? s0 : a.n;
+      if (a.steal && s0 < e0) a.steal->taken = s0 + 1;
+    }
     __syncthreads();
     const int s = sIdx;
     if (s >= a.n) return;
@@ -2056,10 +2100,20 @@ struct GpuEnergy::Impl {
   // Whole 9b minimizations (spec 15.1.26) on the stream of lane 0.
   DevBuf<double> minWork;
   DevBuf<float> minFwork;
-  DevBuf<int> minNext;
+  DevBuf<unsigned long long> minNext;
+  DevBuf<int> stealSeen;
+  PinnedBuf nextHost;  // [0] the initial counter, [1] the final one
+  // Stealing (spec 15.1.35): stealHost in mapped host memory; stealMutex serializes the requests.
+  DockSteal* stealHost = nullptr;
+  int stealSeq = 0;
+  std::mutex stealMutex;
+  mutable std::mutex runMutex;
+  bool running = false;  // runMutex
+  std::chrono::steady_clock::time_point runStart;
   cudaEvent_t minDone = nullptr;
   ~Impl() {
     if (minDone) cudaEventDestroy(minDone);
+    if (stealHost) cudaFreeHost(stealHost);
   }
 
   template <int Dock, int NT>
@@ -2124,7 +2178,8 @@ struct GpuEnergy::Impl {
     args.work = minWork.p;
     args.fwork = minFwork.p;
     args.next = minNext.p;
-    check(cudaMemsetAsync(minNext.p, 0, sizeof(int), L.stream), "memset");
+    reinterpret_cast<unsigned long long*>(nextHost.p)[0] = static_cast<unsigned long long>(n) << 32;
+    check(cudaMemcpyAsync(minNext.p, nextHost.p, sizeof(unsigned long long), cudaMemcpyHostToDevice, L.stream), "upload");
     TorsionData<float> td{axisF.p, tParent.p, tDeep.p, nullptr, tRounds, tor ? 1 : 0, tor ? 1 : 0};
     setGradientPlan(td);
     PairData<float> pdl = pairData<float>();
@@ -2134,9 +2189,10 @@ struct GpuEnergy::Impl {
     check(cudaGetLastError(), "minimizeDockKernel launch");
   }
 
-  void minimizeDock(const GpuField::Impl& f, const DockMinParams& p, const DockMinStart* hStarts,
-                    const double* hAngles, int n, DockMinResult* hOut, float* hAnglesOut) {
-    if (n <= 0) return;
+  int minimizeDock(const GpuField::Impl& f, const DockMinParams& p, const DockMinStart* hStarts,
+                   const double* hAngles, int n, DockMinResult* hOut, float* hAnglesOut, bool stealable) {
+    if (n <= 0) return 0;
+    nextHost.reserve(3 * sizeof(unsigned long long));
     if (f.current < 0) throw Error("minimizeDock: no field");
     if (p.memory < 1 || p.memory > kDeviceLbfgsMaxMemory) throw Error("minimizeDock: L-BFGS memory outside 1 to " + std::to_string(kDeviceLbfgsMaxMemory));
     check(cudaSetDevice(device), "cudaSetDevice");
@@ -2164,7 +2220,28 @@ struct GpuEnergy::Impl {
     dv.fields = other ? f.views.p : nullptr;
     DockMinArgs args{p, reinterpret_cast<const DockMinStart*>(L.in.p), reinterpret_cast<const double*>(L.in.p + iAngles),
                      reinterpret_cast<DockMinResult*>(L.out.p), reinterpret_cast<float*>(L.out.p + oAngles),
-                     nullptr, nullptr, nullptr, n, -1};
+                     nullptr, nullptr, nullptr, nullptr, nullptr, n, -1};
+    if (stealable) {
+      if (!stealHost) {
+        check(cudaHostAlloc(reinterpret_cast<void**>(&stealHost), sizeof(DockSteal), cudaHostAllocMapped | cudaHostAllocPortable),
+              "cudaHostAlloc");
+        stealHost->req = stealHost->reply = 0;
+        stealSeen.reserve(1);
+      }
+      void* dp = nullptr;
+      check(cudaHostGetDevicePointer(&dp, stealHost, 0), "cudaHostGetDevicePointer");
+      args.steal = static_cast<DockSteal*>(dp);
+      args.stealSeen = stealSeen.p;
+      std::lock_guard lk(runMutex);
+      stealHost->taken = 0;
+      stealHost->oldEnd = stealHost->newEnd = n;
+      // Requests before this call are not answered.
+      int* const seen = reinterpret_cast<int*>(reinterpret_cast<unsigned long long*>(nextHost.p) + 2);
+      *seen = stealSeq;
+      check(cudaMemcpyAsync(stealSeen.p, seen, sizeof(int), cudaMemcpyHostToDevice, L.stream), "upload");
+      running = true;
+      runStart = std::chrono::steady_clock::now();
+    }
     const auto run = [&]<int D>() {
       switch (blockThreads(view, dv.probeCount)) {
         case 32: minimizeNT<D, 32>(L, dv, args, n); break;
@@ -2176,12 +2253,61 @@ struct GpuEnergy::Impl {
     if (other) run.template operator()<2>();
     else run.template operator()<1>();
     check(cudaMemcpyAsync(L.hOut.p, L.out.p, outBytes, cudaMemcpyDeviceToHost, L.stream), "download");
+    unsigned long long* const nh = reinterpret_cast<unsigned long long*>(nextHost.p);
+    check(cudaMemcpyAsync(nh + 1, minNext.p, sizeof(unsigned long long), cudaMemcpyDeviceToHost, L.stream), "download");
     // The calling thread sleeps until the kernel ends (no spinning on the CPU).
     if (!minDone) check(cudaEventCreateWithFlags(&minDone, cudaEventBlockingSync | cudaEventDisableTiming), "cudaEventCreate");
     check(cudaEventRecord(minDone, L.stream), "cudaEventRecord");
-    check(cudaEventSynchronize(minDone), "minimizeDockKernel");
-    std::copy_n(reinterpret_cast<const DockMinResult*>(L.hOut.p), nn, hOut);
-    std::copy_n(reinterpret_cast<const float*>(L.hOut.p + oAngles), nn * nt, hAnglesOut);
+    const cudaError_t e = cudaEventSynchronize(minDone);
+    if (stealable) {
+      std::lock_guard lk(runMutex);
+      running = false;
+    }
+    check(e, "minimizeDockKernel");
+    const std::size_t end = std::min(nn, static_cast<std::size_t>(nh[1] >> 32));
+    std::copy_n(reinterpret_cast<const DockMinResult*>(L.hOut.p), end, hOut);
+    std::copy_n(reinterpret_cast<const float*>(L.hOut.p + oAngles), end * nt, hAnglesOut);
+    return static_cast<int>(end);
+  }
+
+  std::pair<int, int> stealDock(double frac, int giveMin) {
+    std::lock_guard sl(stealMutex);
+    int seq;
+    {
+      std::lock_guard lk(runMutex);
+      if (!running) return {0, 0};
+      stealHost->frac = static_cast<float>(frac);
+      stealHost->giveMin = std::max(1, giveMin);
+      seq = ++stealSeq;
+      std::atomic_thread_fence(std::memory_order_seq_cst);
+      stealHost->req = seq;
+    }
+    for (;;) {
+      bool run;
+      {
+        std::lock_guard lk(runMutex);
+        run = running;
+      }
+      std::atomic_thread_fence(std::memory_order_seq_cst);
+      if (stealHost->reply == seq) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        const int ne = stealHost->newEnd, oe = stealHost->oldEnd;
+        return ne < oe ? std::pair{ne, oe} : std::pair{0, 0};
+      }
+      // The kernel ended before taking another sample: nothing given away.
+      if (!run) return {0, 0};
+      std::this_thread::sleep_for(std::chrono::microseconds(20));
+    }
+  }
+
+  bool dockProgress(int& taken, int& end, double& seconds) const {
+    std::lock_guard lk(runMutex);
+    if (!running) return false;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    taken = stealHost->taken;
+    end = stealHost->newEnd;
+    seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - runStart).count();
+    return true;
   }
 };
 
@@ -2245,10 +2371,14 @@ void GpuEnergy::completeDock(int lane, FlatTerms* terms, DockTerms* dterms, doub
   impl_->completeDock(lane, terms, dterms, grad);
 }
 
-void GpuEnergy::minimizeDock(const GpuField& field, const DockMinParams& p, const DockMinStart* starts,
-                             const double* anglesDeg, int n, DockMinResult* out, float* anglesOut) {
-  impl_->minimizeDock(*field.impl_, p, starts, anglesDeg, n, out, anglesOut);
+int GpuEnergy::minimizeDock(const GpuField& field, const DockMinParams& p, const DockMinStart* starts,
+                            const double* anglesDeg, int n, DockMinResult* out, float* anglesOut, bool stealable) {
+  return impl_->minimizeDock(*field.impl_, p, starts, anglesDeg, n, out, anglesOut, stealable);
 }
+
+std::pair<int, int> GpuEnergy::stealDock(double frac, int giveMin) { return impl_->stealDock(frac, giveMin); }
+
+bool GpuEnergy::dockProgress(int& taken, int& end, double& seconds) const { return impl_->dockProgress(taken, end, seconds); }
 
 std::size_t GpuEnergy::bytesPerSampleDock() const {
   return bytesPerSample(false, true) + sizeof(DockPose) + sizeof(DockTerms) + 6 * sizeof(double);

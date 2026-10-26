@@ -4,8 +4,13 @@
 
 #pragma once
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <thread>
 #include <vector>
@@ -17,6 +22,75 @@
 #include "prep_gpu.hpp"
 
 namespace od {
+
+class GpuPoseEvaluator;
+
+// Whole 9b minimizations taken over by other devices (spec 15.1.35): each running minimize of an
+// evaluator with a hub is a call; an idle device (helpOnce) takes the last untaken poses of the
+// call with the longest expected remaining time from its kernel and minimizes them with its own
+// evaluator of the same MobM (key), writing the results into the call's output.
+class DockStealHub {
+ public:
+  struct Call {
+    GpuPoseEvaluator* ev = nullptr;
+    int device = 0, key = 0;
+    const PoseRequest* req = nullptr;
+    DockMinParams p{};
+    DockMinResult* out = nullptr;
+    float* anglesOut = nullptr;
+    std::size_t nt = 0;
+    int n = 0;
+    std::vector<const MobmDocker*> dks;
+    int pending = 0;            // steals in progress
+    bool closed = false;        // the kernel ended
+    bool dry = false;           // a steal got nothing
+    std::exception_ptr error;   // of a helper
+  };
+  void add(Call& c) {
+    {
+      std::lock_guard lk(m_);
+      calls_.push_back(&c);
+    }
+    cv_.notify_all();
+  }
+  // After the call's kernel: waits for its steals; rethrows a helper's error.
+  void finish(Call& c) {
+    std::unique_lock lk(m_);
+    c.closed = true;
+    cv_.wait(lk, [&] { return c.pending == 0; });
+    calls_.erase(std::find(calls_.begin(), calls_.end(), &c));
+    lk.unlock();
+    cv_.notify_all();
+    if (c.error) std::rethrow_exception(c.error);
+  }
+  // One steal for device (evaluators ev(key)); false when no call is worth it.
+  bool helpOnce(int device, const std::function<GpuPoseEvaluator*(int)>& ev);
+  // Waits for a change of the calls, at most ms.
+  void wait(int ms) {
+    std::unique_lock lk(m_);
+    cv_.wait_for(lk, std::chrono::milliseconds(ms));
+  }
+  bool anyCall() {
+    std::lock_guard lk(m_);
+    return !calls_.empty();
+  }
+  struct Stats {
+    long long steals = 0, poses = 0;
+    double bindSeconds = 0;
+    std::size_t bindBytes = 0;
+  };
+  Stats stats() {
+    std::lock_guard lk(m_);
+    return stats_;
+  }
+
+ private:
+  std::mutex m_;
+  std::condition_variable cv_;
+  std::vector<Call*> calls_;
+  Stats stats_;
+  double bandwidth_ = 6e9;  // bytes/s of binding the fields on another device (measured)
+};
 
 // 9b pose energies of one MobM on a GPU (spec 15.1.4); field is shared by the MobMs.
 // prep (optional, shared by the MobMs): the quick filter and posm2_fft on the GPU (spec 15.1.5).
@@ -43,8 +117,33 @@ class GpuPoseEvaluator : public PoseEvaluator {
   void bind(const MobmDocker& dk) override {
     if (!field_->touch(dk.field().id())) field_->set(dk.field().model());
     slot_.assign(1, std::max(0, field_->slotOf(dk.field().id())));
+    bound_.assign(1, &dk);
     setup(dk, dk.field().id());
   }
+  int device() const { return device_; }
+  // Minimizations taken over by other devices (spec 15.1.35); key: the evaluators of the same MobM.
+  void setSteal(std::shared_ptr<DockStealHub> hub, int key) {
+    hub_ = std::move(hub);
+    stealKey_ = key;
+  }
+  // Device memory to copy when binding dks here (fields not resident; estimate).
+  std::size_t bindBytes(const std::vector<const MobmDocker*>& dks) const {
+    std::size_t b = 0;
+    for (const MobmDocker* dk : dks) {
+      const StamField& f = dk->field();
+      if (field_->slotOf(f.id()) >= 0) continue;
+      const std::size_t maps = static_cast<std::size_t>(f.typeMapCount()) + 4;
+      if (f.mode() == GridMode::Delta) b += f.deltaBlockCount() * maps * kDeltaBlock * kDeltaBlock * kDeltaBlock * sizeof(float);
+      else if (f.mode() == GridMode::Full && !f.hasHostData()) b += f.geom().size() * maps * sizeof(float);
+    }
+    return b;
+  }
+  // Binds dks for poses taken from another device (bindAll with at least dks.size() slots).
+  void bindStolen(const std::vector<const MobmDocker*>& dks) {
+    if (field_->slots() < static_cast<int>(dks.size())) field_->setSlots(static_cast<int>(dks.size()));
+    bindAll(dks);
+  }
+  GpuEnergy& energy() { return gpu_; }
   // Resident fields: GpuField::slots() (spec 15.1.16).
   int fields() const override { return field_->slots(); }
   void bindAll(std::span<const MobmDocker* const> dks) override {
@@ -61,6 +160,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
       slot_.push_back(s);
       key = key * 0x9e3779b97f4a7c15ULL + dk->field().id();
     }
+    bound_.assign(dks.begin(), dks.end());
     setup(*dks[0], key);
   }
   void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) override {
@@ -132,7 +232,29 @@ class GpuPoseEvaluator : public PoseEvaluator {
       s.field = slot_[static_cast<std::size_t>(r.field)];
       std::copy_n(r.anglesDeg, nt, minAngles_.begin() + static_cast<std::ptrdiff_t>(i * nt));
     });
-    gpu_.minimizeDock(*field_, p, minStarts_.data(), minAngles_.data(), n, out, anglesOut);
+    if (!hub_) {
+      gpu_.minimizeDock(*field_, p, minStarts_.data(), minAngles_.data(), n, out, anglesOut);
+      return true;
+    }
+    DockStealHub::Call c;
+    c.ev = this;
+    c.device = device_;
+    c.key = stealKey_;
+    c.req = req;
+    c.p = p;
+    c.out = out;
+    c.anglesOut = anglesOut;
+    c.nt = nt;
+    c.n = n;
+    c.dks = bound_;
+    hub_->add(c);
+    try {
+      gpu_.minimizeDock(*field_, p, minStarts_.data(), minAngles_.data(), n, out, anglesOut, true);
+    } catch (...) {
+      hub_->finish(c);
+      throw;
+    }
+    hub_->finish(c);
     return true;
   }
   void idle() override {
@@ -284,6 +406,9 @@ class GpuPoseEvaluator : public PoseEvaluator {
   std::vector<double> minAngles_;
   std::uint64_t sized_ = 0;
   std::vector<int> slot_{0};  // GpuField slot of each bound docker
+  std::vector<const MobmDocker*> bound_;
+  std::shared_ptr<DockStealHub> hub_;
+  int stealKey_ = 0;
   // Host data of each lane.
   struct Work {
     int n = 0;
@@ -295,12 +420,83 @@ class GpuPoseEvaluator : public PoseEvaluator {
   Work work_[GpuEnergy::kLanes];
 };
 
+inline bool DockStealHub::helpOnce(int device, const std::function<GpuPoseEvaluator*(int)>& evOf) {
+  std::unique_lock lk(m_);
+  Call* best = nullptr;
+  GpuPoseEvaluator* helper = nullptr;
+  double bestGive = 0, bestFrac = 0;
+  int bestMin = 0;
+  std::size_t bestBytes = 0;
+  for (Call* c : calls_) {
+    if (c->closed || c->dry || c->device == device || c->dks.empty()) continue;
+    int taken = 0, end = 0;
+    double sec = 0;
+    if (!c->ev->energy().dockProgress(taken, end, sec) || sec <= 0) continue;
+    GpuPoseEvaluator* h = evOf(c->key);
+    if (!h) continue;
+    const double untaken = end - taken;
+    // The kernel takes a wave of poses at its start: the rate from the poses after it.
+    const int wave = h->residentPoses(*c->dks[0]);
+    if (untaken < 2.0 * wave || taken <= wave) continue;
+    const double rate = static_cast<double>(taken - wave) / sec;
+    const std::size_t bytes = h->bindBytes(c->dks);
+    const double delay = static_cast<double>(bytes) / bandwidth_ + 0.005;
+    // Both devices end together: the helper starts after delay (same rate).
+    const double give = (untaken - delay * rate) / 2;
+    if (give < wave || give <= bestGive) continue;
+    best = c;
+    helper = h;
+    bestGive = give;
+    bestFrac = give / untaken;
+    bestMin = wave;
+    bestBytes = bytes;
+  }
+  if (!best) return false;
+  ++best->pending;
+  lk.unlock();
+  const auto [lo, hi] = best->ev->energy().stealDock(bestFrac, bestMin);
+  if (lo >= hi) {
+    lk.lock();
+    best->dry = true;
+    --best->pending;
+    lk.unlock();
+    cv_.notify_all();
+    return true;
+  }
+  std::exception_ptr err;
+  double bindSec = 0;
+  try {
+    const auto t0 = std::chrono::steady_clock::now();
+    helper->bindStolen(best->dks);
+    bindSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (!helper->minimize(hi - lo, best->req + lo, best->p, best->out + lo, best->anglesOut + static_cast<std::size_t>(lo) * best->nt))
+      throw Error("DockStealHub: minimize on the device refused");
+  } catch (...) {
+    err = std::current_exception();
+  }
+  lk.lock();
+  if (err && !best->error) best->error = err;
+  ++stats_.steals;
+  stats_.poses += hi - lo;
+  stats_.bindSeconds += bindSec;
+  stats_.bindBytes += bestBytes;
+  if (bestBytes > (1u << 24) && bindSec > 0) bandwidth_ = 0.5 * bandwidth_ + 0.5 * static_cast<double>(bestBytes) / bindSec;
+  --best->pending;
+  lk.unlock();
+  cv_.notify_all();
+  return true;
+}
+
 // 9b pose energies of one MobM on several GPUs (spec 15.1.33): the whole minimizations (minimize)
-// are divided equally among the evaluators, each on its own host thread; the other work
-// (evaluate, quick filter, posm2_fft) runs on the first one.
+// and the posm2_fft translations (fftTop) are divided among the evaluators, each on its own host
+// thread; the other work (evaluate, quick filter) runs on the first one.
 class MultiGpuPoseEvaluator : public PoseEvaluator {
  public:
-  explicit MultiGpuPoseEvaluator(std::vector<std::unique_ptr<GpuPoseEvaluator>> ev) : ev_(std::move(ev)) {
+  // hub (optional): an evaluator done with its part takes over poses of the others (spec 15.1.35);
+  // the evaluators then have it (setSteal).
+  explicit MultiGpuPoseEvaluator(std::vector<std::unique_ptr<GpuPoseEvaluator>> ev,
+                                 std::shared_ptr<DockStealHub> hub = nullptr)
+      : ev_(std::move(ev)), hub_(std::move(hub)) {
     if (ev_.empty()) throw Error("MultiGpuPoseEvaluator: no evaluator");
   }
   int maxBatch() const override { return ev_[0]->maxBatch(); }
@@ -334,6 +530,7 @@ class MultiGpuPoseEvaluator : public PoseEvaluator {
     const std::size_t nt = static_cast<std::size_t>(ev_[0]->torsionCount());
     std::vector<char> ok(k, 0);
     std::vector<std::exception_ptr> err(k);
+    std::atomic<std::size_t> left{k};
     const auto run = [&](std::size_t i) {
       try {
         const int b = begin[i], m = begin[i + 1] - b;
@@ -341,6 +538,17 @@ class MultiGpuPoseEvaluator : public PoseEvaluator {
       } catch (...) {
         err[i] = std::current_exception();
       }
+      --left;
+      // Poses of the parts still running.
+      if (hub_ && ok[i] && !err[i])
+        try {
+          const int dev = ev_[i]->device();
+          const auto evOf = [&](int) { return ev_[i].get(); };
+          while (left.load() > 0)
+            if (!hub_->helpOnce(dev, evOf)) hub_->wait(1);
+        } catch (...) {
+          err[i] = std::current_exception();
+        }
     };
     std::vector<std::thread> th;
     for (std::size_t i = 1; i < k; ++i) th.emplace_back(run, i);
@@ -359,10 +567,64 @@ class MultiGpuPoseEvaluator : public PoseEvaluator {
                    std::vector<long long>& l2, Dock9bStats& stats) override {
     return ev_[0]->quickFilter(dk, c, stream, k0, k1, l2, stats);
   }
-  int fftBatch(std::span<const MobmDocker* const> dks) override { return ev_[0]->fftBatch(dks); }
+  // posm2_fft: the orientations of each fftTop divided among the evaluators in proportion to their
+  // batches (spec 15.1.35); all on the first when one has no quick filter on its device.
+  int fftBatch(std::span<const MobmDocker* const> dks) override {
+    fftParts_.clear();
+    fftSets_ = static_cast<int>(dks.size());
+    int total = 0;
+    for (auto& e : ev_) {
+      const int b = e->fftBatch(dks);
+      if (b <= 0) {
+        fftParts_.clear();
+        return ev_[0]->fftBatch(dks);
+      }
+      fftParts_.push_back(b);
+      total += b;
+    }
+    return total;
+  }
   void fftTop(int n, int probes, const double* f, const int* map, const double* q, const std::array<int, 3>* lo,
               const std::array<int, 3>* hi, int top, std::pair<float, std::size_t>* out) override {
-    ev_[0]->fftTop(n, probes, f, map, q, lo, hi, top, out);
+    const std::size_t k = fftParts_.size();
+    if (k < 2 || n < 2) {
+      ev_[0]->fftTop(n, probes, f, map, q, lo, hi, top, out);
+      return;
+    }
+    long long sum = 0;
+    for (int b : fftParts_) sum += b;
+    std::vector<int> begin(k + 1, 0);
+    long long acc = 0;
+    for (std::size_t i = 0; i < k; ++i) {
+      acc += fftParts_[i];
+      begin[i + 1] = static_cast<int>(static_cast<long long>(n) * acc / sum);
+    }
+    const std::size_t sets = static_cast<std::size_t>(fftSets_), tp = static_cast<std::size_t>(top);
+    std::vector<std::vector<std::pair<float, std::size_t>>> part(k);
+    std::vector<std::exception_ptr> err(k);
+    const auto run = [&](std::size_t i) {
+      try {
+        const int b = begin[i], m = begin[i + 1] - b;
+        if (m == 0) return;
+        part[i].resize(sets * static_cast<std::size_t>(m) * tp);
+        ev_[i]->fftTop(m, probes, f + static_cast<std::size_t>(b) * probes * 3, map, q, lo + b, hi + b, top, part[i].data());
+      } catch (...) {
+        err[i] = std::current_exception();
+      }
+    };
+    std::vector<std::thread> th;
+    for (std::size_t i = 1; i < k; ++i) th.emplace_back(run, i);
+    run(0);
+    for (auto& x : th) x.join();
+    for (const auto& e : err)
+      if (e) std::rethrow_exception(e);
+    // out: sets × n × top.
+    for (std::size_t i = 0; i < k; ++i) {
+      const std::size_t b = static_cast<std::size_t>(begin[i]), m = static_cast<std::size_t>(begin[i + 1]) - b;
+      for (std::size_t s = 0; s < sets; ++s)
+        std::copy_n(part[i].begin() + static_cast<std::ptrdiff_t>(s * m * tp), m * tp,
+                    out + (s * static_cast<std::size_t>(n) + b) * tp);
+    }
   }
   void prepared() override {
     for (auto& e : ev_) e->prepared();
@@ -370,6 +632,9 @@ class MultiGpuPoseEvaluator : public PoseEvaluator {
 
  private:
   std::vector<std::unique_ptr<GpuPoseEvaluator>> ev_;
+  std::shared_ptr<DockStealHub> hub_;
+  std::vector<int> fftParts_;  // fftBatch of each evaluator (empty: all on the first)
+  int fftSets_ = 1;
 };
 
 }  // namespace od

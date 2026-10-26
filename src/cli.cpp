@@ -381,7 +381,8 @@ const std::vector<Param>& params() {
                         1, OD_ACC(gpuDock9bStamNum)));
     t.push_back(intAuto("cpu.threadNum", "auto|<n>",
                         "CPU threads; the process is bound to n CPUs (one thread of every core first) when fewer than "
-                        "its CPUs; auto: OMP_NUM_THREADS or the CPUs of the affinity mask, at most the cgroup CPU quota",
+                        "its CPUs; more than the CPUs it may use (affinity mask, cgroup CPU quota) is an error; auto: "
+                        "OMP_NUM_THREADS or the CPUs of the affinity mask, at most the CPUs it may use",
                         1, OD_ACC(cpuThreadNum)));
     t.push_back(intAuto("memory.hostLimit", "auto|<MiB>",
                         "Host memory limit (MiB) for 9b (gpu.dock9bStamNum); auto: the cgroup memory limit, otherwise "

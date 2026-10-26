@@ -560,38 +560,56 @@ MobmDocker::Conf MobmDocker::baseConformation(std::span<const double> anglesDeg)
       return Vec3{y[0], y[1], y[2]};
     };
     const auto& ss = *sepas_;
+    // Pairs and triples searched in parallel (per region i, per chunk of pairs) and joined in order.
     std::vector<Conf::PairMatch> pm;
-    if (p_.sepaPair || p_.sepaTriple)
-      for (std::size_t i = 0; i < ss.size(); ++i)
+    if (p_.sepaPair || p_.sepaTriple) {
+      std::vector<std::vector<Conf::PairMatch>> part(ss.size());
+      parallelEach(static_cast<long long>(ss.size()), [&](long long ii) {
+        const std::size_t i = static_cast<std::size_t>(ii);
         for (std::size_t j = i + 1; j < ss.size(); ++j) {
           const double dS = std::sqrt(dist2(ss[i].xyz, ss[j].xyz));
           for (int a : ms)
             for (int b : ms) {
               if (a == b || sgn(a) != -ss[i].sign || sgn(b) != -ss[j].sign) continue;
               if (std::abs(dS - std::sqrt(dist2(yAt(a), yAt(b)))) > p_.sepaDistTolerance) continue;
-              pm.push_back({static_cast<int>(i), static_cast<int>(j), a, b});
+              part[i].push_back({static_cast<int>(i), static_cast<int>(j), a, b});
             }
         }
+      });
+      for (const auto& v : part) pm.insert(pm.end(), v.begin(), v.end());
+    }
     // Triples extend a matched pair (s1 < s2) by a region s3 > s2 and a third probe atom (spec 8.4.4).
-    if (p_.sepaTriple)
-      for (const auto& q : pm)
-        for (std::size_t k = static_cast<std::size_t>(q.s2) + 1; k < ss.size(); ++k) {
-          const double d13 = std::sqrt(dist2(ss[q.s1].xyz, ss[k].xyz)), d23 = std::sqrt(dist2(ss[q.s2].xyz, ss[k].xyz));
-          for (int e : ms) {
-            if (e == q.m1 || e == q.m2 || sgn(e) != -ss[k].sign) continue;
-            if (std::abs(d13 - std::sqrt(dist2(yAt(q.m1), yAt(e)))) > p_.sepaDistTolerance ||
-                std::abs(d23 - std::sqrt(dist2(yAt(q.m2), yAt(e)))) > p_.sepaDistTolerance)
-              continue;
-            const std::array<Vec3, 3> sv{ss[q.s1].xyz, ss[q.s2].xyz, ss[k].xyz}, mv{yAt(q.m1), yAt(q.m2), yAt(e)};
-            if (triangleHeight(sv[0], sv[1], sv[2]) < kTripleMinHeight ||
-                triangleHeight(mv[0], mv[1], mv[2]) < kTripleMinHeight)
-              continue;
-            double rmsd;
-            const Quat rq = kabschQuat(mv, sv, rmsd);
-            if (rmsd > p_.sepaDistTolerance) continue;
-            c.triples.push_back({{q.s1, q.s2, static_cast<int>(k)}, {q.m1, q.m2, e}, rq});
+    if (p_.sepaTriple) {
+      constexpr std::size_t kChunk = 256;
+      std::vector<std::vector<Conf::TripleMatch>> part((pm.size() + kChunk - 1) / kChunk);
+      parallelEach(static_cast<long long>(part.size()), [&](long long ci) {
+        std::vector<Conf::TripleMatch>& out = part[static_cast<std::size_t>(ci)];
+        for (std::size_t qi = static_cast<std::size_t>(ci) * kChunk; qi < std::min(pm.size(), (static_cast<std::size_t>(ci) + 1) * kChunk); ++qi) {
+          const auto& q = pm[qi];
+          for (std::size_t k = static_cast<std::size_t>(q.s2) + 1; k < ss.size(); ++k) {
+            const double d13 = std::sqrt(dist2(ss[q.s1].xyz, ss[k].xyz)), d23 = std::sqrt(dist2(ss[q.s2].xyz, ss[k].xyz));
+            for (int e : ms) {
+              if (e == q.m1 || e == q.m2 || sgn(e) != -ss[k].sign) continue;
+              if (std::abs(d13 - std::sqrt(dist2(yAt(q.m1), yAt(e)))) > p_.sepaDistTolerance ||
+                  std::abs(d23 - std::sqrt(dist2(yAt(q.m2), yAt(e)))) > p_.sepaDistTolerance)
+                continue;
+              const std::array<Vec3, 3> sv{ss[q.s1].xyz, ss[q.s2].xyz, ss[k].xyz}, mv{yAt(q.m1), yAt(q.m2), yAt(e)};
+              if (triangleHeight(sv[0], sv[1], sv[2]) < kTripleMinHeight ||
+                  triangleHeight(mv[0], mv[1], mv[2]) < kTripleMinHeight)
+                continue;
+              double rmsd;
+              const Quat rq = kabschQuat(mv, sv, rmsd);
+              if (rmsd > p_.sepaDistTolerance) continue;
+              out.push_back({{q.s1, q.s2, static_cast<int>(k)}, {q.m1, q.m2, e}, rq});
+            }
           }
         }
+      });
+      std::size_t total = 0;
+      for (const auto& v : part) total += v.size();
+      c.triples.reserve(total);
+      for (const auto& v : part) c.triples.insert(c.triples.end(), v.begin(), v.end());
+    }
     if (p_.sepaPair) c.pairs = std::move(pm);
     if (p_.sepaSingle)
       for (std::size_t i = 0; i < ss.size(); ++i)

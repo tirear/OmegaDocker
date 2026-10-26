@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "dock_kernel.hpp"
 #include "energy_kernel.hpp"
@@ -87,8 +88,17 @@ class GpuEnergy {
   // Whole 9b minimizations (spec 15.1.26, 15.1.28) against field with the probe atoms of
   // setProbes: starts and anglesDeg (n × torsionCount); out and anglesOut (n × torsionCount, the
   // float angles of each result). Synchronous.
-  void minimizeDock(const GpuField& field, const DockMinParams& p, const DockMinStart* starts, const double* anglesDeg,
-                    int n, DockMinResult* out, float* anglesOut);
+  // stealable: other threads may take the samples not yet started (stealDock); the results are
+  // then only those of [0, return value).
+  int minimizeDock(const GpuField& field, const DockMinParams& p, const DockMinStart* starts, const double* anglesDeg,
+                   int n, DockMinResult* out, float* anglesOut, bool stealable = false);
+  // While a stealable minimizeDock runs on another thread (spec 15.1.35): the running kernel gives
+  // away the last floor(frac × untaken) samples when at least giveMin, which minimizeDock then does
+  // not do; returns them as [first, second) (empty: none, or no stealable call running).
+  std::pair<int, int> stealDock(double frac, int giveMin);
+  // The running stealable minimizeDock: samples taken by the kernel, its current end and the
+  // seconds since its start; false when none runs.
+  bool dockProgress(int& taken, int& end, double& seconds) const;
   // Asynchronous form of evaluate without coordinates (9a, spec 15.1.11); fp32: coordinates and
   // pair terms in single precision (as 9b, spec 15.1.12).
   void submit(int lane, const double* angles, int n, bool grad, bool fp32 = false);

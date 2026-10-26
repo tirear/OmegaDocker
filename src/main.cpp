@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <exception>
+#include <atomic>
 #include <thread>
 #include <filesystem>
 #include <fstream>
@@ -1043,6 +1044,11 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   std::shared_ptr<od::GpuGridBuilder> gpuGrid;
   std::vector<std::unique_ptr<od::GpuGridBuilder>> gpuGridOthers;  // delta blocks on the other devices (spec 15.1.33)
   std::vector<std::shared_ptr<od::GpuField>> gpuFields;
+  // Minimizations taken over by idle devices (spec 15.1.35); gpuEvals[d][i]: the evaluator of
+  // MobM i on device d.
+  std::shared_ptr<od::DockStealHub> stealHub;
+  std::vector<std::vector<od::GpuPoseEvaluator*>> gpuEvals;
+  od::DockStealHub::Stats stealBase;  // statistics at the start of the round
   if (gpu) {
     gpuGrid = std::make_shared<od::GpuGridBuilder>(opt.gpuDevices[0]);
     for (std::size_t k = 1; k < opt.gpuDevices.size(); ++k)
@@ -1087,27 +1093,32 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     };
     gpuFree = [&opt] { return od::gpuFreeMem(opt.gpuDevices[0]); };
     // Several devices: each window of StaM conformations on one device, with its own quick filter;
-    // posm2_fft (spectra of several StaM conformations shared, spec 15.1.24): the minimizations of
-    // every window divided among the devices (MultiGpuPoseEvaluator).
+    // posm2_fft (spectra of several StaM conformations shared, spec 15.1.24): the translations and
+    // the minimizations of every window divided among the devices (MultiGpuPoseEvaluator).
     const bool splitWindows = gpuFields.size() > 1 && dp.posm != od::Posm::Posm2Fft;
     std::vector<std::shared_ptr<od::GpuDockPrep>> gpuPreps;
     for (std::size_t k = 0; k < gpuFields.size(); ++k)
-      gpuPreps.push_back(k == 0 || splitWindows ? std::make_shared<od::GpuDockPrep>(opt.gpuDevices[k]) : nullptr);
+      gpuPreps.push_back(std::make_shared<od::GpuDockPrep>(opt.gpuDevices[k]));
     if (splitWindows) {
       windowDevices = static_cast<int>(gpuFields.size());
       poseEvalOthers.resize(gpuFields.size() - 1);
       for (auto& v : poseEvalOthers) v.resize(mobSets.size());
     }
+    if (gpuFields.size() > 1) stealHub = std::make_shared<od::DockStealHub>();
+    gpuEvals.assign(gpuFields.size(), std::vector<od::GpuPoseEvaluator*>(mobSets.size(), nullptr));
     for (std::size_t i = 0; i < mobSets.size(); ++i) {
       std::vector<std::unique_ptr<od::GpuPoseEvaluator>> ev;
-      for (std::size_t k = 0; k < gpuFields.size(); ++k)
+      for (std::size_t k = 0; k < gpuFields.size(); ++k) {
         ev.push_back(std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuFields[k], opt.gpuDevices[k],
                                                             opt.gpuDock9bBatchNum, gpuPreps[k], opt.gpuDock9bDeviceMin));
+        if (stealHub) ev.back()->setSteal(stealHub, static_cast<int>(i));
+        gpuEvals[k][i] = ev.back().get();
+      }
       if (ev.size() == 1) poseEval[i] = std::move(ev[0]);
       else if (splitWindows) {
         poseEval[i] = std::move(ev[0]);
         for (std::size_t k = 1; k < ev.size(); ++k) poseEvalOthers[k - 1][i] = std::move(ev[k]);
-      } else poseEval[i] = std::make_unique<od::MultiGpuPoseEvaluator>(std::move(ev));
+      } else poseEval[i] = std::make_unique<od::MultiGpuPoseEvaluator>(std::move(ev), stealHub);
     }
   }
 #else
@@ -1438,9 +1449,14 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::mutex flightMutex;
     std::condition_variable flightDone;
     const auto landFront = [&] {
-      std::unique_ptr<Flight> f = std::move(flights.front());
-      flights.pop_front();
-      f->th.join();
+      // Joined before it leaves flights: the helpers (spec 15.1.35) see its device busy until then.
+      flights.front()->th.join();
+      std::unique_ptr<Flight> f;
+      {
+        std::lock_guard lk(flightMutex);
+        f = std::move(flights.front());
+        flights.pop_front();
+      }
       if (f->error) std::rethrow_exception(f->error);
       for (std::size_t i = 0; i < ms.size(); ++i) finishWindow(f->items, i, true);
     };
@@ -1725,7 +1741,46 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     }
     dockWindow();
     window.clear();
+#ifdef OD_HAVE_CUDA
+    // The last windows of the round: devices without a window take over minimizations of the
+    // others (spec 15.1.35).
+    std::atomic<bool> helpStop{false};
+    std::vector<std::thread> helpers;
+    std::vector<std::exception_ptr> helpErr(static_cast<std::size_t>(windowDevices));
+    if (stealHub && windowDevices > 1 && !flights.empty())
+      for (int d = 0; d < windowDevices; ++d)
+        helpers.emplace_back([&, d] {
+          try {
+            const auto evOf = [&](int key) { return gpuEvals[static_cast<std::size_t>(d)][static_cast<std::size_t>(key)]; };
+            while (!helpStop.load()) {
+              bool busy;
+              {
+                std::lock_guard lk(flightMutex);
+                busy = std::any_of(flights.begin(), flights.end(), [&](const auto& f) { return f->dev == d && !f->done; });
+              }
+              if (busy || !stealHub->helpOnce(d, evOf)) stealHub->wait(2);
+            }
+          } catch (...) {
+            helpErr[static_cast<std::size_t>(d)] = std::current_exception();
+          }
+        });
+    const auto stopHelpers = [&] {
+      helpStop = true;
+      for (auto& h : helpers) h.join();
+      helpers.clear();
+    };
+    try {
+      while (!flights.empty()) landFront();
+    } catch (...) {
+      stopHelpers();
+      throw;
+    }
+    stopHelpers();
+    for (const auto& e : helpErr)
+      if (e) std::rethrow_exception(e);
+#else
     while (!flights.empty()) landFront();
+#endif
     od::trimHeap();
     double partialSec = 0;
     for (double s : selectSec) partialSec += s;
@@ -1806,8 +1861,20 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     for (auto& v : poseEvalOthers)
       for (auto& e : v)
         if (e) e->idle();
-    od::logInfo(std::format("  9b docking: {:.2f} s ({} window(s) of StaM conformations docked together, largest {})",
-                            dockSec, windows, largestWindow));
+    {
+      std::string steal;
+#ifdef OD_HAVE_CUDA
+      if (stealHub) {
+        const od::DockStealHub::Stats s = stealHub->stats();
+        steal = std::format("; poses taken over by other devices {} in {} part(s), binding {:.2f} s, {:.0f} MiB", s.poses - stealBase.poses,
+                            s.steals - stealBase.steals, s.bindSeconds - stealBase.bindSeconds,
+                            static_cast<double>(s.bindBytes - stealBase.bindBytes) / (1 << 20));
+        stealBase = s;
+      }
+#endif
+      od::logInfo(std::format("  9b docking: {:.2f} s ({} window(s) of StaM conformations docked together, largest {}{})",
+                              dockSec, windows, largestWindow, steal));
+    }
     if (stamWindow > 1 && windows > 0) {
       // Memory of one window with all StaM conformations of the round (a hint for memory.hostLimit).
       const std::size_t n = stamIds.size();
@@ -1963,8 +2030,6 @@ int run(int argc, char** argv) {
     const od::CpuThreads ct = od::applyCpuThreads(opt.cpuThreadNum);
     od::logInfo(std::format("CPU threads {} ({}{}), CPUs {}", ct.threads, ct.source, opt.cpuThreadNum ? "" : ", cpu.threadNum auto",
                             od::cpuListText(ct.cpus)));
-    if (ct.threads > static_cast<int>(ct.cpus.size()) && !ct.cpus.empty())
-      od::logWarn(std::format("cpu.threadNum {} is more than the {} CPUs this process may use", ct.threads, ct.cpus.size()));
   }
 
   od::CcdLibrary ccd;
