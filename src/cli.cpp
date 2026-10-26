@@ -379,6 +379,10 @@ const std::vector<Param>& params() {
                         "reach 48 x the poses the GPU evaluates at the same time; <n>: at most n; both within "
                         "memory.hostLimit and half of the free device memory)",
                         1, OD_ACC(gpuDock9bStamNum)));
+    t.push_back(intAuto("cpu.threadNum", "auto|<n>",
+                        "CPU threads; the process is bound to n CPUs (one thread of every core first) when fewer than "
+                        "its CPUs; auto: OMP_NUM_THREADS or the CPUs of the affinity mask, at most the cgroup CPU quota",
+                        1, OD_ACC(cpuThreadNum)));
     t.push_back(intAuto("memory.hostLimit", "auto|<MiB>",
                         "Host memory limit (MiB) for 9b (gpu.dock9bStamNum); auto: the cgroup memory limit, otherwise "
                         "the resident memory plus MemAvailable at the start",
@@ -610,7 +614,7 @@ const std::vector<CliOption>& cliOptions() {
        [](Options& o, const std::string& v) { o.molConfig = v; }},
       {"outPrefix", "<path>", "Output directory; required", false, [](Options& o, const std::string& v) { o.outPrefix = v; }},
       {"resume", "<path>",
-       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound, gpu.* and memory.hostLimit may change", false,
+       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound, gpu.*, cpu.threadNum and memory.hostLimit may change", false,
        [](Options& o, const std::string& v) {
          if (v.empty()) fail("--resume requires a directory");
          o.resume = v;

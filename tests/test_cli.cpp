@@ -499,7 +499,7 @@ TEST_CASE("cli: several devices (gpu.device) and gpu.packedMaps") {
   std::filesystem::remove(path);
 }
 
-TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)") {
+TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, cpu.threadNum, memory.hostLimit)") {
   const od::Options d = parse({});
   CHECK(d.gpuDock9bStamNum == 0);
   CHECK(d.memHostLimit == 0);
@@ -507,6 +507,13 @@ TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)") {
   CHECK(o.gpuDock9bStamNum == 32);
   CHECK(o.memHostLimit == 65536);
   CHECK(parse({"--gpu_dock9bStamNum=auto"}).gpuDock9bStamNum == 0);
+  CHECK(d.cpuThreadNum == 0);
+  CHECK(parse({"--cpu_threadNum=8"}).cpuThreadNum == 8);
+  CHECK(parse({"--cpu_threadNum=auto"}).cpuThreadNum == 0);
+  const std::string cpuText = od::paramsText(parse({"--cpu_threadNum=8"}));
+  CHECK(cpuText.find("[cpu]\n") != std::string::npos);
+  CHECK(cpuText.find("\nthreadNum = 8\n") > cpuText.find("[cpu]\n"));
+  for (const char* bad : {"--cpu_threadNum=0", "--cpu_threadNum=-2", "--cpu_threadNum=x"}) CHECK_THROWS_AS(parse({bad}), od::Error);
   for (const char* bad : {"--gpu_dock9bStamNum=0", "--gpu_dock9bStamNum=Auto", "--memory_hostLimit=-1", "--memory_hostLimit=1.5"})
     CHECK_THROWS_AS(parse({bad}), od::Error);
   // TOML: an integer or the string "auto"; params.used.toml writes them back the same way.

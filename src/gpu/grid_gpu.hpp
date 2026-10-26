@@ -27,6 +27,9 @@ class GpuGridBuilder {
   void build(const GridBuildView& v, double clamp, float* const* typeMaps, float* elec, float* desolv);
   // d: host array of n[0] × n[1] × n[2] values.
   void buildDistance(const DistBuildView& v, float* d);
+  // Full grids kept in device memory (spec 15.1.34): type maps, elec, desolv (as build) and the
+  // distance grid (as buildDistance) in the layout of FieldView::maps (map m from m × points).
+  std::shared_ptr<const DeviceBlocks> buildDevice(const GridBuildView& g, const DistBuildView& d, double clamp);
 
   // delta: the reference maps (type maps, elec, desolv, distance; host arrays of `points` values)
   // are kept on the device under id.

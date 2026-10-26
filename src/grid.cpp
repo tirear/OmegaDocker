@@ -378,7 +378,8 @@ FieldCells detail::CellList::flat() const {
   return c;
 }
 
-StamField StamField::full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist) {
+StamField StamField::full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist,
+                          std::shared_ptr<const DeviceBlocks> deviceMaps) {
   static std::atomic<std::uint64_t> counter{0};
   StamField f;
   f.mode_ = GridMode::Full;
@@ -386,6 +387,9 @@ StamField StamField::full(std::shared_ptr<const EnergyGrids> grids, std::shared_
   f.grids_ = std::move(grids);
   f.dist_ = std::move(dist);
   f.mapCount_ = static_cast<int>(f.grids_->types.size()) + 3;
+  if (deviceMaps && deviceMaps->floats != static_cast<std::size_t>(f.mapCount_) * f.grids_->geom.size())
+    fail("full grids: device maps differ from the geometry");
+  f.deviceMaps_ = std::move(deviceMaps);
   return f;
 }
 
@@ -535,10 +539,11 @@ FieldModel StamField::model() const {
   v.spacing = g.spacing;
   v.typeMapCount = static_cast<int>(grids_->types.size());
   if (v.typeMapCount + 3 > kFieldMaxMaps) fail("StamField::model: too many maps");
-  for (int m = 0; m < v.typeMapCount; ++m) v.maps[m] = grids_->typeMaps[m].data();
+  for (int m = 0; m < v.typeMapCount; ++m) v.maps[m] = deviceMaps_ ? nullptr : grids_->typeMaps[m].data();
   v.maps[v.typeMapCount] = grids_->elecMap.data();
   v.maps[v.typeMapCount + 1] = grids_->desolvMap.data();
   v.maps[v.typeMapCount + 2] = dist_->d.data();
+  fm.deviceMaps = deviceMaps_;
   v.mapCount = mapCount_;
   fm.block = block_;
   fm.data = data_;

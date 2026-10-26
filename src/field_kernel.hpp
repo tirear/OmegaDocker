@@ -71,6 +71,9 @@ struct FieldModel {
   std::uint64_t id = 0;               // StamField::id()
   std::shared_ptr<const void> base;   // owner of the reference maps (grids)
   std::shared_ptr<const void> baseDist;
+  // full (optional): the maps in device memory, in the layout of FieldView::maps (spec 15.1.34);
+  // view.maps are then null.
+  std::shared_ptr<const DeviceBlocks> deviceMaps;
   std::size_t points = 0;             // values per map
   std::vector<int> block;
   std::shared_ptr<const std::vector<float>> data;  // delta blocks; null: only in device memory

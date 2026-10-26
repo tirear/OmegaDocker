@@ -1261,6 +1261,8 @@ void gpuDownload(const float* device, float* host, std::size_t n) {
 struct FieldMaps {
   std::shared_ptr<const void> base, baseDist;
   DevBuf<float> maps, packed;
+  const float* ptr = nullptr;                 // maps.p, or the device maps of the field (adopted)
+  std::shared_ptr<const DeviceBlocks> adopted;
 };
 
 // FieldView::packed from the maps (nm maps of n[0] × n[1] × n[2] points).
@@ -1333,7 +1335,7 @@ std::size_t GpuField::deviceBytes() const {
     b += s->bytes();
     if (s->maps && std::find(seen.begin(), seen.end(), s->maps.get()) == seen.end()) {
       seen.push_back(s->maps.get());
-      b += (s->maps->maps.n + s->maps->packed.n) * sizeof(float);
+      b += (s->maps->maps.n + s->maps->packed.n + (s->maps->adopted ? s->maps->adopted->floats : 0)) * sizeof(float);
     }
   }
   return b;
@@ -1401,17 +1403,28 @@ void GpuField::set(const FieldModel& fm) {
   d.current = -1;
   if (!maps) {
     maps = std::make_shared<FieldMaps>();
-    maps->maps.reserve(static_cast<std::size_t>(nm) * fm.points);
-    for (int m = 0; m < nm; ++m)
-      check(cudaMemcpy(maps->maps.p + static_cast<std::size_t>(m) * fm.points, fm.view.maps[m], fm.points * sizeof(float),
-                       cudaMemcpyHostToDevice),
-            "upload map");
+    if (fm.deviceMaps && fm.deviceMaps->device == d.device) {  // built here (spec 15.1.34)
+      maps->adopted = fm.deviceMaps;
+      maps->ptr = fm.deviceMaps->ptr;
+    } else {
+      maps->maps.reserve(static_cast<std::size_t>(nm) * fm.points);
+      maps->ptr = maps->maps.p;
+      if (fm.deviceMaps)
+        check(cudaMemcpyPeer(maps->maps.p, d.device, fm.deviceMaps->ptr, fm.deviceMaps->device,
+                             static_cast<std::size_t>(nm) * fm.points * sizeof(float)),
+              "cudaMemcpyPeer maps");
+      else
+        for (int m = 0; m < nm; ++m)
+          check(cudaMemcpy(maps->maps.p + static_cast<std::size_t>(m) * fm.points, fm.view.maps[m], fm.points * sizeof(float),
+                           cudaMemcpyHostToDevice),
+                "upload map");
+    }
     maps->base = fm.base;
     maps->baseDist = fm.baseDist;
     const std::size_t packedBytes = 16 * static_cast<std::size_t>(nm) * fm.points;
     if (d.packed == Packed::On || (d.packed == Packed::IfFits && packedBytes <= gpuFreeMem(d.device) / 4)) {
       maps->packed.reserve(4 * static_cast<std::size_t>(nm) * fm.points);
-      packMapsKernel<<<1024, 256>>>(maps->maps.p, reinterpret_cast<float4*>(maps->packed.p), nm, fm.view.n[0], fm.view.n[1],
+      packMapsKernel<<<1024, 256>>>(maps->ptr, reinterpret_cast<float4*>(maps->packed.p), nm, fm.view.n[0], fm.view.n[1],
                                     fm.view.n[2]);
       check(cudaDeviceSynchronize(), "packMapsKernel");
     }
@@ -1448,7 +1461,7 @@ void GpuField::set(const FieldModel& fm) {
   s.pairM.upload(fm.pairM);
   s.pairN.upload(fm.pairN);
   FieldView v = fm.view;
-  for (int m = 0; m < nm; ++m) v.maps[m] = s.maps->maps.p + static_cast<std::size_t>(m) * fm.points;
+  for (int m = 0; m < nm; ++m) v.maps[m] = s.maps->ptr + static_cast<std::size_t>(m) * fm.points;
   v.packed = s.maps->packed.p;
   v.data = s.deviceData ? s.deviceData->ptr : s.data.p;
   v.block = s.block.p;

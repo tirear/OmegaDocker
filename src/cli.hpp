@@ -95,6 +95,7 @@ struct Options {
   bool gpuDock9bDeviceMin = true;
   std::string gpuPackedMaps = "auto";  // auto | true | false
   long long memHostLimit = 0;  // MiB; 0: auto
+  long long cpuThreadNum = 0;  // 0: auto
   double maxNearDistance = 6.0;
   double rotStep = 7.5;
   std::string posm;  // posm1 | posm2 | posm3 | posm4

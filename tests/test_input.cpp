@@ -3566,6 +3566,56 @@ TEST_CASE("sysmem: cgroup memory limit, resident memory and MemAvailable") {
   fs::remove_all(root);
 }
 
+TEST_CASE("sysmem: cgroup CPU quota, CPU order by core, CPU list text") {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / std::format("od_test_cgcpu_{}", ::getpid());
+  fs::remove_all(root);
+  const auto put = [](const fs::path& f, const std::string& s) {
+    fs::create_directories(f.parent_path());
+    std::ofstream(f) << s;
+  };
+  const std::string proc = (root / "proc").string(), cg = (root / "cg").string();
+  std::string src;
+  // cgroup v2: the smallest quota of the cgroup and its ancestors, rounded down, at least 1.
+  put(root / "proc/self/cgroup", "0::/job_1/step_0\n");
+  put(root / "cg/job_1/step_0/cpu.max", "max 100000\n");
+  put(root / "cg/job_1/cpu.max", "650000 100000\n");
+  put(root / "cg/cpu.max", "1600000 100000\n");
+  auto v = od::cgroupCpuLimit(&src, proc, cg);
+  REQUIRE(v);
+  CHECK(*v == 6);
+  CHECK(src == cg + "/job_1/cpu.max");
+  put(root / "cg/job_1/cpu.max", "50000 100000\n");
+  CHECK(od::cgroupCpuLimit(nullptr, proc, cg) == 1);
+  put(root / "cg/job_1/cpu.max", "max 100000\n");
+  put(root / "cg/cpu.max", "max 100000\n");
+  CHECK_FALSE(od::cgroupCpuLimit(nullptr, proc, cg));
+  // cgroup v1: the cpu controller; quota -1 means unlimited.
+  put(root / "proc/self/cgroup", "5:cpuacct,cpu:/slurm/job_2\n4:memory:/slurm/job_2\n0::/\n");
+  put(root / "cg/cpu/slurm/job_2/cpu.cfs_quota_us", "-1\n");
+  put(root / "cg/cpu/slurm/job_2/cpu.cfs_period_us", "100000\n");
+  put(root / "cg/cpu/slurm/cpu.cfs_quota_us", "400000\n");
+  put(root / "cg/cpu/slurm/cpu.cfs_period_us", "100000\n");
+  v = od::cgroupCpuLimit(&src, proc, cg);
+  REQUIRE(v);
+  CHECK(*v == 4);
+  CHECK(src == cg + "/cpu/slurm/cpu.cfs_quota_us");
+  CHECK_FALSE(od::cgroupCpuLimit(nullptr, (root / "none").string(), cg));
+  // 4 cores with 2 threads each (cpu c and c + 4): one thread of every core first.
+  for (int c = 0; c < 8; ++c)
+    put(root / std::format("sys/cpu{}/topology/thread_siblings_list", c), std::format("{},{}\n", c % 4, c % 4 + 4));
+  const std::string sys = (root / "sys").string();
+  CHECK(od::orderCpusByCore({0, 1, 2, 3, 4, 5, 6, 7}, sys) == std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7});
+  CHECK(od::orderCpusByCore({1, 2, 5, 6, 7}, sys) == std::vector<int>{1, 2, 7, 5, 6});
+  // Adjacent threads of a core (cpu 2k and 2k + 1), as ranges.
+  for (int c = 0; c < 8; ++c)
+    put(root / std::format("sys/cpu{}/topology/thread_siblings_list", c), std::format("{}-{}\n", c / 2 * 2, c / 2 * 2 + 1));
+  CHECK(od::orderCpusByCore({0, 1, 2, 3, 4, 5, 6, 7}, sys) == std::vector<int>{0, 2, 4, 6, 1, 3, 5, 7});
+  CHECK(od::cpuListText({0, 1, 2, 3, 8, 10, 11}) == "0-3,8,10-11");
+  CHECK(od::cpuListText({}) == "unknown");
+  fs::remove_all(root);
+}
+
 TEST_CASE("runBatchedAsync: every task completes; submit and complete alternate per group") {
   for (int groups : {1, 2, 3}) {
     INFO("groups ", groups);
@@ -5445,9 +5495,9 @@ TEST_CASE("gpu: 9b poses of several resident fields in one call") {
   ev.idle();
 }
 
-// gpu.packedMaps (spec 15.1.32) and minimizations divided among evaluators (spec 15.1.33; with one
-// device, two evaluators on it): the same results.
-TEST_CASE("gpu: packed reference maps and several evaluators give the same 9b minimizations") {
+// gpu.packedMaps (spec 15.1.32), full grids only in device memory (spec 15.1.34) and minimizations
+// divided among evaluators (spec 15.1.33; with one device, two evaluators on it): the same results.
+TEST_CASE("gpu: packed reference maps, device maps and several evaluators give the same 9b minimizations") {
   if (od::gpuDeviceCount() == 0) {
     MESSAGE("no CUDA device; skipped");
     return;
@@ -5472,8 +5522,8 @@ TEST_CASE("gpu: packed reference maps and several evaluators give the same 9b mi
       REQUIRE(ev.minimize(n, req.data(), dk.deviceMinParams(), r.data(), a.data()));
       ev.idle();
     };
-    std::vector<od::DockMinResult> r0, r1, r2;
-    std::vector<float> a0, a1, a2;
+    std::vector<od::DockMinResult> r0, r1, r2, r3, r4;
+    std::vector<float> a0, a1, a2, a3, a4;
     {
       od::GpuPoseEvaluator ev(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, 4096);
       run(ev, r0, a0);
@@ -5491,9 +5541,36 @@ TEST_CASE("gpu: packed reference maps and several evaluators give the same 9b mi
       od::MultiGpuPoseEvaluator ev(std::move(evs));
       run(ev, r2, a2);
     }
+    // full: the maps only in device memory (spec 15.1.34), used in place on their device and
+    // copied (cudaMemcpyPeer) to another one.
+    if (name == "full") {
+      od::GpuGridBuilder gb(0);
+      const od::GridBuildData b(field.geom(), fs.x.stam, fs.x.mobm.type, {});
+      auto g = std::make_shared<od::EnergyGrids>();
+      g->geom = field.geom();
+      g->types = b.types;
+      auto d = std::make_shared<od::DistanceGrid>();
+      d->geom = field.geom();
+      d->cap = field.distanceCap();
+      const od::StamField devField = od::StamField::full(
+          g, d, gb.buildDevice(b.view, od::DistBuildData(field.geom(), fs.x.stam, field.distanceCap()).view, od::kGridClamp));
+      CHECK_FALSE(devField.hasHostData());
+      CHECK(devField.model().view.maps[0] == nullptr);
+      const od::MobmDocker dkDev(*fs.x.mobSys, devField, p);
+      const auto runDev = [&](int dev, std::vector<od::DockMinResult>& r, std::vector<float>& a) {
+        od::GpuPoseEvaluator ev(fs.x.mobSys->model(), std::make_shared<od::GpuField>(dev), dev, 4096);
+        r.assign(n, {});
+        a.assign(static_cast<std::size_t>(n) * nt, 0.0f);
+        ev.bind(dkDev);
+        REQUIRE(ev.minimize(n, req.data(), dkDev.deviceMinParams(), r.data(), a.data()));
+        ev.idle();
+      };
+      runDev(0, r3, a3);
+      runDev(dev1, r4, a4);
+    }
     // Packed maps: the same values in another layout (identical results up to the order of the
     // gradient atomics); the divided call: each minimization as alone.
-    int same1 = 0, same2 = 0;
+    int same1 = 0, same2 = 0, same3 = 0, same4 = 0;
     for (int i = 0; i < n; ++i) {
       const auto e = [](const od::DockMinResult& r) { return r.dterms.inter + r.terms.vdw + r.terms.hbond + r.terms.elec + r.terms.desolv; };
       CHECK(r1[i].ok == r0[i].ok);
@@ -5501,12 +5578,22 @@ TEST_CASE("gpu: packed reference maps and several evaluators give the same 9b mi
       if (!r0[i].ok) continue;
       same1 += std::abs(e(r1[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
       same2 += std::abs(e(r2[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
+      if (name != "full") continue;
+      CHECK(r3[i].ok == r0[i].ok);
+      CHECK(r4[i].ok == r0[i].ok);
+      same3 += std::abs(e(r3[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
+      same4 += std::abs(e(r4[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
     }
     int ok = 0;
     for (const auto& r : r0) ok += r.ok;
-    MESSAGE(std::format("{}: {} minimized; same energy: packed {}, divided {}", name, ok, same1, same2));
+    MESSAGE(std::format("{}: {} minimized; same energy: packed {}, divided {}, device maps {}, device maps on device {} {}",
+                        name, ok, same1, same2, same3, dev1, same4));
     CHECK(same1 >= ok * 9 / 10);
     CHECK(same2 >= ok * 9 / 10);
+    if (name == "full") {
+      CHECK(same3 >= ok * 9 / 10);
+      CHECK(same4 >= ok * 9 / 10);
+    }
   }
 }
 
@@ -5697,6 +5784,19 @@ TEST_CASE("gpu: energy grids equal the CPU grids") {
       std::vector<float> dist(geom.size(), -1.0f);
       gb.buildDistance(od::DistBuildData(geom, x.stam, cap).view, dist.data());
       CHECK(dist == refDist.d);
+      // Full grids kept on the device (spec 15.1.34): the same values in the FieldView::maps layout.
+      {
+        const auto dm = gb.buildDevice(b.view, od::DistBuildData(geom, x.stam, cap).view, od::kGridClamp);
+        REQUIRE(dm->floats == (maps.size() + 3) * geom.size());
+        CHECK(dm->device == 0);
+        std::vector<float> all(dm->floats), want;
+        od::gpuDownload(dm->ptr, all.data(), all.size());
+        for (const auto& m : ref.typeMaps) want.insert(want.end(), m.begin(), m.end());
+        want.insert(want.end(), ref.elecMap.begin(), ref.elecMap.end());
+        want.insert(want.end(), ref.desolvMap.begin(), ref.desolvMap.end());
+        want.insert(want.end(), refDist.d.begin(), refDist.d.end());
+        CHECK(all == want);
+      }
       // delta blocks of a sample with moved atoms against the CPU StamField::delta.
       od::GridAtoms moved = x.stam;
       for (std::size_t a = 0; a < moved.size(); a += 7) moved.xyz[a][0] += 0.8;

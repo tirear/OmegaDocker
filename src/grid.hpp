@@ -177,7 +177,11 @@ const char* gridModeName(GridMode m);  // "full" | "flexres" | "delta"
 class StamField {
  public:
   StamField() = default;
-  static StamField full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist);
+  // deviceMaps (optional, spec 15.1.34): the maps (type maps, elec, desolv, distance) in device
+  // memory only; grids and dist then hold only the geometry, types and cap (no host copy: energy,
+  // distance and pointMap fail).
+  static StamField full(std::shared_ptr<const EnergyGrids> grids, std::shared_ptr<const DistanceGrid> dist,
+                        std::shared_ptr<const DeviceBlocks> deviceMaps = nullptr);
   // fixed: grids of the fixed atoms; moved: the other StaM grid atoms of the sample.
   static StamField flexres(std::shared_ptr<const EnergyGrids> fixed, std::shared_ptr<const DistanceGrid> fixedDist,
                            GridAtoms moved, const EnergyParams& params);
@@ -208,7 +212,7 @@ class StamField {
   std::size_t movedAtomCount() const { return moved_.size(); }  // flexres
   std::size_t blockCount() const { return block_.size(); }      // delta: all blocks
   std::size_t deltaBlockCount() const;                          // delta: blocks with their own values
-  bool hasHostData() const { return mode_ != GridMode::Delta || data_ != nullptr; }
+  bool hasHostData() const { return (mode_ != GridMode::Delta || data_ != nullptr) && !deviceMaps_; }
 
   // Energy of a probe atom of map `map` and charge q at p (inside geom()); grad: dE/dp.
   template <class T>
@@ -253,6 +257,7 @@ class StamField {
   std::vector<int> block_;   // per block: -1 (reference) or index of its values in data_
   std::shared_ptr<const std::vector<float>> data_;  // per stored block: maps x kDeltaBlock^3 values
   std::shared_ptr<const DeviceBlocks> device_;     // the same in device memory (optional)
+  std::shared_ptr<const DeviceBlocks> deviceMaps_;  // full: the maps only in device memory
   int mapCount_ = 0;         // type maps + elec + desolv + distance
 };
 

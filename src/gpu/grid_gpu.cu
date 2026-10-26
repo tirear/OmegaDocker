@@ -307,6 +307,31 @@ void GpuGridBuilder::buildDistance(const DistBuildView& h, float* out) {
   }
 }
 
+std::shared_ptr<const DeviceBlocks> GpuGridBuilder::buildDevice(const GridBuildView& gh, const DistBuildView& dh,
+                                                                double clamp) {
+  Impl& d = *impl_;
+  check(cudaSetDevice(d.device), "cudaSetDevice");
+  const std::size_t total = static_cast<std::size_t>(gh.n[0]) * gh.n[1] * gh.n[2];
+  const std::size_t maps = static_cast<std::size_t>(gh.typeMapCount) + 3;
+  auto out = std::make_shared<OwnedBlocks>();
+  out->device = d.device;
+  out->floats = maps * total;
+  float* p = nullptr;
+  check(cudaMalloc(&p, out->floats * sizeof(float)), "buildDevice: cudaMalloc");
+  out->ptr = p;
+  const unsigned blocks = static_cast<unsigned>((total + kGridThreads - 1) / kGridThreads);
+  // gridKernel writes map m of point p0 + i at m × count + i: with p0 = 0 and count = total, the
+  // layout of FieldView::maps.
+  const GridBuildView v = uploadGrid(d, gh);
+  gridKernel<<<blocks, kGridThreads>>>(v, clamp, 0, total, p);
+  check(cudaGetLastError(), "gridKernel launch");
+  const DistBuildView dv = uploadDist(d, dh);
+  distKernel<<<blocks, kGridThreads>>>(dv, 0, total, p + (maps - 1) * total);
+  check(cudaGetLastError(), "distKernel launch");
+  check(cudaDeviceSynchronize(), "buildDevice");
+  return out;
+}
+
 void GpuGridBuilder::setReference(std::uint64_t id, const float* const* maps, int mapCount, std::size_t points) {
   Impl& d = *impl_;
   check(cudaSetDevice(d.device), "cudaSetDevice");

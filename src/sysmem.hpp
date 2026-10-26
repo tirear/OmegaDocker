@@ -2,11 +2,13 @@
 // Copyright (C) 2026 Gao Quan-Ze.
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-// Host memory of the process and its limit (memory.hostLimit, spec 13).
+// Host memory of the process and its limit (memory.hostLimit, spec 13); CPU threads
+// (cpu.threadNum, spec 13).
 #pragma once
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace od {
 
@@ -33,5 +35,31 @@ HostMemLimit hostMemLimit(long long mib);
 
 // Returns the freed heap memory to the system (glibc malloc_trim).
 void trimHeap();
+
+// CPU quota of the cgroup of this process in CPUs, rounded down and at least 1: the smallest of its
+// cgroup and of its ancestors (cgroup v2 cpu.max, or cgroup v1 cpu.cfs_quota_us / cpu.cfs_period_us);
+// nullopt when unlimited or unknown. source: the file of the quota.
+std::optional<int> cgroupCpuLimit(std::string* source = nullptr, const std::string& procRoot = "/proc",
+                                  const std::string& cgroupRoot = "/sys/fs/cgroup");
+
+// cpus ordered by their index among the hardware threads of their core that are in cpus
+// (thread_siblings_list under sysCpuRoot), then by number: one thread of every core before the
+// second ones.
+std::vector<int> orderCpusByCore(std::vector<int> cpus, const std::string& sysCpuRoot = "/sys/devices/system/cpu");
+
+struct CpuThreads {
+  int threads = 1;
+  std::string source;
+  std::vector<int> cpus;  // the CPUs this process is bound to (sched_setaffinity)
+};
+
+// cpu.threadNum: n > 0, otherwise (auto) omp_get_max_threads() (OMP_NUM_THREADS or the CPUs of the
+// affinity mask) limited by the cgroup CPU quota. Sets the OpenMP and thread pool thread count and,
+// when fewer than the CPUs of the affinity mask, binds the process to the first of them
+// (orderCpusByCore). Call before any parallel work.
+CpuThreads applyCpuThreads(long long n);
+
+// "0-3,8": the CPUs as ranges.
+std::string cpuListText(const std::vector<int>& cpus);
 
 }  // namespace od

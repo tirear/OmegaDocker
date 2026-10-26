@@ -8,6 +8,10 @@
 #include <array>
 #include <cstdio>
 #include <deque>
+#include <condition_variable>
+#include <mutex>
+#include <exception>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1015,6 +1019,11 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const od::Dock9bParams dp = dockParams(opt, seed);
   // 9b on the GPU (spec 15.1.4, 15.1.5): one evaluator per MobM; field, quick filter and posm2_fft shared by them.
   std::vector<std::unique_ptr<od::PoseEvaluator>> poseEval(mobSets.size());
+  // Several devices (spec 15.1.33): the windows of StaM conformations divided among them
+  // (windowDevices); poseEvalOthers[d - 1]: the evaluators of device d.
+  std::vector<std::vector<std::unique_ptr<od::PoseEvaluator>>> poseEvalOthers;
+  int windowDevices = 1;
+  const auto evalOf = [&](int d, std::size_t i) { return d == 0 ? poseEval[i].get() : poseEvalOthers[d - 1][i].get(); };
   const double distCap = std::max({opt.maxNearDistance, opt.clashDistance,
                                    opt.posm == "posm3" || opt.posm == "posm4" ? opt.sepaShellMax : 0.0}) +
                          2 * opt.gridSpacing;
@@ -1027,7 +1036,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   // StaM conformations docked together (spec 15.1.16) and the device memory for their fields.
   int stamWindow = 1;
   std::function<std::size_t()> gpuFieldBudget = [] { return std::numeric_limits<std::size_t>::max(); };
-  std::function<void(int)> gpuFieldSlots = [](int) {};
+  std::function<void(int, int)> gpuFieldSlots = [](int, int) {};  // (device index, slots)
   std::function<std::size_t()> gpuFree = [] { return std::numeric_limits<std::size_t>::max(); };
 #ifdef OD_HAVE_CUDA
   // Grids on the GPU (spec 15.1.10): the same values as the CPU.
@@ -1062,9 +1071,12 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     // One field per device (spec 15.1.33); the quick filter and posm2_fft on the first device.
     for (int d : opt.gpuDevices) gpuFields.push_back(std::make_shared<od::GpuField>(d));
     stamWindow = opt.gpuDock9bStamNum > 0 ? opt.gpuDock9bStamNum : std::numeric_limits<int>::max();
-    // Resident fields: those of the window (the fields of the previous window are dropped).
-    gpuFieldSlots = [gpuFields](int n) {
-      for (const auto& f : gpuFields) f->setSlots(n);
+    // Resident fields: those of the window (the fields of the previous window are dropped); with
+    // the windows divided among the devices, on the device of the window.
+    gpuFieldSlots = [gpuFields, &windowDevices](int d, int n) {
+      if (windowDevices > 1) gpuFields[d]->setSlots(n);
+      else
+        for (const auto& f : gpuFields) f->setSlots(n);
     };
     // Half of the free device memory and the memory of the resident fields (the smallest of the devices).
     gpuFieldBudget = [&opt, gpuFields] {
@@ -1074,15 +1086,28 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       return b;
     };
     gpuFree = [&opt] { return od::gpuFreeMem(opt.gpuDevices[0]); };
-    auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevices[0]);
+    // Several devices: each window of StaM conformations on one device, with its own quick filter;
+    // posm2_fft (spectra of several StaM conformations shared, spec 15.1.24): the minimizations of
+    // every window divided among the devices (MultiGpuPoseEvaluator).
+    const bool splitWindows = gpuFields.size() > 1 && dp.posm != od::Posm::Posm2Fft;
+    std::vector<std::shared_ptr<od::GpuDockPrep>> gpuPreps;
+    for (std::size_t k = 0; k < gpuFields.size(); ++k)
+      gpuPreps.push_back(k == 0 || splitWindows ? std::make_shared<od::GpuDockPrep>(opt.gpuDevices[k]) : nullptr);
+    if (splitWindows) {
+      windowDevices = static_cast<int>(gpuFields.size());
+      poseEvalOthers.resize(gpuFields.size() - 1);
+      for (auto& v : poseEvalOthers) v.resize(mobSets.size());
+    }
     for (std::size_t i = 0; i < mobSets.size(); ++i) {
       std::vector<std::unique_ptr<od::GpuPoseEvaluator>> ev;
       for (std::size_t k = 0; k < gpuFields.size(); ++k)
         ev.push_back(std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuFields[k], opt.gpuDevices[k],
-                                                            opt.gpuDock9bBatchNum, k == 0 ? gpuPrep : nullptr,
-                                                            opt.gpuDock9bDeviceMin));
+                                                            opt.gpuDock9bBatchNum, gpuPreps[k], opt.gpuDock9bDeviceMin));
       if (ev.size() == 1) poseEval[i] = std::move(ev[0]);
-      else poseEval[i] = std::make_unique<od::MultiGpuPoseEvaluator>(std::move(ev));
+      else if (splitWindows) {
+        poseEval[i] = std::move(ev[0]);
+        for (std::size_t k = 1; k < ev.size(); ++k) poseEvalOthers[k - 1][i] = std::move(ev[k]);
+      } else poseEval[i] = std::make_unique<od::MultiGpuPoseEvaluator>(std::move(ev));
     }
   }
 #else
@@ -1254,6 +1279,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       std::vector<char> posm1Only;
       std::vector<float> lowest;
       std::vector<od::MobmDocker::PairJob> jobs;
+      // Window docked on another thread (windowDevices > 1): the chunks of each job, delivered to
+      // its sink (sinks) on this thread afterwards.
+      std::vector<std::function<void(std::vector<od::DockSample>&)>> sinks;
+      std::vector<std::vector<std::vector<od::DockSample>>> chunks;
     };
     // The members referenced by the dockers stay in place when the item moves.
     struct WindowItem {
@@ -1264,6 +1293,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       std::vector<std::unique_ptr<Group>> groups;  // per MobM; null: no pair; empty: not made yet
     };
     std::vector<WindowItem> window;
+    int curDev = 0;  // device (index in gpu.device) of the window being built
     // The pairs of the StaM conformation that joined the window (its last item), prepared per MobM
     // (L1poss, 8.5); windowPoses: L2poss of the window per MobM.
     std::vector<long long> windowPoses(ms.size(), 0);
@@ -1276,7 +1306,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       for (std::size_t i = 0; i < ms.size(); ++i) {
         const ConfSet& mob = *mobSets[i];
         od::Dock9bParams dpi = dp;
-        dpi.evaluator = poseEval[i].get();
+        dpi.evaluator = evalOf(curDev, i);
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
         auto gp = std::make_unique<Group>();
         Group& g = *gp;
@@ -1320,7 +1350,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     };
     const auto prepareItem = [&] {
       WindowItem& w = window.back();
-      gpuFieldSlots(static_cast<int>(window.size()));
+      gpuFieldSlots(curDev, static_cast<int>(window.size()));
       if (w.groups.empty()) makeGroups(w);
       for (std::size_t i = 0; i < ms.size(); ++i) {
         if (!w.groups[i]) continue;
@@ -1328,7 +1358,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         g.dk->prepareJobs(g.jobs);
         for (const auto& j : g.jobs) windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
         if (poseTarget[i] < 0)
-          poseTarget[i] = poseEval[i] ? kWindowPosesPerResident * static_cast<long long>(poseEval[i]->residentPoses(*g.dk)) : 0;
+          poseTarget[i] = evalOf(curDev, i) ? kWindowPosesPerResident * static_cast<long long>(evalOf(curDev, i)->residentPoses(*g.dk)) : 0;
       }
     };
 
@@ -1346,18 +1376,39 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       if (f.mode() == od::GridMode::Full && stamSet.movable()) return f.geom().size() * maps * sizeof(float) * (packedMaps ? 5 : 1);
       return 0;
     };
-    const auto dockWindow = [&] {
-      if (window.empty()) return;
-      gpuFieldSlots(static_cast<int>(window.size()));
-      ++windows;
-      largestWindow = std::max(largestWindow, window.size());
-      for (std::size_t i = 0; i < ms.size(); ++i) {
-        std::vector<Group*> groups;
-        for (WindowItem& w : window)
-          if (w.groups[i]) groups.push_back(w.groups[i].get());
-        std::vector<od::MobmDocker::PairGroup> pg;
-        for (Group* g : groups) pg.push_back({g->dk.get(), &g->jobs});
-        od::MobmDocker::dockPairs(pg, ms[i].bufferNum);
+    const auto groupsOf = [&](std::vector<WindowItem>& win, std::size_t i) {
+      std::vector<Group*> groups;
+      for (WindowItem& w : win)
+        if (w.groups[i]) groups.push_back(w.groups[i].get());
+      return groups;
+    };
+    // The pairs of MobM i in the window; keep: the chunks kept for the sinks (finishWindow).
+    const auto dockGroups = [&](std::vector<WindowItem>& win, std::size_t i, bool keep) {
+      const std::vector<Group*> groups = groupsOf(win, i);
+      std::vector<od::MobmDocker::PairGroup> pg;
+      for (Group* g : groups) {
+        pg.push_back({g->dk.get(), &g->jobs});
+        if (!keep) continue;
+        g->chunks.assign(g->jobs.size(), {});
+        g->sinks.resize(g->jobs.size());
+        for (std::size_t j = 0; j < g->jobs.size(); ++j) {
+          g->sinks[j] = std::move(g->jobs[j].sink);
+          g->jobs[j].sink = [c = &g->chunks[j]](std::vector<od::DockSample>& chunk) { c->push_back(std::move(chunk)); };
+        }
+      }
+      od::MobmDocker::dockPairs(pg, ms[i].bufferNum);
+    };
+    // Statistics and lowest energies of the docked pairs of MobM i; kept: the kept chunks are
+    // delivered first, in StaM conformation, pair and chunk order (as without keeping them).
+    const auto finishWindow = [&](std::vector<WindowItem>& win, std::size_t i, bool kept) {
+      const std::vector<Group*> groups = groupsOf(win, i);
+      if (kept)
+        for (Group* g : groups)
+          for (std::size_t j = 0; j < g->jobs.size(); ++j) {
+            for (auto& chunk : g->chunks[j]) g->sinks[j](chunk);
+            g->chunks[j] = {};
+          }
+      {
         for (const Group* gp : groups) {
           const Group& g = *gp;
           for (std::size_t j = 0; j < g.mids.size(); ++j) {
@@ -1370,6 +1421,81 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         }
       }
     };
+    // Several devices: a window docked on a host thread (its device's evaluators) while the next
+    // window is built and prepared on the first device that is free; the sinks and statistics in
+    // window order.
+    struct Flight {
+      std::vector<WindowItem> items;
+      int dev = 0;
+      bool done = false;  // flightMutex
+      std::exception_ptr error;
+      std::thread th;
+      ~Flight() {
+        if (th.joinable()) th.join();
+      }
+    };
+    std::deque<std::unique_ptr<Flight>> flights;
+    std::mutex flightMutex;
+    std::condition_variable flightDone;
+    const auto landFront = [&] {
+      std::unique_ptr<Flight> f = std::move(flights.front());
+      flights.pop_front();
+      f->th.join();
+      if (f->error) std::rethrow_exception(f->error);
+      for (std::size_t i = 0; i < ms.size(); ++i) finishWindow(f->items, i, true);
+    };
+    // The docked windows at the front delivered; a free device for the next window.
+    const auto nextDevice = [&] {
+      for (;;) {
+        bool front;
+        {
+          std::lock_guard lk(flightMutex);
+          front = !flights.empty() && flights.front()->done;
+        }
+        if (!front) break;
+        landFront();
+      }
+      std::unique_lock lk(flightMutex);
+      for (;;) {
+        for (int d = 0; d < windowDevices; ++d)
+          if (std::none_of(flights.begin(), flights.end(), [&](const auto& f) { return f->dev == d && !f->done; })) return d;
+        flightDone.wait(lk);
+      }
+    };
+    const auto dockWindow = [&] {
+      if (window.empty()) return;
+      gpuFieldSlots(curDev, static_cast<int>(window.size()));
+      ++windows;
+      largestWindow = std::max(largestWindow, window.size());
+      if (windowDevices == 1) {
+        for (std::size_t i = 0; i < ms.size(); ++i) {
+          dockGroups(window, i, false);
+          finishWindow(window, i, false);
+        }
+        return;
+      }
+      auto f = std::make_unique<Flight>();
+      f->items = std::move(window);
+      f->dev = curDev;
+      window.clear();
+      Flight* fp = f.get();
+      {
+        std::lock_guard lk(flightMutex);
+        flights.push_back(std::move(f));
+      }
+      fp->th = std::thread([&, fp] {
+        try {
+          for (std::size_t i = 0; i < ms.size(); ++i) dockGroups(fp->items, i, true);
+        } catch (...) {
+          fp->error = std::current_exception();
+        }
+        {
+          std::lock_guard lk(flightMutex);
+          fp->done = true;
+        }
+        flightDone.notify_all();
+      });
+    };
     auto stamAtomsOf = [&](int sid, bool input) {
       const auto& sa = stamSet.sample(sid).angles;
       std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end())
@@ -1381,20 +1507,25 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
 #ifdef OD_HAVE_CUDA
     // delta on the GPU (spec 15.1.20): the blocks of the next StaM conformation are computed while
     // the current one joins the window (and the window is docked).
-    bool deltaPending = false;
+    // Windows divided among the devices: the blocks only on the device of the window. deltaSid: the
+    // StaM conformation submitted per device (-1: none); one submitted for a device whose window was
+    // docked meanwhile is dropped when the device builds again (no wait behind the docking).
+    std::vector<int> deltaSid(static_cast<std::size_t>(windowDevices), -1);
+    const auto builderOf = [&](int d) { return d == 0 ? gpuGrid.get() : gpuGridOthers[d - 1].get(); };
     const auto submitDelta = [&](int sid) {
       const od::GridAtoms a = stamAtomsOf(sid, false);
       const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
       const od::GridBuildData gb(geom, a, probe, energyParams(opt));
       const od::DistBuildData db(geom, a, distCap);
+      deltaSid[curDev] = sid;
       for (auto* b : [&] {
-             std::vector<od::GpuGridBuilder*> all{gpuGrid.get()};
-             for (const auto& o : gpuGridOthers) all.push_back(o.get());
+             std::vector<od::GpuGridBuilder*> all{builderOf(curDev)};
+             if (windowDevices == 1)
+               for (const auto& o : gpuGridOthers) all.push_back(o.get());
              return all;
            }())
         b->submitDelta(gb.view, db.view, od::kGridClamp, opt.gridDeltaThreshold,
                        changed.empty() ? nullptr : changed[0].data(), static_cast<int>(changed.size()));
-      deltaPending = true;
     };
 #endif
     // A StaM conformation with its field, regions and spectra (spec 8.1–8.4), in stamIds order.
@@ -1439,17 +1570,23 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
             gpuGrid->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
             for (const auto& o : gpuGridOthers) o->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
           }
-          if (!deltaPending) submitDelta(sid);
+          if (deltaSid[curDev] >= 0 && deltaSid[curDev] != sid) {
+            std::vector<int> bk;
+            builderOf(curDev)->finishDelta(bk, nullptr);
+            deltaSid[curDev] = -1;
+          }
+          if (deltaSid[curDev] < 0) submitDelta(sid);
           std::vector<int> block;
           std::vector<float> data;
-          deltaPending = false;
-          auto dev = gpuGrid->finishDelta(block, deltaHostData ? &data : nullptr);
+          deltaSid[curDev] = -1;
+          auto dev = builderOf(curDev)->finishDelta(block, deltaHostData ? &data : nullptr);
           // The same blocks on the other devices (otherwise GpuField copies them from the first).
-          for (const auto& o : gpuGridOthers) {
-            std::vector<int> bk;
-            auto other = o->finishDelta(bk, nullptr);
-            if (dev && other && bk == block) std::const_pointer_cast<od::DeviceBlocks>(dev)->others.push_back(std::move(other));
-          }
+          if (windowDevices == 1)
+            for (const auto& o : gpuGridOthers) {
+              std::vector<int> bk;
+              auto other = o->finishDelta(bk, nullptr);
+              if (dev && other && bk == block) std::const_pointer_cast<od::DeviceBlocks>(dev)->others.push_back(std::move(other));
+            }
           if (si + 1 < stamIds.size()) submitDelta(stamIds[si + 1]);
           field = od::StamField::delta(fixedGrids, fixedDist, std::move(block), std::move(data), std::move(dev));
         } else
@@ -1463,8 +1600,25 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         blockSum += static_cast<long long>(field.deltaBlockCount());
         blockTotal += static_cast<long long>(field.blockCount());
       } else {
-        const auto [g, d] = build(stamAtoms(false));
-        field = od::StamField::full(g, d);
+#ifdef OD_HAVE_CUDA
+        if (gpuGrid && !deltaHostData) {
+          // Built on the device of the window and kept there (spec 15.1.34).
+          const od::GridAtoms a = stamAtoms(false);
+          const od::GridBuildData gb(geom, a, probe, energyParams(opt));
+          auto g = std::make_shared<od::EnergyGrids>();
+          g->geom = geom;
+          g->types = gb.types;
+          auto d = std::make_shared<od::DistanceGrid>();
+          d->geom = geom;
+          d->cap = distCap;
+          auto dev = builderOf(curDev)->buildDevice(gb.view, od::DistBuildData(geom, a, distCap).view, od::kGridClamp);
+          field = od::StamField::full(std::move(g), std::move(d), std::move(dev));
+        } else
+#endif
+        {
+          const auto [g, d] = build(stamAtoms(false));
+          field = od::StamField::full(g, d);
+        }
       }
       if (!firstBuild && (gridMode == od::GridMode::Flexres || !stamSet.movable())) gridsReused = true;
       std::vector<od::StamSepa> sepas;
@@ -1522,6 +1676,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     };
     std::deque<Built> ahead;
     for (std::size_t si = 0; si < stamIds.size(); ++si) {
+      if (window.empty() && windowDevices > 1) curDev = nextDevice();
       if (ahead.empty()) {
         ahead.push_back(buildItem(si));
         if (usesFft) {
@@ -1570,6 +1725,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     }
     dockWindow();
     window.clear();
+    while (!flights.empty()) landFront();
     od::trimHeap();
     double partialSec = 0;
     for (double s : selectSec) partialSec += s;
@@ -1647,6 +1803,9 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     }
     for (auto& e : poseEval)
       if (e) e->idle();
+    for (auto& v : poseEvalOthers)
+      for (auto& e : v)
+        if (e) e->idle();
     od::logInfo(std::format("  9b docking: {:.2f} s ({} window(s) of StaM conformations docked together, largest {})",
                             dockSec, windows, largestWindow));
     if (stamWindow > 1 && windows > 0) {
@@ -1718,7 +1877,7 @@ std::vector<od::InputHash> inputHashes(const od::Options& opt) {
 }
 
 // --resume (spec 16.4): parameters of the last checkpoint, then the command line
-// (input files may be given again, e.g. when moved); only dock9c.maxRound, gpu.* and memory.hostLimit may differ.
+// (input files may be given again, e.g. when moved); only dock9c.maxRound, gpu.*, cpu.threadNum and memory.hostLimit may differ.
 od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpointing& ck) {
   if (!cli.paramFile.empty()) od::fail("--paramFile cannot be used with --resume (the checkpoint parameters are used)");
   if (!cli.outPrefix.empty()) od::fail("--outPrefix cannot be used with --resume (the run continues in the --resume directory)");
@@ -1758,6 +1917,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuDock9bDeviceMin = stored.gpuDock9bDeviceMin;
   cmp.gpuPackedMaps = stored.gpuPackedMaps;
   cmp.memHostLimit = stored.memHostLimit;
+  cmp.cpuThreadNum = stored.cpuThreadNum;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {
     auto lines = [](const std::string& s) {
@@ -1777,7 +1937,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
       const std::string x = k < la.size() ? la[k] : "", y = k < lb.size() ? lb[k] : "";
       if (x != y) diff += std::format("\n  checkpoint: {}\n  now:        {}", x, y);
     }
-    od::fail("--resume: only dock9c.maxRound, gpu.* and memory.hostLimit may differ from the checkpoint parameters:{}", diff);
+    od::fail("--resume: only dock9c.maxRound, gpu.*, cpu.threadNum and memory.hostLimit may differ from the checkpoint parameters:{}", diff);
   }
   ck.resumeDir = dir;
   ck.resumeRound = round;
@@ -1799,6 +1959,13 @@ int run(int argc, char** argv) {
   Checkpointing ck;
   if (!opt.resume.empty()) opt = resumeOptions(argc, argv, opt, ck);
   od::validateOptions(opt);
+  {
+    const od::CpuThreads ct = od::applyCpuThreads(opt.cpuThreadNum);
+    od::logInfo(std::format("CPU threads {} ({}{}), CPUs {}", ct.threads, ct.source, opt.cpuThreadNum ? "" : ", cpu.threadNum auto",
+                            od::cpuListText(ct.cpus)));
+    if (ct.threads > static_cast<int>(ct.cpus.size()) && !ct.cpus.empty())
+      od::logWarn(std::format("cpu.threadNum {} is more than the {} CPUs this process may use", ct.threads, ct.cpus.size()));
+  }
 
   od::CcdLibrary ccd;
   for (const auto& f : opt.ccd) ccd.addFile(f);

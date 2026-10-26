@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.94 |
+| 文件版本 | 1.95 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1570,10 +1570,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ---
 
-## 13. 記憶體管理
+## 13. 記憶體與 CPU 管理
 
 - `gpu.memLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
 - `memory.hostLimit`（MiB，預設 `auto`）：主機記憶體上限，目前用於 9b 一起最小化的 StaM 構形數（15.1.16）。`auto`：本行程所屬 cgroup 與其上層的最小記憶體上限（cgroup v2 `memory.max`；cgroup v1 memory controller 的 `memory.limit_in_bytes`，SLURM 等工作排程以此限制工作的記憶體）；都沒有上限時為 9b 開始時的常駐記憶體 + `/proc/meminfo` 的 MemAvailable。log 會寫出所用的上限與來源。
+- `cpu.threadNum`（預設 `auto`，1.95）：CPU 執行緒數（OpenMP 與執行緒池）。`auto`：`OMP_NUM_THREADS`，沒有時為本行程可用的 CPU（affinity mask）數，再以 cgroup 的 CPU 配額為上限（cgroup v2 `cpu.max`；cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`；本行程所屬 cgroup 與其上層的最小值，無條件捨去、至少 1）。執行緒數少於可用 CPU 數時，以 `sched_setaffinity` 把本行程限制在其中 n 個 CPU：先取每個核心的第一個硬體執行緒（依 `thread_siblings_list` 中屬於可用 CPU 者的順序），再取第二個，同順序時依 CPU 編號。執行緒數多於可用 CPU 數時照樣使用並寫出警告。log 寫出執行緒數、來源與所用的 CPU（例：`CPU threads 8 (cpu.threadNum), CPUs 0-7`）。與 GPU 溝通的主機執行緒（9b 視窗的對接、9a／9b 的 lanes）不計入，大部分時間在等待 GPU。
+  - 實測（AMD Ryzen 7 9700X，8 核心 16 執行緒，CPU 版 RB4 posm1、`posm1SampleNum` 10000）：9b 4 執行緒 30.45 s、8 執行緒 16.79 s、16 執行緒 14.65 s；CUDA 版例子 A（2 個 GPU）8 與 16 執行緒相同（9b 10.92、10.93 s）。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
 - L2 pool、topSampleSet 存在主機記憶體；L2 pool 不設容量上限。
 - 9b 的對接樣本以 sampleBuffer 分批交給 9c（9），主機記憶體中同時存在的對接樣本最多約 2 × `sampleBufferNum` + `midTopSampleFactor` × `topSampleNum` 個（使用 `dock9c.midKeepSkipped` 時約 3 × `sampleBufferNum` 個）；另外每個構型配對保留其 L2pos 序號（每個 8 bytes）。
@@ -1628,6 +1630,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：視窗的 L2poss 達 48 × GPU 同時計算的姿勢數為止；整數 n：最多 n 個；都受記憶體限制） |
 | `gpu.packedMaps` | `--gpu_packedMaps` | `auto` | 15.1.32（`auto`／`true`／`false`；參考網格另存每點 4 個值的形式，記憶體 4 倍；`auto`：`grid.mode` 為 full 或 flexres，且不超過可用裝置記憶體的 1/4 時使用） |
 | `gpu.dock9bDeviceMin` | `--gpu_dock9bDeviceMin` | `true` | 15.1.26、15.1.28（9b 的整個最小化在 GPU 上，五種 `dock9b.minMethod` 都支援；`lbfgsMemory` > 62 且 `minMethod = lbfgs` 時報錯並結束；false：最小化在 CPU、能量由 GPU 計算） |
+| `cpu.threadNum` | `--cpu_threadNum` | auto | 13（CPU 執行緒數；少於可用 CPU 數時以 `sched_setaffinity` 限制在其中 n 個，每個核心的第一個硬體執行緒優先；auto：`OMP_NUM_THREADS` 或可用 CPU 數，以 cgroup 的 CPU 配額為上限） |
 | `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
@@ -2540,9 +2543,12 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 ### 15.1.33 CUDA 版：多個 GPU（1.93）
 
 `gpu.device` 為裝置編號的清單（例：`--gpu_device=0,1`），第一個為主要裝置。
-- 9b：每個裝置各有 `GpuField`（駐留的場、參考網格）與 `GpuPoseEvaluator`；`MultiGpuPoseEvaluator` 把每次整個最小化（`minimize`）的 pose 平均分給各裝置，各在一個主機執行緒上同時執行，再依原順序合併。每個 pose 的最小化與其他 pose 無關，結果與單一裝置相同（梯度的原子加法順序除外）。快速篩選、posm2_fft、`gpu.dock9bDeviceMin = false` 時的能量評估只在主要裝置。`residentPoses` 為各裝置的總和（`gpu.dock9bStamNum = auto` 的視窗依此變大）；視窗的裝置記憶體上限取各裝置中最小者。
-- delta 區塊：每個裝置各有 `GpuGridBuilder`，同時計算同一構形的區塊（`DeviceBlocks::others`，區塊表與主要裝置不同時不使用）；最初以 `cudaMemcpyPeer` 從主要裝置複製，例子 A 的 bind 多了 3.5 s（兩張卡之間經 PCIe 主機橋，`nvidia-smi topo` 為 PHB），改為各自計算後為 0.04 s。
-- 9a：`MultiGpuConfEvaluator` 的 lanes 為各裝置 lanes 的總和（lane l 在裝置 l / 2），批次為各裝置批次的總和；GPU RCD（7.11）與 9d 的 shaking 只在主要裝置。
+- 9b（1.95 起）：StaM 構形的視窗分給各裝置。每個裝置各有 `GpuField`、`GpuDockPrep`（快速篩選）、`GpuGridBuilder` 與每個 MobM 的 `GpuPoseEvaluator`。主執行緒依序建立視窗：新視窗開始時先交付前面已對接完成的視窗，再選第一個沒有對接中視窗的裝置（都在對接時等待其中一個完成），在該裝置上計算場（delta 區塊或 full 網格，15.1.34）、快速篩選與產生 L1 姿勢；視窗結束時交給一個主機執行緒在該裝置上對接（`dockPairs`），主執行緒接著建立下一個視窗。對接的主機執行緒只保存各配對的樣本（依配對與 chunk），sink（9c 的 sampleBuffer、selection）與統計在主執行緒依視窗、StaM 構形、配對、chunk 的順序執行。`dockPairs` 交給 sink 的順序與 chunk 只由配對決定、與視窗的組成無關，因此輸出與單一裝置相同（例子 A delta 與 full、RB4 posm3 的 `summary.tsv` 逐行相同）。
+  - 一個視窗的樣本在交付前都保存在主機記憶體（單一裝置時隨 sampleBuffer 交給 9c）；視窗的主機記憶體上限照樣以常駐記憶體檢查（15.1.16）。
+  - delta 區塊：只在視窗的裝置計算。下一個構形的區塊在目前構形之後先送出（與快速篩選重疊）；若目前的視窗因此結束、下一個構形改到另一裝置，先送出的區塊在原裝置下次建立視窗時才丟棄（不在原裝置對接時等待）。最初在視窗結束後才送出下一個構形，網格時間 0.25 → 1.62 s（沒有重疊）；直接等待丟棄時為 1.74 s（低優先權的 delta 被對接的 kernel 擋住）。
+  - 裝置的選擇：最初依序輪流（視窗 w 在裝置 w mod 2），RB4 posm3（4 個構形各一個視窗、工作量不同）9b 73.23 s，比 1.93 慢；改為第一個空閒的裝置後 60.86 s。
+  - posm2_fft（多個構形共用 StaM 頻譜，15.1.22）仍用 1.93 的方式：每次最小化的 pose 平均分給各裝置（`MultiGpuPoseEvaluator`）、delta 區塊在每個裝置各自計算、快速篩選與 FFT 在主要裝置。
+- 1.93 的方式（每次最小化平均分給各裝置，視窗的建立與對接依序進行）：快速篩選與 L1 姿勢產生只在主要裝置、且不與對接重疊；delta 區塊在每個裝置重複計算；full 網格在主要裝置計算、下載到主機、再上傳到每個裝置。
 - 共用記憶體上限、multiprocessor 數等裝置屬性在第一次使用時讀取一次，裝置應為同型號。
 
 | 例子 | 裝置 | 全部 | 9a StaM 群 | 9b 對接 | 第 1 名 |
@@ -2556,6 +2562,27 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 
 - 例子 A 的 9b 中，最小化 19.37 → 9.92 s；其餘約 1.8 s 為構形加入視窗時的快速篩選與 L1 姿勢產生（主要裝置與 CPU），不隨裝置數縮短。
 - 例子 A `grid.mode = full`：22.34 → 17.46 s（每個構形的網格需上傳到每個裝置）。
+
+1.95（視窗分給各裝置、full 網格留在裝置上，15.1.34）：
+
+| 例子 | 裝置 | 全部 | 9b 網格 | 9b 對接 | 第 1 名 |
+|---|---|---|---|---|---|
+| A | 0 | 24.75 s | 0.25 s | 21.24 s | −44.792 |
+| A | 0、1 | 13.77 s | 0.48 s | 10.93 s（1.94 倍；1.93：11.82 s） | −44.792 |
+| A `grid.mode = full` | 0 | 25.70 s | 3.63 s | 18.67 s（1.93：網格 7.18 s、對接 22.27 s） | −44.792 |
+| A `grid.mode = full` | 0、1 | 13.91 s | 3.62 s | 8.00 s（1.93：網格 12.43 s、對接 7.70 s） | −44.792 |
+| RB4 posm1 | 0、1 | 4.14 s | 0.14 s | 3.32 s（1.93：4.20 s） | 18.369 |
+| RB4 posm3 | 0 | 107.13 s | 0.23 s | 106.19 s | 12.906 |
+| RB4 posm3 | 0、1 | 61.93 s | 0.26 s | 60.86 s（1.75 倍；1.93：62.91 s） | 12.906 |
+
+- 9b 網格與對接的時間為主執行緒的時間（對接 = 等待對接中的視窗與交付樣本；網格在另一裝置對接時計算）。
+- 例子 A：兩個裝置上對接的主機執行緒共 19.44 s（每個裝置約 9.7 s），9b 對接 10.93 s；差距為第一個視窗的準備（無可重疊的對接）與兩個裝置的工作量不同（13 個視窗）。RB4 posm3：對接的主機執行緒共 95.77 s，9b 對接 60.86 s；4 個視窗的工作量差異大（每個視窗只能在一個裝置上）。可能的改進：一輪最後的視窗在其他裝置空閒時分給多個裝置（場須複製到其他裝置），未實作。
+- **(c) 每張卡的批次再分成小批次，使傳輸與計算重疊（測試，未實作）**：以 CUDA event 量測 `minimizeDock` 的上傳、kernel、下載。例子 A：上傳 0.015 s、kernel 19.33 s、下載 0.006 s（13 次，共 101 MB），對接的主機執行緒共 19.44 s；RB4 posm1：0.010、6.11、0.006 s（主機執行緒 6.18 s）；RB4 posm3：0.111、95.10、0.074 s（22 次，1.2 GB；主機執行緒 95.77 s）。傳輸佔對接時間 0.1–0.2%，GPU 在對接期間 99% 以上的時間在執行 kernel，重疊傳輸沒有可改善的空間。
+
+### 15.1.34 CUDA 版：full 網格留在裝置上（1.95）
+
+`grid.mode = full` 且 StaM 可動、9b 在 GPU 上、且不需要主機上的網格（不是 posm3／posm4 的 StaM 區域、不是 posm2_fft 的頻譜）時，每個構形的網格（各類型、靜電、去溶劑化、距離）以 `GpuGridBuilder::buildDevice` 在視窗的裝置上計算，依 `FieldView::maps` 的排列（第 m 張從 m × 點數開始）留在裝置記憶體（`StamField::full(grids, dist, deviceMaps)`，`grids`、`dist` 只有幾何、類型與距離上限；`hasHostData()` 為 false，CPU 的 energy、distance、pointMap 不可使用）。`GpuField` 在同一裝置上直接使用（不複製），在其他裝置以 `cudaMemcpyPeer` 複製。原本在主要裝置計算、下載到主機、再上傳到每個裝置。數值與 CPU 網格逐位元相同（tests 的 `gpu: energy grids equal the CPU grids`）；以裝置上的網格最小化與主機網格的結果相同（`gpu: packed reference maps, device maps and several evaluators give the same 9b minimizations`，包括複製到另一裝置）。單一裝置也受益：例子 A `grid.mode = full` 網格 7.18 → 3.63 s、9b 對接 22.27 → 18.67 s（log 的每個構形主機記憶體 0 MiB、裝置記憶體 888 MiB（含 4 值形式），17 個視窗都因裝置記憶體結束）。
+
 
 ### 15.2 依賴套件
 
@@ -2683,14 +2710,14 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 ### 16.4 接續
 - `--resume=<outPrefix>`（只能在命令列）：從最後一個完整的檢查點的下一輪開始。
   - 「最後一個完整的檢查點」：`checkpoint/` 下有 `manifest.toml` 的 `round_<r>/` 中 r 最大者（不依賴 `last`，因此 rename 之後、更新 `last` 之前中斷也能取得最新一輪）；`.tmp` 目錄忽略。
-  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`、`gpu.*` 與 `memory.hostLimit`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
+  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`、`gpu.*`、`cpu.threadNum` 與 `memory.hostLimit`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
   - 不可同時使用 `--paramFile`、`--outPrefix`（報錯）；輸出寫回 `--resume` 指定的目錄。
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
   - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`、`gpu.dock9bDeviceMin`、`gpu.packedMaps`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
-- 參數只允許修改 `maxRound`、`gpu.*`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
+- 參數只允許修改 `maxRound`、`gpu.*`、`cpu.threadNum`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
 
 ---
@@ -2936,3 +2963,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 | 1.92 | 2026-10-21 | line search 選項 `{conf9a,dock9b}.lineSearchInit`、`lineSearchReduce`、`maxBacktrack`（12，CPU 與 GPU）；比較結果、CPU／GPU 效能與 AutoDock-GPU 1.6、0.33.0 的比較（15.1.31）；17.3 加入 line search 選項 |
 | 1.93 | 2026-10-26 | 多個 GPU：`gpu.device` 改為清單，9a lanes 與 9b 整個最小化分給各裝置、delta 區塊各自計算（15.1.33）；參考網格的 4 值形式 `gpu.packedMaps`；共用記憶體定點梯度與 Tensor Core 加總的量測（未採用）；CPU 版 9b 已為 float（15.1.32）；建置選項 `OD_NATIVE`（15.1.31） |
 | 1.94 | 2026-10-26 | 使用者決定：不使用 SIMD（15.1.32）；Tensor Core 加總列為下一版（18，F6）；`OD_NATIVE` 保留，預設 OFF（15.1.31） |
+| 1.95 | 2026-10-26 | 新增 `cpu.threadNum`（auto：`OMP_NUM_THREADS` 或可用 CPU 數，cgroup CPU 配額為上限；`sched_setaffinity` 每個核心優先），可在 `--resume` 時修改（13、16）；多個 GPU 時 StaM 構形的視窗分給各裝置（第一個空閒的裝置，主執行緒依序交付樣本，輸出與單一裝置相同），(c) 傳輸與計算重疊的量測（傳輸佔 0.1–0.2%，未實作）（15.1.33）；full 網格留在裝置上（15.1.34） |
