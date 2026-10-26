@@ -30,7 +30,7 @@ using Tokens = std::vector<std::string>;
 
 // Value type of a parameter: in the file a TOML value of this type; on the
 // command line --<option>=<text>, arrays comma separated.
-enum class Type { Real, Int, Bool, Str, RealArr, StrArr, IntAuto };  // IntAuto: integer or "auto"
+enum class Type { Real, Int, Bool, Str, RealArr, StrArr, IntAuto, IntArr };  // IntAuto: integer or "auto"
 
 struct Param {
   std::string key;  // "<table>.<name>", or "<name>" at the top level
@@ -327,7 +327,23 @@ const std::vector<Param>& params() {
                      "9b: grid.mode = delta: a block is stored when a point differs by more than this", OD_ACC(gridDeltaThreshold)));
 
     t.push_back(boolean("gpu.enable", "true", "Use the GPU when built with CUDA and a device is present", OD_ACC(gpuEnable)));
-    t.push_back(integer("gpu.device", "<n>", "0", "CUDA device number", OD_ACC(gpuDevice)));
+    t.push_back({"gpu.device", Type::IntArr, "<n>,...", "0",
+                 "CUDA device numbers; 9b minimizations are divided among them (the first one does the rest)",
+                 [](Options& o, const Tokens& v) {
+                   if (v.empty()) fail("expected at least one device number");
+                   o.gpuDevices.clear();
+                   for (const auto& s : v) {
+                     const int d = toInt32(s);
+                     if (std::find(o.gpuDevices.begin(), o.gpuDevices.end(), d) != o.gpuDevices.end())
+                       fail("device {} given twice", d);
+                     o.gpuDevices.push_back(d);
+                   }
+                 },
+                 [](const Options& o) -> std::optional<Tokens> {
+                   Tokens v;
+                   for (int d : o.gpuDevices) v.push_back(std::to_string(d));
+                   return v;
+                 }});
     t.push_back(integer("gpu.conf9aBatchNum", "<n>", "8192",
                         "9a: samples minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuConf9aBatchNum)));
     t.push_back(boolean("gpu.conf9aRcd", "true",
@@ -345,6 +361,15 @@ const std::vector<Param>& params() {
                  [](const Options& o) -> std::optional<Tokens> { return Tokens{o.gpuConf9aPrecision}; }});
     t.push_back(integer("gpu.dock9bBatchNum", "<n>", "8192",
                         "9b: poses minimized together on the GPU (limited by the free device memory)", OD_ACC(gpuDock9bBatchNum)));
+    t.push_back({"gpu.packedMaps", Type::Str, "auto|true|false", "auto",
+                 "9b: reference maps also with the 4 values of (i,j,k), (i,j+1,k), (i,j,k+1), (i,j+1,k+1) at each point "
+                 "(4 times the memory; auto: grid.mode full or flexres, when they fit in a quarter of the free device memory)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "auto" && s != "true" && s != "false") fail("expected auto, true or false but got '{}'", s);
+                   o.gpuPackedMaps = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.gpuPackedMaps}; }});
     t.push_back(boolean("gpu.dock9bDeviceMin", "true",
                         "9b: whole minimizations on the GPU (dock9b.lbfgsMemory at most 62 with lbfgs; false: the "
                         "minimizer runs on the CPU with energies from the GPU)",
@@ -632,10 +657,11 @@ Tokens tomlTokens(const toml::node& v, Type type) {
         fail("must be a string");
     }
   };
-  if (type == Type::RealArr || type == Type::StrArr) {
+  if (type == Type::RealArr || type == Type::StrArr || type == Type::IntArr) {
     if (!v.is_array()) fail("must be an array");
     Tokens t;
-    for (const auto& e : *v.as_array()) t.push_back(scalar(e, type == Type::RealArr ? Type::Real : Type::Str));
+    for (const auto& e : *v.as_array())
+      t.push_back(scalar(e, type == Type::RealArr ? Type::Real : type == Type::IntArr ? Type::Int : Type::Str));
     return t;
   }
   return {scalar(v, type)};
@@ -688,6 +714,7 @@ std::string tomlValue(const Param& p, const Tokens& t) {
     case Type::Str: return tomlString(t.front());
     case Type::IntAuto: return t.front() == "auto" ? tomlString(t.front()) : t.front();
     case Type::RealArr:
+    case Type::IntArr:
     case Type::StrArr: {
       std::string s = "[";
       for (std::size_t i = 0; i < t.size(); ++i)
@@ -747,7 +774,7 @@ Options parseCommandLine(int argc, const char* const* argv) {
   }
   for (const auto& [p, arg, value] : overrides) {
     try {
-      const bool array = p->type == Type::RealArr || p->type == Type::StrArr;
+      const bool array = p->type == Type::RealArr || p->type == Type::StrArr || p->type == Type::IntArr;
       p->set(o, array ? splitComma(value) : Tokens{value});
     } catch (const Error& e) {
       problems.push_back(std::format("command line: {}: {}", arg, e.what()));
@@ -845,7 +872,7 @@ void validateOptions(const Options& o) {
   check(o.EclashBase > o.Emax, "energy.EclashBase", "greater than energy.Emax");
   check(o.gridSpacing > 0, "grid.spacing", "> 0");
   check(o.gridDeltaThreshold >= 0, "grid.deltaThreshold", ">= 0");
-  check(o.gpuDevice >= 0, "gpu.device", ">= 0");
+  check(std::all_of(o.gpuDevices.begin(), o.gpuDevices.end(), [](int d) { return d >= 0; }), "gpu.device", ">= 0");
   check(o.gpuConf9aBatchNum >= 1, "gpu.conf9aBatchNum", ">= 1");
   check(o.gpuConf9aRcdMinBatch >= 1, "gpu.conf9aRcdMinBatch", ">= 1");
   check(o.gpuDock9bBatchNum >= 1, "gpu.dock9bBatchNum", ">= 1");

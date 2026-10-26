@@ -475,6 +475,30 @@ TEST_CASE("cli: 9a RCD on the GPU (gpu.conf9aRcd, gpu.conf9aRcdMinBatch)") {
   CHECK_THROWS_AS(od::validateOptions(bad), od::Error);
 }
 
+TEST_CASE("cli: several devices (gpu.device) and gpu.packedMaps") {
+  const od::Options d = parse({});
+  CHECK(d.gpuDevices == std::vector<int>{0});
+  CHECK(d.gpuPackedMaps == "auto");
+  const auto o = parse({"--gpu_device=1,0", "--gpu_packedMaps=false"});
+  CHECK(o.gpuDevices == std::vector<int>{1, 0});
+  CHECK(o.gpuPackedMaps == "false");
+  for (const char* bad : {"--gpu_device=0,0", "--gpu_device=", "--gpu_device=a", "--gpu_packedMaps=yes"})
+    CHECK_THROWS_AS(parse({bad}), od::Error);
+  auto neg = parse({"--gpu_device=-1"});
+  CHECK_THROWS_AS(od::validateOptions(neg), od::Error);
+  // TOML: an array of integers, written back the same way.
+  const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_dev_{}.toml", ::getpid())).string();
+  std::ofstream(path) << "formatVersion = 1\n[gpu]\ndevice = [0, 1]\n";
+  const auto f = parse({("--paramFile=" + path).c_str()});
+  CHECK(f.gpuDevices == std::vector<int>{0, 1});
+  CHECK(od::paramsText(f).find("device = [0, 1]\n") != std::string::npos);
+  std::ofstream(path) << "formatVersion = 1\n[gpu]\ndevice = 1\n";
+  CHECK_THROWS_AS(parse({("--paramFile=" + path).c_str()}), od::Error);
+  std::ofstream(path) << "formatVersion = 1\n[gpu]\ndevice = [0.5]\n";
+  CHECK_THROWS_AS(parse({("--paramFile=" + path).c_str()}), od::Error);
+  std::filesystem::remove(path);
+}
+
 TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, memory.hostLimit)") {
   const od::Options d = parse({});
   CHECK(d.gpuDock9bStamNum == 0);

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.92 |
+| 文件版本 | 1.93 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1619,13 +1619,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `grid.deltaThreshold` | `--grid_deltaThreshold` | 1×10⁻⁴ | 8.1（kcal/mol；距離網格為 Å） |
 | `gpu.memLimit`（未實作） | `--gpu_memLimit` | 可用量 90% | 13 |
 | `gpu.enable` | `--gpu_enable` | true | 15.1.3（以 CUDA 建置且有裝置時使用 GPU） |
-| `gpu.device` | `--gpu_device` | 0 | 15.1.3 |
+| `gpu.device` | `--gpu_device` | `[0]` | 15.1.3、15.1.33（裝置編號的清單，TOML 為整數陣列、命令列以逗號分隔；第一個為主要裝置，9a 的 lanes 與 9b 的整個最小化分給所有裝置；不可重複） |
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
 | `gpu.conf9aRcd` | `--gpu_conf9aRcd` | `true` | 15.1.18（9a 的 RCD 閉合在 GPU 上；不含 `rcdClash` 與金屬配位距離） |
 | `gpu.conf9aRcdMinBatch` | `--gpu_conf9aRcdMinBatch` | 1024 | 15.1.18（≥ 1；L1 批次至少這麼多樣本才用 GPU） |
 | `gpu.dock9bBatchNum` | `--gpu_dock9bBatchNum` | 8192 | 15.1.4（受可用 GPU 記憶體 90% 限制） |
 | `gpu.dock9bStamNum` | `--gpu_dock9bStamNum` | auto | 15.1.16（一起最小化的 StaM 構形數；auto：視窗的 L2poss 達 48 × GPU 同時計算的姿勢數為止；整數 n：最多 n 個；都受記憶體限制） |
+| `gpu.packedMaps` | `--gpu_packedMaps` | `auto` | 15.1.32（`auto`／`true`／`false`；參考網格另存每點 4 個值的形式，記憶體 4 倍；`auto`：`grid.mode` 為 full 或 flexres，且不超過可用裝置記憶體的 1/4 時使用） |
 | `gpu.dock9bDeviceMin` | `--gpu_dock9bDeviceMin` | `true` | 15.1.26、15.1.28（9b 的整個最小化在 GPU 上，五種 `dock9b.minMethod` 都支援；`lbfgsMemory` > 62 且 `minMethod = lbfgs` 時報錯並結束；false：最小化在 CPU、能量由 GPU 計算） |
 | `memory.hostLimit` | `--memory_hostLimit` | auto | 13、15.1.16（主機記憶體上限，MiB；auto：cgroup 的上限，沒有時為常駐記憶體 + MemAvailable） |
 | `output.pdb` | `--output_pdb` | true | 10 |
@@ -2500,6 +2501,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V；GPU 同時用於桌面顯
 | RB4 posm1 | 全部 | 139.8 s | 8.6 s | 16 |
 
 - CPU 版以 `-march=native` 編譯（AVX-512）：RB4 posm1 9b 125.5 → 110.3 s（快 12%），網格 1.91 → 1.61 s。未採用為預設（執行檔只能在同類 CPU 上執行）。
+  - 1.93：加入建置選項 `-DOD_NATIVE=ON`（`-march=native -ffp-contract=off`）。12% 主要來自 GCC 把 a·b + c 合併為 FMA（GCC 14 在 `-std=c++20` 下預設合併）：同一運算在不同函式中合併與否不同，3 個要求逐位元相同的測試失敗（`StamField` 與 flat 形式的場能量、9b 樣本能量的重新計算、能量 kernel 的 flat 形式）。加上 `-ffp-contract=off` 後全部測試通過、結果與一般建置相同，RB4 posm1 9b 125.2 → 122.3 s（快 2%）。
 - GPU `energy_gpu.cu` 以 `-use_fast_math` 編譯（AutoDock-GPU 的設定）：例子 A 23.2 s、RB4 7.0 s，與目前相同（1.90 已改用硬體倒數）。未採用。
 
 **(5) 與 AutoDock-GPU 1.6、OmegaDocker 0.33.0 的比較**
@@ -2511,6 +2513,49 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V；GPU 同時用於桌面顯
   - 一個 block 處理一個個體；預設的局部搜尋為 ADADELTA（每步 1 次評估、無 line search）；本程式已有 `adadelta`（12），但在 1.54 的測試中步數多、較慢。
   - 原子數上限 256 與相關的固定大小陣列不適用於本程式。
 - OmegaDocker 0.33.0（`olderVersions/new33d_github`）：以 AutoDock-GPU 1.5.2 為基礎，主要改動為每 block 1024 threads、最小化與座標輸出分成不同 kernel、kernel 4 產生子代時先篩選能量、條件判斷的簡化。這些在 0.40 已有對應（可變 block 大小、整個最小化在 GPU、9b 快速篩選與 `E_max`），沒有新的可借鑑之處。
+
+### 15.1.32 CUDA 版：參考網格的 4 值形式與其他嘗試（1.93）
+
+AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計算；顯示改由另一張 T1000）。時間為 `zbench: 9b device minimizer`（tests/test_input.cpp，略過的測試；FieldSet 的 3 種場、8192 個 pose、200 步，取 5 次中最短者）每次能量評估的時間，或主程式的 9b 時間（例子 A、RB4 同 15.1.31）。
+
+**(1) 參考網格的 4 值形式（`gpu.packedMaps`，採用）**：同 AutoDock-GPU 1.6，每個網格點另存 (i, j, k)、(i, j+1, k)、(i, j, k+1)、(i, j+1, k+1) 的 4 個值（`FieldView::packed`，`packMapsKernel` 在裝置上由原網格產生；記憶體為 4 倍，不取代原網格）。三線性內插的 8 個角都在參考網格時（full、flexres 的固定原子網格、delta 中未儲存的區塊），每張網格以 2 次 16 bytes 讀取（x 與 x+1）取得，原為 8 次。值與原網格相同，結果逐位元相同（同樣的評估次數）。
+
+| | full | flexres | delta |
+|---|---|---|---|
+| 原本（µs／評估，adadelta） | 1.157 | 2.006 | 1.049 |
+| 4 值形式 | 0.925（−20%） | 1.954（−3%） | 0.994（−5%） |
+| 上限估計：每張網格只讀 2 個角（結果不正確，只用於估計） | 0.893 | 1.896 | 0.886 |
+
+- 主程式：例子 A `grid.mode = full` 9b 24.10 → 22.34 s（−7%）；delta（預設）21.20 → 21.21 s（無差異：MobM 多半位於 StaM 附近、儲存的 delta 區塊內）。
+- delta 區塊也存成 4 值形式（8 個角在同一區塊時使用）：例子 A 21.27 → 21.41 s，沒有改善，且每個構形的區塊記憶體為 5 倍（視窗變小）；未採用。
+- 預設 `auto`：只在 full、flexres 使用，且 4 值網格不超過可用裝置記憶體的 1/4；full 且 StaM 可動時，每個構形各有一組網格，視窗的記憶體估計以 5 倍計算。
+
+**(2) 梯度以共用記憶體的定點數累加（AutoDock-GPU 的作法，未採用）**：AutoDock-GPU 1.6 的原子數上限 256 使座標、梯度與基因型可放入固定大小的共用記憶體（`sFloatBuff[6 × MAX_NUM_OF_ATOMS + …]`），梯度以 32 位元整數的定點數（`TERMSCALE`，限制在 ±`MAXTERM`）做共用記憶體的原子加法（sm_70 上只有 32 位元整數的共用記憶體原子加法是硬體指令；float、double、64 位元整數都是 CAS 迴圈，以 `cuobjdump -sass` 確認）。本程式已有的對應：座標與兩面角的 cos／sin 在放得下時存於動態共用記憶體（1.61，大小不限於 256 個原子），pair 的資料精簡（1.71、1.91），梯度則以 double 原子加法寫入 L2（依分量排列，1.68），且 warp 內先加總（分段加總、32 × 32 tile，1.61、1.85），原子操作的次數已少。
+- 試作：放得下時梯度改存於共用記憶體，64 位元定點數（2⁻²⁴ kcal/mol/Å）拆成 2 個 32 位元整數的原子加法（低 16 位元與其餘，整數相加與順序無關、結果確定）。例子 A 9b 22.14 → 23.05 s、RB4 posm1 6.66 → 6.93 s（慢 4%，每個 pose 的步數相同）；只用 1 個 32 位元整數（精度 2⁻⁸，只用於估計）時步數大幅改變，無法比較。未採用。
+
+**(3) Tensor Core 的加總（AutoDock-GPU 的 `TENSOR=ON`，未採用）**：AutoDock-GPU 以 Tensor Core（wmma_extension TCEC）加總 block 內的能量與梯度。本程式這部分的加總為 double 的 warp shuffle；省略能量各項的 warp 加總（結果不正確，只用於估計）每次評估只快 2–3%（full 1.155 → 1.129、delta 1.049 → 1.029 µs），Tensor Core 只能縮短其中一部分，且 sm_70 的輸入為 half；未實作。
+
+**(4) CPU 版 9b 的 float 與 SIMD**：CPU 版 9b 的 pose 能量已經以 float 計算（`MobmDocker::evaluate` 與 `dock::evaluate<float>` 逐位元相同，tests 的 `dock9b: flat field and pose energy equal …`）。SIMD 需把 pair 迴圈改為 tile 與手寫向量指令（gather／scatter），`-march=native` 的自動向量化只快 2%（15.1.31）；未實作。
+
+### 15.1.33 CUDA 版：多個 GPU（1.93）
+
+`gpu.device` 為裝置編號的清單（例：`--gpu_device=0,1`），第一個為主要裝置。
+- 9b：每個裝置各有 `GpuField`（駐留的場、參考網格）與 `GpuPoseEvaluator`；`MultiGpuPoseEvaluator` 把每次整個最小化（`minimize`）的 pose 平均分給各裝置，各在一個主機執行緒上同時執行，再依原順序合併。每個 pose 的最小化與其他 pose 無關，結果與單一裝置相同（梯度的原子加法順序除外）。快速篩選、posm2_fft、`gpu.dock9bDeviceMin = false` 時的能量評估只在主要裝置。`residentPoses` 為各裝置的總和（`gpu.dock9bStamNum = auto` 的視窗依此變大）；視窗的裝置記憶體上限取各裝置中最小者。
+- delta 區塊：每個裝置各有 `GpuGridBuilder`，同時計算同一構形的區塊（`DeviceBlocks::others`，區塊表與主要裝置不同時不使用）；最初以 `cudaMemcpyPeer` 從主要裝置複製，例子 A 的 bind 多了 3.5 s（兩張卡之間經 PCIe 主機橋，`nvidia-smi topo` 為 PHB），改為各自計算後為 0.04 s。
+- 9a：`MultiGpuConfEvaluator` 的 lanes 為各裝置 lanes 的總和（lane l 在裝置 l / 2），批次為各裝置批次的總和；GPU RCD（7.11）與 9d 的 shaking 只在主要裝置。
+- 共用記憶體上限、multiprocessor 數等裝置屬性在第一次使用時讀取一次，裝置應為同型號。
+
+| 例子 | 裝置 | 全部 | 9a StaM 群 | 9b 對接 | 第 1 名 |
+|---|---|---|---|---|---|
+| A | 0 | 24.84 s | 2.61 s | 21.25 s | −44.792 |
+| A | 0、1 | 14.51 s | 1.55 s | 11.82 s（1.80 倍） | −44.792 |
+| RB4 posm1 | 0 | 7.39 s | 0.26 s | 6.51 s | 18.369 |
+| RB4 posm1 | 0、1 | 5.11 s | 0.22 s | 4.20 s（1.55 倍） | 18.369 |
+| RB4 posm3 | 0 | 107.22 s | 0.26 s | 106.20 s | 12.906 |
+| RB4 posm3 | 0、1 | 64.00 s | 0.23 s | 62.91 s（1.69 倍） | 12.906 |
+
+- 例子 A 的 9b 中，最小化 19.37 → 9.92 s；其餘約 1.8 s 為構形加入視窗時的快速篩選與 L1 姿勢產生（主要裝置與 CPU），不隨裝置數縮短。
+- 例子 A `grid.mode = full`：22.34 → 17.46 s（每個構形的網格需上傳到每個裝置）。
 
 ### 15.2 依賴套件
 
@@ -2643,7 +2688,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V；GPU 同時用於桌面顯
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
-  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`、`gpu.dock9bDeviceMin`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
+  - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`、`gpu.dock9bDeviceMin`、`gpu.packedMaps`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpu.*`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
 - 程式版本不同 → 報錯並結束。
@@ -2888,3 +2933,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V；GPU 同時用於桌面顯
 | 1.90 | 2026-10-21 | 能量核心最佳化：float 原子對以硬體倒數與 `rsqrtf`、只保留 12-6／12-10、格點內插乘以間距的倒數（CPU 與 GPU）、兩面角梯度以子樹前綴和計算；9b 快 17%，9a float 快 12%（15.1.29） |
 | 1.91 | 2026-10-21 | 原子常數與原子對參數對齊（約 1%）；記錄未採用的嘗試（暫存器限制、試驗點只算能量）與 9b 線搜尋、posm3 離開格點的統計（15.1.30） |
 | 1.92 | 2026-10-21 | line search 選項 `{conf9a,dock9b}.lineSearchInit`、`lineSearchReduce`、`maxBacktrack`（12，CPU 與 GPU）；比較結果、CPU／GPU 效能與 AutoDock-GPU 1.6、0.33.0 的比較（15.1.31）；17.3 加入 line search 選項 |
+| 1.93 | 2026-10-26 | 多個 GPU：`gpu.device` 改為清單，9a lanes 與 9b 整個最小化分給各裝置、delta 區塊各自計算（15.1.33）；參考網格的 4 值形式 `gpu.packedMaps`；共用記憶體定點梯度與 Tensor Core 加總的量測（未採用）；CPU 版 9b 已為 float（15.1.32）；建置選項 `OD_NATIVE`（15.1.31） |

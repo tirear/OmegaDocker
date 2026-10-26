@@ -5445,6 +5445,71 @@ TEST_CASE("gpu: 9b poses of several resident fields in one call") {
   ev.idle();
 }
 
+// gpu.packedMaps (spec 15.1.32) and minimizations divided among evaluators (spec 15.1.33; with one
+// device, two evaluators on it): the same results.
+TEST_CASE("gpu: packed reference maps and several evaluators give the same 9b minimizations") {
+  if (od::gpuDeviceCount() == 0) {
+    MESSAGE("no CUDA device; skipped");
+    return;
+  }
+  FieldSet fs;
+  const int nt = fs.x.mobSys->torsionCount();
+  const int dev1 = od::gpuDeviceCount() > 1 ? 1 : 0;
+  for (const auto& [name, field] : fs.fields) {
+    INFO(name);
+    od::Dock9bParams p = fs.p;
+    p.minimizer.maxSteps = 100;
+    const od::MobmDocker dk(*fs.x.mobSys, field, p);
+    const auto c = dk.conformation(fs.x.mobSys->inputAngles());
+    const auto poses = filteredPoses(dk, c, 301);
+    const int n = static_cast<int>(poses.size());
+    std::vector<od::PoseRequest> req;
+    for (int i = 0; i < n; ++i) req.push_back({poses[i], c.center, c.anglesDeg.data()});
+    const auto run = [&](od::PoseEvaluator& ev, std::vector<od::DockMinResult>& r, std::vector<float>& a) {
+      r.assign(n, {});
+      a.assign(static_cast<std::size_t>(n) * nt, 0.0f);
+      ev.bind(dk);
+      REQUIRE(ev.minimize(n, req.data(), dk.deviceMinParams(), r.data(), a.data()));
+      ev.idle();
+    };
+    std::vector<od::DockMinResult> r0, r1, r2;
+    std::vector<float> a0, a1, a2;
+    {
+      od::GpuPoseEvaluator ev(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, 4096);
+      run(ev, r0, a0);
+    }
+    {
+      auto f = std::make_shared<od::GpuField>(0);
+      f->setPackedMaps(od::GpuField::Packed::On);
+      od::GpuPoseEvaluator ev(fs.x.mobSys->model(), f, 0, 4096);
+      run(ev, r1, a1);
+    }
+    {
+      std::vector<std::unique_ptr<od::GpuPoseEvaluator>> evs;
+      evs.push_back(std::make_unique<od::GpuPoseEvaluator>(fs.x.mobSys->model(), std::make_shared<od::GpuField>(0), 0, 4096));
+      evs.push_back(std::make_unique<od::GpuPoseEvaluator>(fs.x.mobSys->model(), std::make_shared<od::GpuField>(dev1), dev1, 4096));
+      od::MultiGpuPoseEvaluator ev(std::move(evs));
+      run(ev, r2, a2);
+    }
+    // Packed maps: the same values in another layout (identical results up to the order of the
+    // gradient atomics); the divided call: each minimization as alone.
+    int same1 = 0, same2 = 0;
+    for (int i = 0; i < n; ++i) {
+      const auto e = [](const od::DockMinResult& r) { return r.dterms.inter + r.terms.vdw + r.terms.hbond + r.terms.elec + r.terms.desolv; };
+      CHECK(r1[i].ok == r0[i].ok);
+      CHECK(r2[i].ok == r0[i].ok);
+      if (!r0[i].ok) continue;
+      same1 += std::abs(e(r1[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
+      same2 += std::abs(e(r2[i]) - e(r0[i])) <= 1e-3 * std::max(1.0, std::abs(e(r0[i])));
+    }
+    int ok = 0;
+    for (const auto& r : r0) ok += r.ok;
+    MESSAGE(std::format("{}: {} minimized; same energy: packed {}, divided {}", name, ok, same1, same2));
+    CHECK(same1 >= ok * 9 / 10);
+    CHECK(same2 >= ok * 9 / 10);
+  }
+}
+
 TEST_CASE("gpu: 9b quick filter and posm2_fft match the CPU path") {
   if (od::gpuDeviceCount() == 0) {
     MESSAGE("no CUDA device; skipped");
@@ -5753,6 +5818,44 @@ static void zbenchAll(const char* label) {
     MESSAGE(line);
   }
 }
+// Time per energy evaluation of the 9b device minimizer (each field of FieldSet, lbfgs and
+// adadelta, 8192 poses, 200 steps); ZB_REPS repetitions (default 5).
+TEST_CASE("zbench: 9b device minimizer" * doctest::skip()) {
+  if (od::gpuDeviceCount() == 0) return;
+  FieldSet fs;
+  auto gfield = std::make_shared<od::GpuField>(0);
+  od::GpuPoseEvaluator ev(fs.x.mobSys->model(), gfield, 0, 8192);
+  const int nt = fs.x.mobSys->torsionCount(), reps = std::getenv("ZB_REPS") ? std::atoi(std::getenv("ZB_REPS")) : 5;
+  for (const auto& [name, field] : fs.fields) {
+    for (const char* method : {"lbfgs", "adadelta"}) {
+      od::Dock9bParams p = fs.p;
+      p.minimizer.method = od::parseMinMethod(method);
+      p.minimizer.maxSteps = 200;
+      const od::MobmDocker dk(*fs.x.mobSys, field, p);
+      ev.bind(dk);
+      const auto c = dk.conformation(fs.x.mobSys->inputAngles());
+      auto poses = filteredPoses(dk, c, 2048);
+      while (poses.size() < 8192) poses.insert(poses.end(), poses.begin(), poses.begin() + std::min<std::size_t>(poses.size(), 8192 - poses.size()));
+      const int n = static_cast<int>(poses.size());
+      std::vector<od::PoseRequest> req;
+      for (int i = 0; i < n; ++i) req.push_back({poses[i], c.center, c.anglesDeg.data()});
+      std::vector<od::DockMinResult> dres(n);
+      std::vector<float> dang(static_cast<std::size_t>(n) * nt);
+      REQUIRE(ev.minimize(n, req.data(), dk.deviceMinParams(), dres.data(), dang.data()));
+      double best = 1e300;
+      long long evals = 0;
+      for (int r = 0; r < reps; ++r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        ev.minimize(n, req.data(), dk.deviceMinParams(), dres.data(), dang.data());
+        best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+      }
+      for (const auto& d : dres) evals += d.evaluations;
+      MESSAGE(std::format("{} {}: {:.0f} us, {} evaluations, {:.4f} us per evaluation", name, method, best, evals, best / evals));
+    }
+  }
+  ev.idle();
+}
+
 TEST_CASE("zbench: latency" * doctest::skip()) {
   zbenchAll<float>("float");
   if (!std::getenv("ZB_FLOAT")) zbenchAll<double>("double");

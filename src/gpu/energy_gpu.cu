@@ -1260,8 +1260,23 @@ void gpuDownload(const float* device, float* host, std::size_t n) {
 // Reference maps of a field, shared by the slots with the same grids (FieldModel::base).
 struct FieldMaps {
   std::shared_ptr<const void> base, baseDist;
-  DevBuf<float> maps;
+  DevBuf<float> maps, packed;
 };
+
+// FieldView::packed from the maps (nm maps of n[0] × n[1] × n[2] points).
+__global__ void packMapsKernel(const float* maps, float4* packed, int nm, int n0, int n1, int n2) {
+  const std::size_t points = static_cast<std::size_t>(n0) * n1 * n2;
+  for (std::size_t g = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x; g < points * nm;
+       g += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+    const std::size_t m = g / points, pt = g % points;
+    const int i = static_cast<int>(pt % n0), j = static_cast<int>(pt / n0 % n1), k = static_cast<int>(pt / n0 / n1);
+    (void)i;
+    const float* mp = maps + m * points;
+    const std::size_t dy = n0, dz = static_cast<std::size_t>(n0) * n1;
+    const bool y1 = j + 1 < n1, z1 = k + 1 < n2;
+    packed[g] = make_float4(mp[pt], y1 ? mp[pt + dy] : 0.0f, z1 ? mp[pt + dz] : 0.0f, y1 && z1 ? mp[pt + dy + dz] : 0.0f);
+  }
+}
 
 // One resident field.
 struct FieldSlot {
@@ -1281,6 +1296,7 @@ struct FieldSlot {
 
 struct GpuField::Impl {
   int device = 0;
+  Packed packed = Packed::Off;
   std::vector<std::unique_ptr<FieldSlot>> slots;  // capacity: slots.size()
   int current = -1;
   std::uint64_t clock = 0;
@@ -1305,6 +1321,7 @@ std::uint64_t GpuField::id() const {
   const Impl& d = *impl_;
   return d.current >= 0 ? d.slots[d.current]->id : 0;
 }
+void GpuField::setPackedMaps(Packed p) { impl_->packed = p; }
 const FieldView& GpuField::deviceView() const { return impl_->slots[impl_->current]->view; }
 
 std::size_t GpuField::deviceBytes() const {
@@ -1316,7 +1333,7 @@ std::size_t GpuField::deviceBytes() const {
     b += s->bytes();
     if (s->maps && std::find(seen.begin(), seen.end(), s->maps.get()) == seen.end()) {
       seen.push_back(s->maps.get());
-      b += s->maps->maps.n * sizeof(float);
+      b += (s->maps->maps.n + s->maps->packed.n) * sizeof(float);
     }
   }
   return b;
@@ -1391,14 +1408,30 @@ void GpuField::set(const FieldModel& fm) {
             "upload map");
     maps->base = fm.base;
     maps->baseDist = fm.baseDist;
+    const std::size_t packedBytes = 16 * static_cast<std::size_t>(nm) * fm.points;
+    if (d.packed == Packed::On || (d.packed == Packed::IfFits && packedBytes <= gpuFreeMem(d.device) / 4)) {
+      maps->packed.reserve(4 * static_cast<std::size_t>(nm) * fm.points);
+      packMapsKernel<<<1024, 256>>>(maps->maps.p, reinterpret_cast<float4*>(maps->packed.p), nm, fm.view.n[0], fm.view.n[1],
+                                    fm.view.n[2]);
+      check(cudaDeviceSynchronize(), "packMapsKernel");
+    }
   }
   auto sp = std::make_unique<FieldSlot>();
   FieldSlot& s = *sp;
   s.maps = std::move(maps);
   // Delta blocks already in device memory (built there) are used in place.
   if (fm.deviceData && fm.deviceData->device == d.device) s.deviceData = fm.deviceData;
+  else if (fm.deviceData && std::any_of(fm.deviceData->others.begin(), fm.deviceData->others.end(),
+                                        [&](const auto& o) { return o->device == d.device; }))
+    s.deviceData = *std::find_if(fm.deviceData->others.begin(), fm.deviceData->others.end(),
+                                 [&](const auto& o) { return o->device == d.device; });
   else if (fm.data) s.data.upload(*fm.data);
-  else if (fm.deviceData) throw Error("GpuField: delta blocks on another device");
+  else if (fm.deviceData) {  // built on another device (spec 15.1.33)
+    s.data.reserve(std::max<std::size_t>(1, fm.deviceData->floats));
+    if (fm.deviceData->floats)
+      check(cudaMemcpyPeer(s.data.p, d.device, fm.deviceData->ptr, fm.deviceData->device, fm.deviceData->floats * sizeof(float)),
+            "cudaMemcpyPeer delta blocks");
+  }
   else s.data.upload(std::vector<float>{});
   s.block.upload(fm.block);
   s.moved.upload(fm.moved);
@@ -1416,6 +1449,7 @@ void GpuField::set(const FieldModel& fm) {
   s.pairN.upload(fm.pairN);
   FieldView v = fm.view;
   for (int m = 0; m < nm; ++m) v.maps[m] = s.maps->maps.p + static_cast<std::size_t>(m) * fm.points;
+  v.packed = s.maps->packed.p;
   v.data = s.deviceData ? s.deviceData->ptr : s.data.p;
   v.block = s.block.p;
   v.moved = s.moved.p;

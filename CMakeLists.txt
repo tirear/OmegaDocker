@@ -15,6 +15,10 @@ endif()
 option(OD_STATIC_DEPS "Link third-party libraries statically" OFF)
 option(OD_BUILD_TESTS "Build tests" ON)
 option(OD_CUDA "Build the CUDA back end" OFF)
+option(OD_NATIVE "Compile the host code for the CPU of the build machine (-march=native; spec 15.1.31)" OFF)
+if(OD_NATIVE)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=native> $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off> $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
+endif()
 
 # ---------- dependencies ----------
 if(OD_STATIC_DEPS)

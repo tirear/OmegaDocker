@@ -23,6 +23,8 @@ build/tests/od_tests
 
 `-DOD_CUDA=ON` builds the CUDA back end (CUDA 12.x; `CMAKE_CUDA_ARCHITECTURES` defaults to 70). Set `CMAKE_CUDA_COMPILER` to the `nvcc` to use.
 
+`-DOD_NATIVE=ON` compiles the host code with `-march=native` (faster on the CPU of the build machine; the program may not run on other CPUs).
+
 # License
 
 OmegaDocker is licensed under the GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later); see [LICENSE](LICENSE).

@@ -4,10 +4,12 @@
 
 #pragma once
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 #include "conf9a.hpp"
 #include "energy_gpu.hpp"
+#include "error.hpp"
 
 namespace od {
 
@@ -62,6 +64,42 @@ class GpuConfEvaluator : public ConfEvaluator {
   int size_[GpuEnergy::kLanes] = {};
   int batch_ = 1;
   std::vector<FlatTerms> buf_;
+};
+
+// 9a energies on several GPUs (spec 15.1.33): the lanes of all evaluators (lane l: evaluator
+// l / GpuEnergy::kLanes); evaluate on the first one. torsionCount: of the evaluated system.
+class MultiGpuConfEvaluator : public ConfEvaluator {
+ public:
+  MultiGpuConfEvaluator(std::vector<std::unique_ptr<GpuConfEvaluator>> ev, int torsionCount)
+      : ev_(std::move(ev)), torsions_(torsionCount) {
+    if (ev_.empty()) throw Error("MultiGpuConfEvaluator: no evaluator");
+  }
+  int maxBatch() const override {
+    int n = 0;
+    for (const auto& e : ev_) n += e->maxBatch();
+    return n;
+  }
+  void evaluate(const double* anglesDeg, int n, EnergyTerms* terms, double* gradRad) override {
+    const int b = ev_[0]->maxBatch();
+    for (int i = 0; i < n; i += b) {
+      const int m = std::min(b, n - i);
+      const std::size_t nt = static_cast<std::size_t>(torsions_);
+      ev_[0]->evaluate(anglesDeg + i * nt, m, terms + i, gradRad ? gradRad + i * nt : nullptr);
+    }
+  }
+  int lanes() const override { return static_cast<int>(ev_.size()) * GpuEnergy::kLanes; }
+  void submit(int lane, const double* anglesDeg, int n) override {
+    ev_[lane / GpuEnergy::kLanes]->submit(lane % GpuEnergy::kLanes, anglesDeg, n);
+  }
+  void complete(int lane, EnergyTerms* terms, double* gradRad) override {
+    ev_[lane / GpuEnergy::kLanes]->complete(lane % GpuEnergy::kLanes, terms, gradRad);
+  }
+  void idle() override {
+    for (auto& e : ev_) e->idle();
+  }
+ private:
+  std::vector<std::unique_ptr<GpuConfEvaluator>> ev_;
+  int torsions_;
 };
 
 }  // namespace od

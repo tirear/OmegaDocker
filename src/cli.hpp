@@ -85,7 +85,7 @@ struct Options {
   std::string gridMode = "auto";  // auto | full | flexres | delta
   double gridDeltaThreshold = 1e-4;
   bool gpuEnable = true;
-  int gpuDevice = 0;
+  std::vector<int> gpuDevices{0};  // gpu.device; the first one is the primary device
   int gpuConf9aBatchNum = 8192;
   std::string gpuConf9aPrecision = "double";  // double | float
   bool gpuConf9aRcd = true;
@@ -93,6 +93,7 @@ struct Options {
   int gpuDock9bBatchNum = 8192;
   int gpuDock9bStamNum = 0;  // 0: auto
   bool gpuDock9bDeviceMin = true;
+  std::string gpuPackedMaps = "auto";  // auto | true | false
   long long memHostLimit = 0;  // MiB; 0: auto
   double maxNearDistance = 6.0;
   double rotStep = 7.5;

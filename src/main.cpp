@@ -192,14 +192,19 @@ bool selectGpu(const od::Options& opt) {
     od::logInfo("9a/9b minimization energies: CPU (no CUDA device)");
     return false;
   }
-  if (opt.gpuDevice >= n) od::fail("gpu.device {}: only {} CUDA device(s)", opt.gpuDevice, n);
+  for (int d : opt.gpuDevices)
+    if (d >= n) od::fail("gpu.device {}: only {} CUDA device(s)", d, n);
   if (opt.gpuDock9bDeviceMin && opt.dockMinMethod == "lbfgs" && opt.lbfgsMemory > od::kDeviceLbfgsMaxMemory)
     od::fail("dock9b.lbfgsMemory {}: at most {} with gpu.dock9bDeviceMin = true (set gpu.dock9bDeviceMin = false to "
              "minimize on the CPU)",
              opt.lbfgsMemory, od::kDeviceLbfgsMaxMemory);
-  const auto info = od::gpuDeviceInfo(opt.gpuDevice);
-  od::logInfo(std::format("9a/9b minimization energies: GPU {} {} (sm_{}{}, {} MiB free of {} MiB)", opt.gpuDevice, info.name, info.major,
-                          info.minor, info.freeMem >> 20, info.totalMem >> 20));
+  for (std::size_t k = 0; k < opt.gpuDevices.size(); ++k) {
+    const int d = opt.gpuDevices[k];
+    const auto info = od::gpuDeviceInfo(d);
+    od::logInfo(std::format("{} GPU {} {} (sm_{}{}, {} MiB free of {} MiB)",
+                            k == 0 ? "9a/9b minimization energies:" : "  9a/9b minimization also on:", d, info.name, info.major,
+                            info.minor, info.freeMem >> 20, info.totalMem >> 20));
+  }
   return true;
 #else
   (void)opt;
@@ -247,10 +252,15 @@ class ConfSet {
     p_.stream = stream;
 #ifdef OD_HAVE_CUDA
     if (gpu) {
-      gpu_ = std::make_unique<od::GpuConfEvaluator>(sys_.model(), opt.gpuDevice, opt.gpuConf9aBatchNum,
-                                                     opt.gpuConf9aPrecision == "float");
+      // Several devices: the lanes of all of them (spec 15.1.33).
+      std::vector<std::unique_ptr<od::GpuConfEvaluator>> ev;
+      for (int dev : opt.gpuDevices)
+        ev.push_back(std::make_unique<od::GpuConfEvaluator>(sys_.model(), dev, opt.gpuConf9aBatchNum,
+                                                            opt.gpuConf9aPrecision == "float"));
+      if (ev.size() == 1) gpu_ = std::move(ev[0]);
+      else gpu_ = std::make_unique<od::MultiGpuConfEvaluator>(std::move(ev), sys_.torsionCount());
       p_.evaluator = gpu_.get();
-      if (gpu_->maxBatch() < opt.gpuConf9aBatchNum)
+      if (gpu_->maxBatch() < opt.gpuConf9aBatchNum * static_cast<int>(opt.gpuDevices.size()))
         od::logInfo(std::format("  {:<40} 9a GPU batch limited to {} samples by the free device memory", name_, gpu_->maxBatch()));
     }
 #else
@@ -277,7 +287,7 @@ class ConfSet {
     const bool closing = closer_->active();
 #ifdef OD_HAVE_CUDA
     if (gpu && opt.gpuConf9aRcd && closing && clp.method != od::ClosureMethod::None) {
-      auto r = std::make_unique<od::GpuRcd>(*closer_, opt.gpuDevice, opt.gpuConf9aBatchNum);
+      auto r = std::make_unique<od::GpuRcd>(*closer_, opt.gpuDevices[0], opt.gpuConf9aBatchNum);
       if (r->active()) {
         rcdGpu_ = std::move(r);
         p_.genBatch = rcdGpu_.get();
@@ -677,7 +687,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
 #ifdef OD_HAVE_CUDA
   std::shared_ptr<od::GpuShaker> gpuShaker;
   if (gpu && opt.feOd0100) {
-    gpuShaker = std::make_shared<od::GpuShaker>(ep, sp, opt.gpuDevice);
+    gpuShaker = std::make_shared<od::GpuShaker>(ep, sp, opt.gpuDevices[0]);
     shakeFn = [gpuShaker](const od::ShakeAtoms& a, std::span<const char> s) { return gpuShaker->lnF(a, s); };
   }
 #else
@@ -1022,8 +1032,12 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
 #ifdef OD_HAVE_CUDA
   // Grids on the GPU (spec 15.1.10): the same values as the CPU.
   std::shared_ptr<od::GpuGridBuilder> gpuGrid;
+  std::vector<std::unique_ptr<od::GpuGridBuilder>> gpuGridOthers;  // delta blocks on the other devices (spec 15.1.33)
+  std::vector<std::shared_ptr<od::GpuField>> gpuFields;
   if (gpu) {
-    gpuGrid = std::make_shared<od::GpuGridBuilder>(opt.gpuDevice);
+    gpuGrid = std::make_shared<od::GpuGridBuilder>(opt.gpuDevices[0]);
+    for (std::size_t k = 1; k < opt.gpuDevices.size(); ++k)
+      gpuGridOthers.push_back(std::make_unique<od::GpuGridBuilder>(opt.gpuDevices[k]));
     distanceGrid = [&](const od::GridAtoms& a) {
       od::DistanceGrid g;
       g.geom = geom;
@@ -1045,19 +1059,31 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       gpuGrid->build(b.view, od::kGridClamp, maps.data(), g.elecMap.data(), g.desolvMap.data());
       return g;
     };
-    auto gpuField = std::make_shared<od::GpuField>(opt.gpuDevice);
+    // One field per device (spec 15.1.33); the quick filter and posm2_fft on the first device.
+    for (int d : opt.gpuDevices) gpuFields.push_back(std::make_shared<od::GpuField>(d));
     stamWindow = opt.gpuDock9bStamNum > 0 ? opt.gpuDock9bStamNum : std::numeric_limits<int>::max();
     // Resident fields: those of the window (the fields of the previous window are dropped).
-    gpuFieldSlots = [gpuField](int n) { gpuField->setSlots(n); };
-    // Half of the free device memory and the memory of the resident fields.
-    gpuFieldBudget = [&opt, gpuField] {
-      return (od::gpuFreeMem(opt.gpuDevice) + gpuField->deviceBytes()) / 2;
+    gpuFieldSlots = [gpuFields](int n) {
+      for (const auto& f : gpuFields) f->setSlots(n);
     };
-    gpuFree = [&opt] { return od::gpuFreeMem(opt.gpuDevice); };
-    auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevice);
-    for (std::size_t i = 0; i < mobSets.size(); ++i)
-      poseEval[i] = std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuField, opt.gpuDevice,
-                                                           opt.gpuDock9bBatchNum, gpuPrep, opt.gpuDock9bDeviceMin);
+    // Half of the free device memory and the memory of the resident fields (the smallest of the devices).
+    gpuFieldBudget = [&opt, gpuFields] {
+      std::size_t b = std::numeric_limits<std::size_t>::max();
+      for (std::size_t k = 0; k < gpuFields.size(); ++k)
+        b = std::min(b, (od::gpuFreeMem(opt.gpuDevices[k]) + gpuFields[k]->deviceBytes()) / 2);
+      return b;
+    };
+    gpuFree = [&opt] { return od::gpuFreeMem(opt.gpuDevices[0]); };
+    auto gpuPrep = std::make_shared<od::GpuDockPrep>(opt.gpuDevices[0]);
+    for (std::size_t i = 0; i < mobSets.size(); ++i) {
+      std::vector<std::unique_ptr<od::GpuPoseEvaluator>> ev;
+      for (std::size_t k = 0; k < gpuFields.size(); ++k)
+        ev.push_back(std::make_unique<od::GpuPoseEvaluator>(mobSets[i]->sys().model(), gpuFields[k], opt.gpuDevices[k],
+                                                            opt.gpuDock9bBatchNum, k == 0 ? gpuPrep : nullptr,
+                                                            opt.gpuDock9bDeviceMin));
+      if (ev.size() == 1) poseEval[i] = std::move(ev[0]);
+      else poseEval[i] = std::make_unique<od::MultiGpuPoseEvaluator>(std::move(ev));
+    }
   }
 #else
   (void)gpu;
@@ -1093,6 +1119,14 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   od::logInfo(std::format("9b grid.mode {}{}: StaM grid atoms {}, moved by torsions {}, backbone {}", od::gridModeName(gridMode),
                           opt.gridMode == "auto" ? " (auto)" : "", movedMask.size(), movedNum,
                           backboneMoves ? "movable" : "fixed"));
+  // gpu.packedMaps (spec 15.1.32); auto: without delta blocks, when they fit in a quarter of the free device memory.
+  const bool packedMaps = opt.gpuPackedMaps == "true" || (opt.gpuPackedMaps == "auto" && gridMode != od::GridMode::Delta);
+#ifdef OD_HAVE_CUDA
+  for (const auto& f : gpuFields)
+    f->setPackedMaps(!packedMaps ? od::GpuField::Packed::Off
+                     : opt.gpuPackedMaps == "true" ? od::GpuField::Packed::On
+                                                   : od::GpuField::Packed::IfFits);
+#endif
   // Grids built once and kept across rounds: full without StaM torsions (input conformation),
   // flexres (fixed atoms of the input conformation), delta (reference: input conformation).
   std::shared_ptr<const od::EnergyGrids> fixedGrids;
@@ -1309,7 +1343,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       if (f.mode() == od::GridMode::Delta)
         return f.deltaBlockCount() * maps * od::kDeltaBlock * od::kDeltaBlock * od::kDeltaBlock * sizeof(float) +
                f.blockCount() * sizeof(int);
-      if (f.mode() == od::GridMode::Full && stamSet.movable()) return f.geom().size() * maps * sizeof(float);
+      if (f.mode() == od::GridMode::Full && stamSet.movable()) return f.geom().size() * maps * sizeof(float) * (packedMaps ? 5 : 1);
       return 0;
     };
     const auto dockWindow = [&] {
@@ -1351,9 +1385,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     const auto submitDelta = [&](int sid) {
       const od::GridAtoms a = stamAtomsOf(sid, false);
       const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
-      gpuGrid->submitDelta(od::GridBuildData(geom, a, probe, energyParams(opt)).view,
-                           od::DistBuildData(geom, a, distCap).view, od::kGridClamp, opt.gridDeltaThreshold,
-                           changed.empty() ? nullptr : changed[0].data(), static_cast<int>(changed.size()));
+      const od::GridBuildData gb(geom, a, probe, energyParams(opt));
+      const od::DistBuildData db(geom, a, distCap);
+      for (auto* b : [&] {
+             std::vector<od::GpuGridBuilder*> all{gpuGrid.get()};
+             for (const auto& o : gpuGridOthers) all.push_back(o.get());
+             return all;
+           }())
+        b->submitDelta(gb.view, db.view, od::kGridClamp, opt.gridDeltaThreshold,
+                       changed.empty() ? nullptr : changed[0].data(), static_cast<int>(changed.size()));
       deltaPending = true;
     };
 #endif
@@ -1397,12 +1437,19 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
             maps.push_back(fixedGrids->desolvMap.data());
             maps.push_back(fixedDist->d.data());
             gpuGrid->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
+            for (const auto& o : gpuGridOthers) o->setReference(1, maps.data(), static_cast<int>(maps.size()), geom.size());
           }
           if (!deltaPending) submitDelta(sid);
           std::vector<int> block;
           std::vector<float> data;
           deltaPending = false;
           auto dev = gpuGrid->finishDelta(block, deltaHostData ? &data : nullptr);
+          // The same blocks on the other devices (otherwise GpuField copies them from the first).
+          for (const auto& o : gpuGridOthers) {
+            std::vector<int> bk;
+            auto other = o->finishDelta(bk, nullptr);
+            if (dev && other && bk == block) std::const_pointer_cast<od::DeviceBlocks>(dev)->others.push_back(std::move(other));
+          }
           if (si + 1 < stamIds.size()) submitDelta(stamIds[si + 1]);
           field = od::StamField::delta(fixedGrids, fixedDist, std::move(block), std::move(data), std::move(dev));
         } else
@@ -1701,7 +1748,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   od::Options cmp = opt;
   cmp.maxRound = stored.maxRound;
   cmp.gpuEnable = stored.gpuEnable;
-  cmp.gpuDevice = stored.gpuDevice;
+  cmp.gpuDevices = stored.gpuDevices;
   cmp.gpuConf9aBatchNum = stored.gpuConf9aBatchNum;
   cmp.gpuConf9aPrecision = stored.gpuConf9aPrecision;
   cmp.gpuConf9aRcd = stored.gpuConf9aRcd;
@@ -1709,6 +1756,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuDock9bBatchNum = stored.gpuDock9bBatchNum;
   cmp.gpuDock9bStamNum = stored.gpuDock9bStamNum;
   cmp.gpuDock9bDeviceMin = stored.gpuDock9bDeviceMin;
+  cmp.gpuPackedMaps = stored.gpuPackedMaps;
   cmp.memHostLimit = stored.memHostLimit;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {

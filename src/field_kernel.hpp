@@ -39,6 +39,9 @@ struct FieldView {
   int n[3];
   int typeMapCount;
   const float* maps[kFieldMaxMaps];  // type maps, elec, desolv, distance (reference maps for delta)
+  // GPU only (optional): the maps with the values of (i, j, k), (i, j + 1, k), (i, j, k + 1) and
+  // (i, j + 1, k + 1) at each point (4 floats; map m from m × 4 × points).
+  const float* packed;
   // delta
   int nb[3], mapCount;
   const int* block;
@@ -59,6 +62,7 @@ struct DeviceBlocks {
   int device = 0;
   const float* ptr = nullptr;
   std::size_t floats = 0;
+  std::vector<std::shared_ptr<const DeviceBlocks>> others;  // the same blocks on other devices (spec 15.1.33)
   virtual ~DeviceBlocks() = default;
 };
 
@@ -175,9 +179,23 @@ OD_HD inline void interpolateMaps(const FieldView& f, const int* maps, int count
   }
   const T fx = fr[0], fy = fr[1], fz = fr[2];
   auto lerp = [](T a, T b, T t) { return a + (b - a) * t; };
+#ifdef __CUDA_ARCH__
+  // Packed maps when the corners are all of the reference maps.
+  bool packed = f.packed != nullptr;
+  for (int c = 0; packed && c < 8; ++c) packed = blk[c] < 0;
+#endif
   for (int q = 0; q < count; ++q) {
     const int m = maps[q];
     T v[2][2][2];
+#ifdef __CUDA_ARCH__
+    if (packed) {
+      // Two loads of 16 bytes: the corners x = 0 and x = 1.
+      const float4* pk = reinterpret_cast<const float4*>(f.packed) + static_cast<std::size_t>(m) * f.n[0] * f.n[1] * f.n[2] + at[0];
+      const float4 a = __ldg(pk), b = __ldg(pk + 1);
+      v[0][0][0] = a.x, v[0][1][0] = a.y, v[1][0][0] = a.z, v[1][1][0] = a.w;
+      v[0][0][1] = b.x, v[0][1][1] = b.y, v[1][0][1] = b.z, v[1][1][1] = b.w;
+    } else
+#endif
     for (int c = 0; c < 8; ++c)
       v[c >> 2][c >> 1 & 1][c & 1] = blk[c] < 0 ? f.maps[m][at[c]] : f.data[at[c] + static_cast<std::size_t>(m) * bs];
     const T c00 = lerp(v[0][0][0], v[0][0][1], fx), c10 = lerp(v[0][1][0], v[0][1][1], fx);

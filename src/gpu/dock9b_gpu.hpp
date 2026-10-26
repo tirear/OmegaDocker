@@ -4,8 +4,10 @@
 
 #pragma once
 #include <algorithm>
+#include <exception>
 #include <memory>
 #include <span>
+#include <thread>
 #include <vector>
 
 #include "dock9b.hpp"
@@ -34,6 +36,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
     batch_ = want_;
   }
   int maxBatch() const override { return batch_; }
+  int torsionCount() const { return nt_; }
   int residentPoses(const MobmDocker& dk) const override {
     return gpu_.residentSamplesDock(static_cast<int>(dk.probes().size()));
   }
@@ -290,6 +293,83 @@ class GpuPoseEvaluator : public PoseEvaluator {
     std::vector<DockTerms> dterms;
   };
   Work work_[GpuEnergy::kLanes];
+};
+
+// 9b pose energies of one MobM on several GPUs (spec 15.1.33): the whole minimizations (minimize)
+// are divided equally among the evaluators, each on its own host thread; the other work
+// (evaluate, quick filter, posm2_fft) runs on the first one.
+class MultiGpuPoseEvaluator : public PoseEvaluator {
+ public:
+  explicit MultiGpuPoseEvaluator(std::vector<std::unique_ptr<GpuPoseEvaluator>> ev) : ev_(std::move(ev)) {
+    if (ev_.empty()) throw Error("MultiGpuPoseEvaluator: no evaluator");
+  }
+  int maxBatch() const override { return ev_[0]->maxBatch(); }
+  int residentPoses(const MobmDocker& dk) const override {
+    int n = 0;
+    for (const auto& e : ev_) n += e->residentPoses(dk);
+    return n;
+  }
+  void bind(const MobmDocker& dk) override {
+    for (auto& e : ev_) e->bind(dk);
+  }
+  int fields() const override {
+    int n = ev_[0]->fields();
+    for (const auto& e : ev_) n = std::min(n, e->fields());
+    return n;
+  }
+  void bindAll(std::span<const MobmDocker* const> dks) override {
+    for (auto& e : ev_) e->bindAll(dks);
+  }
+  void evaluate(int n, const PoseRequest* req, MobmDocker::PoseEnergy* out, double* grad) override {
+    ev_[0]->evaluate(n, req, out, grad);
+  }
+  int lanes() const override { return ev_[0]->lanes(); }
+  void submit(int lane, int n, const PoseRequest* req) override { ev_[0]->submit(lane, n, req); }
+  void complete(int lane, MobmDocker::PoseEnergy* out, double* grad) override { ev_[0]->complete(lane, out, grad); }
+  bool minimize(int n, const PoseRequest* req, const DockMinParams& p, DockMinResult* out, float* anglesOut) override {
+    const std::size_t k = ev_.size();
+    if (k == 1 || n < 2) return ev_[0]->minimize(n, req, p, out, anglesOut);
+    std::vector<int> begin(k + 1, 0);
+    for (std::size_t i = 1; i <= k; ++i) begin[i] = static_cast<int>(static_cast<long long>(n) * static_cast<long long>(i) / static_cast<long long>(k));
+    const std::size_t nt = static_cast<std::size_t>(ev_[0]->torsionCount());
+    std::vector<char> ok(k, 0);
+    std::vector<std::exception_ptr> err(k);
+    const auto run = [&](std::size_t i) {
+      try {
+        const int b = begin[i], m = begin[i + 1] - b;
+        ok[i] = m == 0 || ev_[i]->minimize(m, req + b, p, out + b, anglesOut + static_cast<std::size_t>(b) * nt);
+      } catch (...) {
+        err[i] = std::current_exception();
+      }
+    };
+    std::vector<std::thread> th;
+    for (std::size_t i = 1; i < k; ++i) th.emplace_back(run, i);
+    run(0);
+    for (auto& x : th) x.join();
+    for (const auto& e : err)
+      if (e) std::rethrow_exception(e);
+    for (char o : ok)
+      if (!o) return false;
+    return true;
+  }
+  void idle() override {
+    for (auto& e : ev_) e->idle();
+  }
+  bool quickFilter(const MobmDocker& dk, const MobmDocker::Conf& c, std::uint64_t stream, long long k0, long long k1,
+                   std::vector<long long>& l2, Dock9bStats& stats) override {
+    return ev_[0]->quickFilter(dk, c, stream, k0, k1, l2, stats);
+  }
+  int fftBatch(std::span<const MobmDocker* const> dks) override { return ev_[0]->fftBatch(dks); }
+  void fftTop(int n, int probes, const double* f, const int* map, const double* q, const std::array<int, 3>* lo,
+              const std::array<int, 3>* hi, int top, std::pair<float, std::size_t>* out) override {
+    ev_[0]->fftTop(n, probes, f, map, q, lo, hi, top, out);
+  }
+  void prepared() override {
+    for (auto& e : ev_) e->prepared();
+  }
+
+ private:
+  std::vector<std::unique_ptr<GpuPoseEvaluator>> ev_;
 };
 
 }  // namespace od

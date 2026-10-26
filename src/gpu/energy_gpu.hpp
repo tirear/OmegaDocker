@@ -39,6 +39,10 @@ class GpuField {
   std::uint64_t id() const;  // FieldModel::id of the current field; 0: none
   // Makes fm the current field, uploading it unless resident (replacing the least recently used).
   void set(const FieldModel& fm);
+  // Reference maps also in the packed form (FieldView::packed, spec 15.1.32), for fields set after
+  // the call; IfFits: when they take at most a quarter of the free device memory.
+  enum class Packed { Off, On, IfFits };
+  void setPackedMaps(Packed p);
   // Makes the resident field id current (most recently used); false when it is not resident.
   bool touch(std::uint64_t id);
   int slots() const;
