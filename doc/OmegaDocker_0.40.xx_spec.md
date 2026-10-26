@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.97 |
+| 文件版本 | 1.98 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -757,7 +757,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 每次最多 `rcdMaxIter` ×（組內斷鍵數）次更新（`rcdMaxIter` 預設 20000；1.43 版以前為 1000，見 7.11.1 嘗試 4）；未收斂或碰撞檢查失敗時重新開始，最多 `rcdMaxRestart`（預設 10）次。
     - 依據：耦合的組收斂較慢。2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11（20 個兩面角）40 個樣本、不做碰撞檢查：1000 次 18/40，2000 次 36/40，4000 次 40/40。
   - 停滯（1.76，`rcdStallTolerance`，預設 1×10⁻⁴ rad）：自上一次轉動量 > `rcdStallTolerance` 的更新之後，組內每個兩面角都已更新過且轉動量都 ≤ `rcdStallTolerance` 時，結束這次嘗試（未收斂：與達到上限相同，重新開始；best effort：保留目前的結果）。0：不判斷停滯，做到 `rcdMaxIter`（1.75 以前的行為）。更新次數不同會改變之後使用的亂數，因此結果與 1.75 不逐位元相同。量測見 7.11.1 嘗試 5。
-  - GPU（1.78，`gpu.conf9aRcd`）：無 `rcdClash` 碰撞項、無金屬配位距離的組，RCD 的嘗試可在 GPU 上執行（點座標用 float，以 0.99 × `rcdTolerance` 判斷收斂，結束後同樣在 CPU 檢查）；見 15.1.18。
+  - GPU（1.78，`gpu.conf9aRcd`）：無 `rcdClash` 碰撞項、無金屬配位距離的組，RCD 的嘗試可在 GPU 上執行（點座標用 float，以 0.99 × `rcdTolerance` 判斷收斂，結束後同樣在 CPU 檢查）；見 15.1.18；多個 GPU 時分給各裝置（1.98，15.1.37）。
 - KIC：
   - 只用於只有一個 copy 斷鍵的組。把斷鍵的 A、B 以複製原子的剛體關係（{A′, B, Y} → {A, B′, Y′}）接回，路徑成為一個環；在環上選 3 個樞紐原子（兩側的鍵都是可調整的兩面角，A、B 不可當樞紐），樞紐之間的部分為剛體（其他兩面角保留樣本的值），解 6 個樞紐兩面角使環閉合。
   - 樞紐的選法：沿路徑由 A 到 B 排序，依序隨機選 i1 < i2 < i3，相鄰樞紐至少相隔 2 個鍵（每次都選得到後續樞紐）。
@@ -1621,7 +1621,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `grid.deltaThreshold` | `--grid_deltaThreshold` | 1×10⁻⁴ | 8.1（kcal/mol；距離網格為 Å） |
 | `gpu.memLimit`（未實作） | `--gpu_memLimit` | 可用量 90% | 13 |
 | `gpu.enable` | `--gpu_enable` | true | 15.1.3（以 CUDA 建置且有裝置時使用 GPU） |
-| `gpu.device` | `--gpu_device` | `[0]` | 15.1.3、15.1.33（裝置編號的清單，TOML 為整數陣列、命令列以逗號分隔；第一個為主要裝置，9a 的 lanes 與 9b 的整個最小化分給所有裝置；不可重複） |
+| `gpu.device` | `--gpu_device` | `[0]` | 15.1.3、15.1.33（裝置編號的清單，TOML 為整數陣列、命令列以逗號分隔；第一個為主要裝置，9a 的 lanes、9a 的 GPU RCD（1.98）與 9b 的整個最小化分給所有裝置；不可重複） |
 | `gpu.conf9aBatchNum` | `--gpu_conf9aBatchNum` | 8192 | 15.1.3（受可用 GPU 記憶體 90% 限制） |
 | `gpu.conf9aPrecision` | `--gpu_conf9aPrecision` | `double` | 15.1.12（`double`／`float`） |
 | `gpu.conf9aRcd` | `--gpu_conf9aRcd` | `true` | 15.1.18（9a 的 RCD 閉合在 GPU 上；不含 `rcdClash` 與金屬配位距離） |
@@ -2657,6 +2657,34 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
   - 一批超過 16 個 StaM 構型：16 個時每個配對 1.08 s，再增加時每個構型自己的 C2R 與相乘累加省不掉，收益小。
 - **只靠參數調整**：`dock9b.fftStride` 2（格點數為 1/8，近似，15.1.23）、加大 `dock9b.rotStep`、縮小 `box.size`。
 
+### 15.1.37 CUDA 版：多個 GPU 的 9a RCD 與其他量測（1.98）
+
+AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 15.1.31；C：StaM 2KJJ（loop A:8–15 可動，耦合組 A:8–15 + 雙硫鍵 A:6–A:11，`csgmBuild = growClose`）、MobM `BTN_ideal.sdf`，`rcdMaxIter` 20000（15.1.18）。
+
+**1.97 的時間分佈**（`src/main.cpp` 暫時加入計時，未保留；兩個 GPU 的輸出與一個相同）：
+
+| 例子 | 全部（1 → 2 個 GPU） | 9a StaM 群 | 第一個視窗的準備 | 9b |
+|---|---|---|---|---|
+| A（posm1） | 24.81 → 13.59 s | 2.66 → 1.60 s | 0.30 s | 21.49 → 11.21 s |
+| RB4 posm1 100000 | 7.25 → 4.17 s | 0.29 → 0.24 s | 0.17 s | 6.58 → 3.46 s |
+| RB4 posm3（`rotStep` 40） | 99.89 → 51.95 s | 0.27 → 0.22 s | 2.00 s | 99.23 → 51.23 s |
+| RB4 posm2_fft（`rotStep` 15） | 33.37 → 18.48 s | 0.27 → 0.23 s | （平移 24.87 → 13.12 s） | 32.75 → 17.77 s |
+| C | 3.43 → 3.49 s | 2.94 → 2.91 s | — | 0.14 s |
+
+**(1) 單一 GPU：下一個視窗的準備與對接重疊（未實作）**
+- 起因：單一 GPU 時視窗的準備（快速篩選、L1 姿勢）與對接依序執行，A 的準備共 1.85 s（主機端計時）。
+- 試作：暫時允許 `gpu.device=0,0`（同一 GPU 當成兩個裝置，沿用 15.1.33 的視窗分配）。A 24.73 → 24.80 s、RB4 posm1 7.24 → 7.22 s、RB4 posm3 99.78 → 98.98 s。
+- 原因（Nsight Systems，A，單一 GPU）：9b 的 22.18 s 中 GPU 有 21.71 s 在執行 kernel（98%）；主機端的 1.85 s 多半在等 GPU（delta 區塊、快速篩選），已與 GPU 計算重疊。沒有可重疊的空間，未實作。
+
+**(2) 9a 的 GPU RCD 分給各裝置（採用）**
+- 起因：`GpuRcd` 只用主要裝置。C 的 RCD（Nsight Systems）：347 次 kernel 共 1.73 s，其中 172 次 > 160 個 block（填滿 GPU）共 1.23 s；尾端 80 次只有 1–8 個 block，共 0.21 s（受一次嘗試的更新次數限制）；kernel 之間 0.89 s 為主機端。
+- 實作：`GpuRcd(closer, devices, slots)`，每個裝置各有連結資料與各 slot 的狀態；slot s 在第 s mod D 個裝置（本機 slot s / D，D = min(裝置數, slot 數)），一次嘗試的各次執行都在同一裝置。`flush` 依序在各裝置上傳並啟動 kernel（不等待），再依序等待各裝置並取回結果。每個嘗試的計算與裝置及 block 的組成無關，結果與單一裝置逐位元相同（同型號的裝置）。執行紀錄的 kernel 數為各裝置的合計，時間為 `flush` 的牆鐘時間。
+- 實測（3 次）：C 全部 3.30–3.35 → 2.71–2.79 s（−17%），9a StaM 群 2.83–2.86 → 2.16–2.18 s，GPU RCD 2.03–2.04 → 1.37–1.38 s；檢查點 `state.bin` 與輸出檔相同。A 9a StaM 群 2.66 → 1.57 s（RCD 只佔 0.03 s，與 1.97 相同）。
+- 測試：`closure: RCD on the GPU (2KJJ A:8-15 with the disulfide A:6-A:11)` 加入兩個裝置（只有一個 GPU 時為同一裝置兩次）的 `GpuRcd`：每個樣本的閉合結果與兩面角、嘗試數、更新數都與一個裝置相同。
+
+**(3) 第一個視窗的準備分給各裝置（未實作）**
+- RB4 posm3（Nsight Systems）：第一個視窗的準備 2.08 s 中，快速篩選的 kernel 在主要裝置 0.96 s，其餘為主機端（posm3 的配對與三點比對，已平行化）；第二個裝置在 2.95 s 開始對接。分給兩個裝置最多省約 0.5 s（約 1%），其他例子少於 0.2 s。收益小，未實作。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2934,6 +2962,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 | F4 | 抽樣時考慮雙硫鍵的幾何 | csgm1 各兩面角獨立抽樣，Cys χ1 等隨機取值幾乎都把雙硫鍵拉開，之後才靠閉合修正。方向：抽樣時依雙硫鍵的常見構形（χ1、χ2、χ3、χss 的分布，或 CB–CB／CA–CA 距離）只抽能閉合的組合，或先抽一側再由幾何解出另一側 |
 | F5 | 同時調整多個兩面角的閉合方法 | RCD 是座標輪流下降，一次只調一個兩面角；耦合的組（例如 2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11，20 個兩面角）多數會收斂，但需數千至數萬次更新，不是停滯（`rcdStallTolerance` 無法加速，7.11.1 嘗試 5）。方向：以閉合偏差對兩面角的 Jacobian 做最小平方法（Gauss–Newton／Levenberg–Marquardt，或 damped least squares），每步同時更新組內所有兩面角；可保留 RCD 作為起始或後備 |
 | F6 | 以 Tensor Core 加總 block 內的能量與梯度（AutoDock-GPU 的 `TENSOR=ON`） | 加總為 double 的 warp shuffle；上限估計每次評估只快 2–3%（15.1.32）。先在完整的標準測試（17.3）之後，測試以 float 加總對結果（排名、第 1 名能量、RMSD）的影響，再決定是否實作 |
+| F7 | 自動決定盒子（`box.mode`） | 只能由使用者指定 `box.center`、`box.size`。已決定的設計（1.98，排在不再進行效能最佳化之後實作）：<br>• `box.mode`：`manual`（預設；`box.center`／`box.size` 必須有值，不旋轉，與目前相同）、`sidechainAuto`（自動決定，StaM 的可轉動範圍依 4.4）、`fixAuto`（自動決定，StaM 預設全部不可轉動，使用者仍可在分子設定檔中改為可轉動）。<br>• 自動模式的 `box.center`／`box.size` 不必有值；有值時給警告訊息，有值的項目（整個向量）覆蓋自動計算的結果。只給 `box.center` 時，`box.size` 以該中心對稱地包住 StaM 再加邊距。`box.autoRotate = true` 時，使用者的 `box.center` 以輸入座標系解讀、`box.size` 以盒子座標軸解讀。無論 `box.autoRotate` 的值，都在執行紀錄寫出 `box.center`、`box.size` 的數值與解讀方式（座標系）。<br>• `box.autoRotate`（預設 `true`）：內部在盒子座標系計算，輸出座標一律轉回輸入座標系（StaM 的輸出位置不變）。方向：以 StaM 重原子座標的主軸分析（PCA）對齊三軸，再在其附近測試一組旋轉，選加完所有邊距後盒子體積最小者。`false`：三軸為輸入座標軸。<br>• 中心：旋轉後 StaM 重原子包圍盒的中點。<br>• 每軸邊長 = StaM 重原子沿該軸的投影範圍 + `box.stamMargin`（預設 4 Å，每軸總共）+ 2 × r_max。<br>• r_max：MobM 重原子中心到最遠重原子的距離，取所有 MobM 中最大者；`box.mobmRadius` 為 `sampled`（以 csgm1 加碰撞檢查產生 `box.mobmSampleNum` 個構型估計）、`input`（輸入構型）、`max`（預設，拓撲上限）。`max`：先以剛性片段之間路徑上的固定距離相加，得到任兩個重原子距離的上限 d_ub(i, j)，r_max ≤ maxᵢ (1/N) Σⱼ d_ub(i, j)（任何構型都不超過）。<br>• 盒子在第 1 輪之前決定，之後各輪不變（網格快取與檢查點依賴它）。<br>• 盒子的格點與網格所需記憶體超過可用的主機或裝置記憶體時報錯，寫出盒子大小、格點數與所需記憶體，並提示可加大 `grid.spacing` 或改用 `manual`（不另設 `box.maxSize`）。 |
 
 ---
 
@@ -3039,3 +3068,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 | 1.95 | 2026-10-26 | 新增 `cpu.threadNum`（auto：`OMP_NUM_THREADS` 或可用 CPU 數，cgroup CPU 配額為上限；`sched_setaffinity` 每個核心優先），可在 `--resume` 時修改（13、16）；多個 GPU 時 StaM 構形的視窗分給各裝置（第一個空閒的裝置，主執行緒依序交付樣本，輸出與單一裝置相同），(c) 傳輸與計算重疊的量測（傳輸佔 0.1–0.2%，未實作）（15.1.33）；full 網格留在裝置上（15.1.34） |
 | 1.96 | 2026-10-26 | `cpu.threadNum` 多於可用 CPU 數（affinity mask，cgroup CPU 配額為上限）時報錯並寫出可用 CPU 數與來源；auto 也以可用 CPU 數為上限（13）；多個 GPU：一輪最後的最小化由空閒的裝置接手（`DockStealHub`、`stealDock`），posm2_fft 的平移分給各裝置，posm3／posm4 配對與三點比對平行化；修正接手時視窗佇列的競爭（15.1.35） |
 | 1.97 | 2026-10-26 | GPU posm2_fft 只轉換需要的 z 平面（[z][定向][y][x] 排列，2D 轉換加沿 z 的 1D；正向只轉探針原子觸及的平面、逆向只轉平移範圍的平面，8／4／2／1 個平面的 plan 精確覆蓋）；散佈改為每個（定向、z 平面）一個執行緒，不用 `atomicAdd`，多個 GPU 分攤時與單一 GPU 逐位元相同；單卡平移時間的量測（15.1.5、15.1.36） |
+| 1.98 | 2026-10-27 | 多個 GPU：9a 的 GPU RCD 分給各裝置（slot 輪流分配，結果與單一裝置逐位元相同），C 的 9a 2.84 → 2.17 s；單一 GPU 視窗準備與對接重疊、第一個視窗的準備分給各裝置的量測（無收益或約 1%，未實作）（15.1.37）；自動決定盒子的設計（18，F7） |

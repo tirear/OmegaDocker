@@ -292,7 +292,7 @@ class ConfSet {
     const bool closing = closer_->active();
 #ifdef OD_HAVE_CUDA
     if (gpu && opt.gpuConf9aRcd && closing && clp.method != od::ClosureMethod::None) {
-      auto r = std::make_unique<od::GpuRcd>(*closer_, opt.gpuDevices[0], opt.gpuConf9aBatchNum);
+      auto r = std::make_unique<od::GpuRcd>(*closer_, opt.gpuDevices, opt.gpuConf9aBatchNum);
       if (r->active()) {
         rcdGpu_ = std::move(r);
         p_.genBatch = rcdGpu_.get();

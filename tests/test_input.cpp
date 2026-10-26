@@ -2429,7 +2429,8 @@ TEST_CASE("closure: RCD on the GPU (2KJJ A:8-15 with the disulfide A:6-A:11)") {
   od::ClosureParams cp;
   cp.clashDistance = 0.0;
   const od::LoopCloser closer(sys, parts, freeMask, smp.segments(), cp);
-  od::GpuRcd gpu(closer, 0, 64);
+  const std::vector<int> dev0{0};
+  od::GpuRcd gpu(closer, dev0, 64);
   REQUIRE(gpu.active());
   // Both links can be closed on the GPU (no clash term, no metal distance).
   const od::RcdFlat fl = closer.flat();
@@ -2473,6 +2474,24 @@ TEST_CASE("closure: RCD on the GPU (2KJJ A:8-15 with the disulfide A:6-A:11)") {
                       gpu.updates(), gpu.kernels()));
   CHECK(std::abs(closedC - closedG) <= total / 10);
   CHECK(devG / std::max(1, closedG) <= devC / std::max(1, closedC) * 1.1 + 0.01);
+  // The slots divided among two devices (the same device twice with one GPU): the same results.
+  const std::vector<int> two{0, od::gpuDeviceCount() > 1 ? 1 : 0};
+  od::GpuRcd gpu2(closer, two, 64);
+  REQUIRE(gpu2.active());
+  std::vector<std::vector<double>> a2(total);
+  std::vector<char> ok2(total);
+  od::runBatched(total, gpu2.slots(), [&](int k, int slot) {
+    od::Rng r(7, 0, k);
+    std::vector<double> a = sys.inputAngles();
+    smp.sample(r, a);
+    ok2[k] = closer.close(r, a, resample, {&gpu2, slot});
+    a2[k] = a;
+  }, [&](std::span<const int> sl) { gpu2.flush(sl); });
+  CHECK(ok2 == okG);
+  CHECK(a2 == ag);
+  CHECK(gpu2.attempts() == gpu.attempts());
+  CHECK(gpu2.updates() == gpu.updates());
+  CHECK(gpu2.kernels() > gpu.kernels());
 }
 #endif
 

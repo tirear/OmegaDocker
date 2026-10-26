@@ -293,23 +293,29 @@ __global__ void rcdKernel(FlatView g, SlotView sv, JobView jv, float tol, float 
 }  // namespace
 
 struct GpuRcd::Impl {
+  // The buffers of one device; slot s of GpuRcd is local slot s / devs.size() of devs[s % devs.size()].
+  struct Dev {
+    int device = 0, nslots = 0;
+    DevBuf<int> pointNum, dofOff, dofNum, pairOff, pairNum, copyOff, copyNum, movesOff, moves, axisFixed, axisMoving,
+        pairPoint, pairEnd;
+    DevBuf<unsigned> actMask, actSecond;
+    // Per slot.
+    DevBuf<float> sP;
+    DevBuf<double> sA;
+    DevBuf<int> sTried, sLink, sPrev, sTriedNum, sIt, sMaxIter, sConv, sDone;
+    DevBuf<unsigned long long> sRng;
+    // Per launch.
+    DevBuf<int> jSlot, jNew, jLink, jPOff, jAOff, jMaxIter;
+    DevBuf<double> jP, jA;
+    DevBuf<unsigned long long> jRng;
+    ~Dev() { cudaSetDevice(device); }
+  };
   RcdFlat flat;
-  int device = 0, nslots = 1;
+  int nslots = 1;
   float tol = 0, stallTol = 0;
   int maxNp = 0, maxNd = 0, maxPairs = 0, strideFloats = 0, tileSize = 32, groups = 1;
   bool ok = false;
-  DevBuf<int> pointNum, dofOff, dofNum, pairOff, pairNum, copyOff, copyNum, movesOff, moves, axisFixed, axisMoving,
-      pairPoint, pairEnd;
-  DevBuf<unsigned> actMask, actSecond;
-  // Per slot.
-  DevBuf<float> sP;
-  DevBuf<double> sA;
-  DevBuf<int> sTried, sLink, sPrev, sTriedNum, sIt, sMaxIter, sConv, sDone;
-  DevBuf<unsigned long long> sRng;
-  // Per launch.
-  DevBuf<int> jSlot, jNew, jLink, jPOff, jAOff, jMaxIter;
-  DevBuf<double> jP, jA;
-  DevBuf<unsigned long long> jRng;
+  std::vector<std::unique_ptr<Dev>> devs;
   std::vector<RcdJob*> pending;
   std::vector<char> started;  // per slot: the attempt of the slot has run in a launch
   std::vector<char> finished;
@@ -317,10 +323,9 @@ struct GpuRcd::Impl {
   double sec = 0;
 };
 
-GpuRcd::GpuRcd(const LoopCloser& closer, int device, int slots) : impl_(std::make_unique<Impl>()) {
+GpuRcd::GpuRcd(const LoopCloser& closer, std::span<const int> devices, int slots) : impl_(std::make_unique<Impl>()) {
   Impl& m = *impl_;
   m.flat = closer.flat();
-  m.device = device;
   m.nslots = std::max(1, slots);
   m.tol = static_cast<float>(kTolFactor * closer.params().rcdTolerance);
   m.stallTol = static_cast<float>(closer.params().rcdStallTolerance);
@@ -332,7 +337,7 @@ GpuRcd::GpuRcd(const LoopCloser& closer, int device, int slots) : impl_(std::mak
       m.maxPairs = std::max(m.maxPairs, f.pairNum[l]);
     }
   // One lane per closure pair.
-  if (m.maxNd == 0 || m.maxPairs > 32) return;
+  if (m.maxNd == 0 || m.maxPairs > 32 || devices.empty()) return;
   m.tileSize = m.maxPairs <= 8 ? 8 : m.maxPairs <= 16 ? 16 : 32;
   m.strideFloats = 2 * m.maxNd + (3 * m.maxNp + m.maxNd + 1) / 2 * 2;  // angles (double), points, tried
   const int bytes = m.strideFloats * 4;
@@ -347,28 +352,37 @@ GpuRcd::GpuRcd(const LoopCloser& closer, int device, int slots) : impl_(std::mak
       mask[g] |= 1u << q;
       if (f.active[a] & 1) second[g] |= 1u << q;
     }
-  check(cudaSetDevice(device), "cudaSetDevice");
-  m.pointNum.upload(f.pointNum.data(), f.pointNum.size());
-  m.dofOff.upload(f.dofOff.data(), f.dofOff.size());
-  m.dofNum.upload(f.dofNum.data(), f.dofNum.size());
-  m.pairOff.upload(f.pairOff.data(), f.pairOff.size());
-  m.pairNum.upload(f.pairNum.data(), f.pairNum.size());
-  m.copyOff.upload(f.copyOff.data(), f.copyOff.size());
-  m.copyNum.upload(f.copyNum.data(), f.copyNum.size());
-  m.movesOff.upload(f.movesOff.data(), f.movesOff.size());
-  m.moves.upload(f.moves.data(), f.moves.size());
-  m.axisFixed.upload(f.axisFixed.data(), f.axisFixed.size());
-  m.axisMoving.upload(f.axisMoving.data(), f.axisMoving.size());
-  m.pairPoint.upload(f.pairPoint.data(), f.pairPoint.size());
-  m.pairEnd.upload(f.pairEnd.data(), f.pairEnd.size());
-  m.actMask.upload(mask.data(), mask.size());
-  m.actSecond.upload(second.data(), second.size());
+  const int nd = std::min(static_cast<int>(devices.size()), m.nslots);
+  for (int k = 0; k < nd; ++k) {
+    auto dp = std::make_unique<Impl::Dev>();
+    Impl::Dev& d = *dp;
+    d.device = devices[k];
+    d.nslots = (m.nslots - k + nd - 1) / nd;
+    check(cudaSetDevice(d.device), "cudaSetDevice");
+    d.pointNum.upload(f.pointNum.data(), f.pointNum.size());
+    d.dofOff.upload(f.dofOff.data(), f.dofOff.size());
+    d.dofNum.upload(f.dofNum.data(), f.dofNum.size());
+    d.pairOff.upload(f.pairOff.data(), f.pairOff.size());
+    d.pairNum.upload(f.pairNum.data(), f.pairNum.size());
+    d.copyOff.upload(f.copyOff.data(), f.copyOff.size());
+    d.copyNum.upload(f.copyNum.data(), f.copyNum.size());
+    d.movesOff.upload(f.movesOff.data(), f.movesOff.size());
+    d.moves.upload(f.moves.data(), f.moves.size());
+    d.axisFixed.upload(f.axisFixed.data(), f.axisFixed.size());
+    d.axisMoving.upload(f.axisMoving.data(), f.axisMoving.size());
+    d.pairPoint.upload(f.pairPoint.data(), f.pairPoint.size());
+    d.pairEnd.upload(f.pairEnd.data(), f.pairEnd.size());
+    d.actMask.upload(mask.data(), mask.size());
+    d.actSecond.upload(second.data(), second.size());
+    const std::size_t ns = static_cast<std::size_t>(d.nslots);
+    d.sP.reserve(ns * 3 * m.maxNp);
+    d.sA.reserve(ns * m.maxNd);
+    d.sTried.reserve(ns * m.maxNd);
+    for (auto* b : {&d.sLink, &d.sPrev, &d.sTriedNum, &d.sIt, &d.sMaxIter, &d.sConv, &d.sDone}) b->reserve(ns);
+    d.sRng.reserve(ns);
+    m.devs.push_back(std::move(dp));
+  }
   const std::size_t ns = static_cast<std::size_t>(m.nslots);
-  m.sP.reserve(ns * 3 * m.maxNp);
-  m.sA.reserve(ns * m.maxNd);
-  m.sTried.reserve(ns * m.maxNd);
-  for (auto* b : {&m.sLink, &m.sPrev, &m.sTriedNum, &m.sIt, &m.sMaxIter, &m.sConv, &m.sDone}) b->reserve(ns);
-  m.sRng.reserve(ns);
   m.pending.assign(ns, nullptr);
   m.started.assign(ns, 0);
   m.finished.assign(ns, 0);
@@ -397,82 +411,96 @@ void GpuRcd::run(int slot, RcdJob& job) {
 
 void GpuRcd::flush(std::span<const int> slots) {
   Impl& m = *impl_;
-  std::vector<int> js;
+  const int nd = static_cast<int>(m.devs.size());
+  // The waiting slots of each device; the launches of the devices run at the same time.
+  std::vector<std::vector<int>> jsOf(static_cast<std::size_t>(nd));
   for (int s : slots)
-    if (m.pending[s]) js.push_back(s);
-  const int n = static_cast<int>(js.size());
-  if (n == 0) return;
-  // Jobs of the same link next to each other (the same control flow within a warp).
-  std::stable_sort(js.begin(), js.end(), [&](int a, int b) { return m.pending[a]->link < m.pending[b]->link; });
-  std::vector<int> isNew(n), link(n), pOff(n), aOff(n), maxIter(n);
-  std::vector<unsigned long long> rng(n);
-  std::vector<double> P, A;
-  for (int i = 0; i < n; ++i) {
-    const int s = js[i];
-    const RcdJob& j = *m.pending[s];
-    isNew[i] = m.started[s] ? 0 : 1;
-    link[i] = j.link;
-    pOff[i] = static_cast<int>(P.size());
-    aOff[i] = static_cast<int>(A.size());
-    maxIter[i] = j.maxIter;
-    rng[i] = j.rng;
-    if (!m.started[s]) {
-      P.insert(P.end(), j.points.begin(), j.points.end());
-      A.insert(A.end(), j.anglesDeg.begin(), j.anglesDeg.end());
+    if (m.pending[s]) jsOf[s % nd].push_back(s);
+  if (std::all_of(jsOf.begin(), jsOf.end(), [](const auto& v) { return v.empty(); })) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int k = 0; k < nd; ++k) {
+    std::vector<int>& js = jsOf[k];
+    const int n = static_cast<int>(js.size());
+    if (n == 0) continue;
+    Impl::Dev& d = *m.devs[k];
+    // Jobs of the same link next to each other (the same control flow within a warp).
+    std::stable_sort(js.begin(), js.end(), [&](int a, int b) { return m.pending[a]->link < m.pending[b]->link; });
+    std::vector<int> local(n), isNew(n), link(n), pOff(n), aOff(n), maxIter(n);
+    std::vector<unsigned long long> rng(n);
+    std::vector<double> P, A;
+    for (int i = 0; i < n; ++i) {
+      const int s = js[i];
+      const RcdJob& j = *m.pending[s];
+      local[i] = s / nd;
+      isNew[i] = m.started[s] ? 0 : 1;
+      link[i] = j.link;
+      pOff[i] = static_cast<int>(P.size());
+      aOff[i] = static_cast<int>(A.size());
+      maxIter[i] = j.maxIter;
+      rng[i] = j.rng;
+      if (!m.started[s]) {
+        P.insert(P.end(), j.points.begin(), j.points.end());
+        A.insert(A.end(), j.anglesDeg.begin(), j.anglesDeg.end());
+      }
+    }
+    check(cudaSetDevice(d.device), "cudaSetDevice");
+    const JobView jv{n,
+                     d.jSlot.upload(local.data(), n),
+                     d.jNew.upload(isNew.data(), n),
+                     d.jLink.upload(link.data(), n),
+                     d.jPOff.upload(pOff.data(), n),
+                     d.jAOff.upload(aOff.data(), n),
+                     d.jMaxIter.upload(maxIter.data(), n),
+                     d.jP.upload(P.data(), P.size()),
+                     d.jA.upload(A.data(), A.size()),
+                     d.jRng.upload(rng.data(), n)};
+    const SlotView sv{d.sP.p, d.sA.p, d.sTried.p, d.sLink.p, d.sPrev.p, d.sTriedNum.p,
+                      d.sIt.p, d.sMaxIter.p, d.sConv.p, d.sDone.p, d.sRng.p};
+    const FlatView fv{d.pointNum.p, d.dofOff.p, d.dofNum.p, d.pairOff.p, d.pairNum.p, d.copyOff.p, d.copyNum.p,
+                      d.movesOff.p, d.moves.p, d.axisFixed.p, d.axisMoving.p, d.pairPoint.p, d.pairEnd.p,
+                      d.actMask.p, d.actSecond.p};
+    const int blocks = (n + m.groups - 1) / m.groups;
+    const int threads = m.groups * m.tileSize;
+    const std::size_t smem = static_cast<std::size_t>(m.groups) * m.strideFloats * 4;
+    if (m.tileSize == 8)
+      rcdKernel<8><<<blocks, threads, smem>>>(fv, sv, jv, m.tol, m.stallTol, m.maxNp, m.maxNd, m.strideFloats, kChunk);
+    else if (m.tileSize == 16)
+      rcdKernel<16><<<blocks, threads, smem>>>(fv, sv, jv, m.tol, m.stallTol, m.maxNp, m.maxNd, m.strideFloats, kChunk);
+    else
+      rcdKernel<32><<<blocks, threads, smem>>>(fv, sv, jv, m.tol, m.stallTol, m.maxNp, m.maxNd, m.strideFloats, kChunk);
+    check(cudaGetLastError(), "rcdKernel");
+    ++m.kernels;
+  }
+  // Results of the finished attempts.
+  for (int k = 0; k < nd; ++k) {
+    if (jsOf[k].empty()) continue;
+    Impl::Dev& d = *m.devs[k];
+    check(cudaSetDevice(d.device), "cudaSetDevice");
+    check(cudaDeviceSynchronize(), "rcdKernel");
+    std::vector<int> done(d.nslots), conv(d.nslots), it(d.nslots);
+    std::vector<unsigned long long> rs(d.nslots);
+    std::vector<double> As(static_cast<std::size_t>(d.nslots) * m.maxNd);
+    d.sDone.download(done.data(), d.nslots);
+    d.sConv.download(conv.data(), d.nslots);
+    d.sIt.download(it.data(), d.nslots);
+    d.sRng.download(rs.data(), d.nslots);
+    d.sA.download(As.data(), As.size());
+    for (int s : jsOf[k]) {
+      const int q = s / nd;
+      RcdJob& j = *m.pending[s];
+      m.pending[s] = nullptr;
+      m.started[s] = 1;
+      if (!done[q]) continue;
+      m.finished[s] = 1;
+      std::copy_n(As.begin() + static_cast<std::ptrdiff_t>(q) * m.maxNd, j.anglesDeg.size(), j.anglesDeg.begin());
+      j.rng = rs[q];
+      j.converged = conv[q] != 0;
+      j.iterations = it[q];
+      ++m.attempts;
+      m.updates += it[q];
     }
   }
-  check(cudaSetDevice(m.device), "cudaSetDevice");
-  const auto t0 = std::chrono::steady_clock::now();
-  const JobView jv{n,
-                   m.jSlot.upload(js.data(), n),
-                   m.jNew.upload(isNew.data(), n),
-                   m.jLink.upload(link.data(), n),
-                   m.jPOff.upload(pOff.data(), n),
-                   m.jAOff.upload(aOff.data(), n),
-                   m.jMaxIter.upload(maxIter.data(), n),
-                   m.jP.upload(P.data(), P.size()),
-                   m.jA.upload(A.data(), A.size()),
-                   m.jRng.upload(rng.data(), n)};
-  const SlotView sv{m.sP.p, m.sA.p, m.sTried.p, m.sLink.p, m.sPrev.p, m.sTriedNum.p,
-                    m.sIt.p, m.sMaxIter.p, m.sConv.p, m.sDone.p, m.sRng.p};
-  const FlatView fv{m.pointNum.p, m.dofOff.p, m.dofNum.p, m.pairOff.p, m.pairNum.p, m.copyOff.p, m.copyNum.p,
-                    m.movesOff.p, m.moves.p, m.axisFixed.p, m.axisMoving.p, m.pairPoint.p, m.pairEnd.p,
-                    m.actMask.p, m.actSecond.p};
-  const int blocks = (n + m.groups - 1) / m.groups;
-  const int threads = m.groups * m.tileSize;
-  const std::size_t smem = static_cast<std::size_t>(m.groups) * m.strideFloats * 4;
-  if (m.tileSize == 8)
-    rcdKernel<8><<<blocks, threads, smem>>>(fv, sv, jv, m.tol, m.stallTol, m.maxNp, m.maxNd, m.strideFloats, kChunk);
-  else if (m.tileSize == 16)
-    rcdKernel<16><<<blocks, threads, smem>>>(fv, sv, jv, m.tol, m.stallTol, m.maxNp, m.maxNd, m.strideFloats, kChunk);
-  else
-    rcdKernel<32><<<blocks, threads, smem>>>(fv, sv, jv, m.tol, m.stallTol, m.maxNp, m.maxNd, m.strideFloats, kChunk);
-  check(cudaGetLastError(), "rcdKernel");
-  check(cudaDeviceSynchronize(), "rcdKernel");
-  // Results of the finished attempts.
-  std::vector<int> done(m.nslots), conv(m.nslots), it(m.nslots);
-  std::vector<unsigned long long> rs(m.nslots);
-  std::vector<double> As(static_cast<std::size_t>(m.nslots) * m.maxNd);
-  m.sDone.download(done.data(), m.nslots);
-  m.sConv.download(conv.data(), m.nslots);
-  m.sIt.download(it.data(), m.nslots);
-  m.sRng.download(rs.data(), m.nslots);
-  m.sA.download(As.data(), As.size());
   m.sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  ++m.kernels;
-  for (int s : js) {
-    RcdJob& j = *m.pending[s];
-    m.pending[s] = nullptr;
-    m.started[s] = 1;
-    if (!done[s]) continue;
-    m.finished[s] = 1;
-    std::copy_n(As.begin() + static_cast<std::ptrdiff_t>(s) * m.maxNd, j.anglesDeg.size(), j.anglesDeg.begin());
-    j.rng = rs[s];
-    j.converged = conv[s] != 0;
-    j.iterations = it[s];
-    ++m.attempts;
-    m.updates += it[s];
-  }
 }
 
 }  // namespace od
