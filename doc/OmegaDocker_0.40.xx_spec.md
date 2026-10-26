@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.93 |
+| 文件版本 | 1.94 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -2501,7 +2501,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V；GPU 同時用於桌面顯
 | RB4 posm1 | 全部 | 139.8 s | 8.6 s | 16 |
 
 - CPU 版以 `-march=native` 編譯（AVX-512）：RB4 posm1 9b 125.5 → 110.3 s（快 12%），網格 1.91 → 1.61 s。未採用為預設（執行檔只能在同類 CPU 上執行）。
-  - 1.93：加入建置選項 `-DOD_NATIVE=ON`（`-march=native -ffp-contract=off`）。12% 主要來自 GCC 把 a·b + c 合併為 FMA（GCC 14 在 `-std=c++20` 下預設合併）：同一運算在不同函式中合併與否不同，3 個要求逐位元相同的測試失敗（`StamField` 與 flat 形式的場能量、9b 樣本能量的重新計算、能量 kernel 的 flat 形式）。加上 `-ffp-contract=off` 後全部測試通過、結果與一般建置相同，RB4 posm1 9b 125.2 → 122.3 s（快 2%）。
+  - 1.93：加入建置選項 `-DOD_NATIVE=ON`（`-march=native -ffp-contract=off`）。12% 主要來自 GCC 把 a·b + c 合併為 FMA（GCC 14 在 `-std=c++20` 下預設合併）：同一運算在不同函式中合併與否不同，3 個要求逐位元相同的測試失敗（`StamField` 與 flat 形式的場能量、9b 樣本能量的重新計算、能量 kernel 的 flat 形式）。加上 `-ffp-contract=off` 後全部測試通過、結果與一般建置相同，RB4 posm1 9b 125.2 → 122.3 s（快 2%）。使用者決定（1.94）：保留此選項，預設 OFF。
 - GPU `energy_gpu.cu` 以 `-use_fast_math` 編譯（AutoDock-GPU 的設定）：例子 A 23.2 s、RB4 7.0 s，與目前相同（1.90 已改用硬體倒數）。未採用。
 
 **(5) 與 AutoDock-GPU 1.6、OmegaDocker 0.33.0 的比較**
@@ -2533,9 +2533,9 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 **(2) 梯度以共用記憶體的定點數累加（AutoDock-GPU 的作法，未採用）**：AutoDock-GPU 1.6 的原子數上限 256 使座標、梯度與基因型可放入固定大小的共用記憶體（`sFloatBuff[6 × MAX_NUM_OF_ATOMS + …]`），梯度以 32 位元整數的定點數（`TERMSCALE`，限制在 ±`MAXTERM`）做共用記憶體的原子加法（sm_70 上只有 32 位元整數的共用記憶體原子加法是硬體指令；float、double、64 位元整數都是 CAS 迴圈，以 `cuobjdump -sass` 確認）。本程式已有的對應：座標與兩面角的 cos／sin 在放得下時存於動態共用記憶體（1.61，大小不限於 256 個原子），pair 的資料精簡（1.71、1.91），梯度則以 double 原子加法寫入 L2（依分量排列，1.68），且 warp 內先加總（分段加總、32 × 32 tile，1.61、1.85），原子操作的次數已少。
 - 試作：放得下時梯度改存於共用記憶體，64 位元定點數（2⁻²⁴ kcal/mol/Å）拆成 2 個 32 位元整數的原子加法（低 16 位元與其餘，整數相加與順序無關、結果確定）。例子 A 9b 22.14 → 23.05 s、RB4 posm1 6.66 → 6.93 s（慢 4%，每個 pose 的步數相同）；只用 1 個 32 位元整數（精度 2⁻⁸，只用於估計）時步數大幅改變，無法比較。未採用。
 
-**(3) Tensor Core 的加總（AutoDock-GPU 的 `TENSOR=ON`，未採用）**：AutoDock-GPU 以 Tensor Core（wmma_extension TCEC）加總 block 內的能量與梯度。本程式這部分的加總為 double 的 warp shuffle；省略能量各項的 warp 加總（結果不正確，只用於估計）每次評估只快 2–3%（full 1.155 → 1.129、delta 1.049 → 1.029 µs），Tensor Core 只能縮短其中一部分，且 sm_70 的輸入為 half；未實作。
+**(3) Tensor Core 的加總（AutoDock-GPU 的 `TENSOR=ON`，未採用）**：AutoDock-GPU 以 Tensor Core（wmma_extension TCEC）加總 block 內的能量與梯度。本程式這部分的加總為 double 的 warp shuffle；省略能量各項的 warp 加總（結果不正確，只用於估計）每次評估只快 2–3%（full 1.155 → 1.129、delta 1.049 → 1.029 µs），Tensor Core 只能縮短其中一部分，且 sm_70 的輸入為 half；未實作。使用者決定（1.94）：列為下一版的項目（18，F6），待完整的標準測試之後，先測試以 float 加總對結果的影響再進行。
 
-**(4) CPU 版 9b 的 float 與 SIMD**：CPU 版 9b 的 pose 能量已經以 float 計算（`MobmDocker::evaluate` 與 `dock::evaluate<float>` 逐位元相同，tests 的 `dock9b: flat field and pose energy equal …`）。SIMD 需把 pair 迴圈改為 tile 與手寫向量指令（gather／scatter），`-march=native` 的自動向量化只快 2%（15.1.31）；未實作。
+**(4) CPU 版 9b 的 float 與 SIMD**：CPU 版 9b 的 pose 能量已經以 float 計算（`MobmDocker::evaluate` 與 `dock::evaluate<float>` 逐位元相同，tests 的 `dock9b: flat field and pose energy equal …`）。SIMD 需把 pair 迴圈改為 tile 與手寫向量指令（gather／scatter），`-march=native` 的自動向量化只快 2%（15.1.31）；未實作。使用者決定（1.94）：不使用 SIMD。
 
 ### 15.1.33 CUDA 版：多個 GPU（1.93）
 
@@ -2833,6 +2833,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 | F3 | 自由度不足的閉合：自動開放相鄰的主鏈兩面角 | 雙硫鍵等自由度 < 6 的連結只做 best effort（7.11），多數樣本無法閉合（A：73% 在最小化前偏差 > `maxBreakDist`，7.6.1）；目前只能由使用者在分子設定檔手動擴大可動範圍（7.11.1 嘗試 2）。方向：自由度不足時，自動把連結兩側相鄰殘基的 φ/ψ 加入可調整的兩面角（StaM 須在可動範圍內，或另設允許範圍） |
 | F4 | 抽樣時考慮雙硫鍵的幾何 | csgm1 各兩面角獨立抽樣，Cys χ1 等隨機取值幾乎都把雙硫鍵拉開，之後才靠閉合修正。方向：抽樣時依雙硫鍵的常見構形（χ1、χ2、χ3、χss 的分布，或 CB–CB／CA–CA 距離）只抽能閉合的組合，或先抽一側再由幾何解出另一側 |
 | F5 | 同時調整多個兩面角的閉合方法 | RCD 是座標輪流下降，一次只調一個兩面角；耦合的組（例如 2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11，20 個兩面角）多數會收斂，但需數千至數萬次更新，不是停滯（`rcdStallTolerance` 無法加速，7.11.1 嘗試 5）。方向：以閉合偏差對兩面角的 Jacobian 做最小平方法（Gauss–Newton／Levenberg–Marquardt，或 damped least squares），每步同時更新組內所有兩面角；可保留 RCD 作為起始或後備 |
+| F6 | 以 Tensor Core 加總 block 內的能量與梯度（AutoDock-GPU 的 `TENSOR=ON`） | 加總為 double 的 warp shuffle；上限估計每次評估只快 2–3%（15.1.32）。先在完整的標準測試（17.3）之後，測試以 float 加總對結果（排名、第 1 名能量、RMSD）的影響，再決定是否實作 |
 
 ---
 
@@ -2934,3 +2935,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2（1.93 起只用於計
 | 1.91 | 2026-10-21 | 原子常數與原子對參數對齊（約 1%）；記錄未採用的嘗試（暫存器限制、試驗點只算能量）與 9b 線搜尋、posm3 離開格點的統計（15.1.30） |
 | 1.92 | 2026-10-21 | line search 選項 `{conf9a,dock9b}.lineSearchInit`、`lineSearchReduce`、`maxBacktrack`（12，CPU 與 GPU）；比較結果、CPU／GPU 效能與 AutoDock-GPU 1.6、0.33.0 的比較（15.1.31）；17.3 加入 line search 選項 |
 | 1.93 | 2026-10-26 | 多個 GPU：`gpu.device` 改為清單，9a lanes 與 9b 整個最小化分給各裝置、delta 區塊各自計算（15.1.33）；參考網格的 4 值形式 `gpu.packedMaps`；共用記憶體定點梯度與 Tensor Core 加總的量測（未採用）；CPU 版 9b 已為 float（15.1.32）；建置選項 `OD_NATIVE`（15.1.31） |
+| 1.94 | 2026-10-26 | 使用者決定：不使用 SIMD（15.1.32）；Tensor Core 加總列為下一版（18，F6）；`OD_NATIVE` 保留，預設 OFF（15.1.31） |
