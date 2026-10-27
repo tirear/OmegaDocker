@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.104 |
+| 文件版本 | 1.105 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -3055,7 +3055,8 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | — | 小分子規則改為不使用 Dimorphite-DL（Apache-2.0，與 LGPL-2.1 不相容）檔案與程式碼的獨立實作；`stam.protonation`／`mobm.protonation` 預設改為 `pH`（3.4） |
 
 ### 17.2 待確認
-- 可轉動氫與翻轉的最佳化是否改為移植 reduce2（cctbx `mmtbx/reduce`，BSD-3-Clause-LBNL，與 LGPL-2.1 相容）的計分與搜尋。
+- 可轉動氫與翻轉的計分與搜尋改用 reduce2 的方法（已同意，1.105）：cctbx 的 `mmtbx/reduce`、`mmtbx/probe`（reduce2、probe2 的計分與搜尋，C++ 與 Python）檔頭為 Apache-2.0（Richardson Lab），不是 cctbx 整體的 BSD-3-Clause-LBNL（1.104 的記載有誤），與 LGPL-2.1 不相容。做法待決定：（a）依已發表的文獻描述（probe 接觸點計分、reduce 的翻轉判斷）獨立實作，不讀、不用其程式碼；（b）移植其程式碼，含它的執行檔改以 LGPL-3.0-or-later 散布（PROPKA 的發布只寫 LGPL-2.1，是否可用第 3 版需確認）。
+- 兩面角改變後重新計算 pKa（`protonation.recompute`，1.105 評估）：目前質子化在讀檔時決定一次，之後所有構型的原子集合、電荷固定。小分子規則只看 2D 結構，不受兩面角影響；受影響的只有 PROPKA 處理的標準胺基酸。實測（16 執行緒機器的單執行緒）：PROPKA 每次 0.21 ms（1L2Y，154 個重原子）、0.59 ms（2KJJ）、1.6 ms（1STP）、3.3 ms（1HSG）、6.7 ms（4DFR）、49 ms（1QMZ，9122 個重原子）；完整質子化（PROPKA、補氫、翻轉最佳化）2.0、5.8、12.5、19.6、33.9、198 ms。待決定：時機（9a 後只對進入 L2 pool 的構型；9d 的複合物姿態；9a 最小化中每個 L1 樣本）、不同質子化狀態間比較能量所需的質子化自由能項、原子集合改變的處理方式（每種狀態一個分子變體與能量系統，或固定的超集合加上每個構型的遮罩與電荷）。CUDA：L2 pool 與 9d 的次數（每輪數十到數百）在 CPU 上並行即可（例如 300 個構型 × 198 ms ÷ 16 執行緒 ≈ 3.7 s）；只有對每個 L1 樣本重新計算才需要 GPU，且需要能量 kernel 支援每個樣本不同的原子集合與電荷。
 - 3.4 小分子規則的 pKa 與修正值未以 pKa 資料集系統性驗證。
 - 3.4 的氫最佳化分數係數是以 8 個晶體結構對照 reduce 調整的經驗值，未以實驗（例如中子繞射）結構驗證。
 - 校準資料存放於 `datasetForDockingParaOpti/`（git 儲存庫外）。
@@ -3229,3 +3230,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.102 | 2026-10-27 | 6.1 執行模式 `run.mode`（`dock`、`score`、`localMin`）與 `run.unbound`（`conf9a`、`input`）；`score`／`localMin` 的 MobM 檔每筆紀錄為一個姿態（3.2）；`--refFiles` 與 `rmsd_ref`（3.2、10.3）；`output.allSummary`（10.3），接續時可改；17.2 核酸是否套用 Dimorphite-DL 待確認；18 新增 F10 |
 | 1.103 | 2026-10-27 | 3.4 質子化狀態與補氫：`stam.protonation`／`mobm.protonation`（`input`、`pH`）、`protonation.pH`；PROPKA 3 與 Dimorphite-DL 的 C++ 移植、金屬與雙硫鍵規則、OXT 補全、氫的放置與命名、可轉動氫與翻轉的最佳化、`[[protonation]]` 覆寫、多筆紀錄的處理；3.1 氫原子規則；14.2 參數；17.1 決定；17.2 授權與預設值待決定 |
 | 1.104 | 2026-10-27 | 3.4：小分子、核酸、非標準殘基改用 OmegaDocker 自己的官能基規則（`src/pka_rules.cpp`），移除 Dimorphite-DL 的移植與檔案；`stam.protonation`／`mobm.protonation` 預設改為 `pH`（3.1、3.4、14.2）；reduce 的參考範圍說明；17.2 改列 reduce2 與規則驗證 |
+| 1.105 | 2026-10-27 | 17.2：更正 reduce2／probe2 的授權（Apache-2.0）並列出做法選項；新增兩面角改變後重新計算 pKa 的評估（PROPKA 與完整質子化的耗時、待決定事項、CUDA 評估） |
