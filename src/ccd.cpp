@@ -4,6 +4,8 @@
 
 #include "ccd.hpp"
 
+#include <cmath>
+
 #include <gemmi/chemcomp.hpp>
 #include <gemmi/cif.hpp>
 
@@ -61,6 +63,24 @@ void CcdLibrary::addDocument(const void* docPtr, const std::string& origin, bool
       if (ca.atomicNum == 0) fail("{}: component {}: unknown element for atom {}", origin, c.id, a.id);
       c.atomIndex.emplace(ca.name, static_cast<int>(c.atoms.size()));
       c.atoms.push_back(std::move(ca));
+    }
+    // Model coordinates (taken from a PDB entry; their prochiral hydrogen names follow the PDB
+    // convention, unlike those of the ideal coordinates), else the ideal coordinates.
+    for (int pass = 0; pass < 2; ++pass) {
+      const char* cols[2][3] = {{"model_Cartn_x", "model_Cartn_y", "model_Cartn_z"},
+                                {"pdbx_model_Cartn_x_ideal", "pdbx_model_Cartn_y_ideal", "pdbx_model_Cartn_z_ideal"}};
+      auto tab = const_cast<gemmi::cif::Block&>(block).find(
+          "_chem_comp_atom.", {"atom_id", std::string("?") + cols[pass][0], std::string("?") + cols[pass][1], std::string("?") + cols[pass][2]});
+      if (!tab.ok() || !tab.has_column(1) || !tab.has_column(2) || !tab.has_column(3)) continue;
+      for (auto row : tab) {
+        const int i = c.find(row.str(0));
+        if (i < 0 || c.atoms[i].hasXyz) continue;
+        const double x = gemmi::cif::as_number(row[1]), y = gemmi::cif::as_number(row[2]), z = gemmi::cif::as_number(row[3]);
+        if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+          c.atoms[i].xyz = {x, y, z};
+          c.atoms[i].hasXyz = true;
+        }
+      }
     }
     for (const auto& b : cc.rt.bonds) {
       CcdComp::Bond cb;

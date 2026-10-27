@@ -50,5 +50,9 @@ AutoDock is a Trade Mark of the Scripps Research Institute.
 | PDB entries 1D18, 1D3Z, 1L2Y, 1PIT, 1RNG, 2KJJ, 2KOC, 2LZX, 1ZNF (first model only), ligand BTN and CCD components ACE, NH2, ZN | `tests/data/` | CC0 1.0 |
 | RDKit test files `benzene.mol2`, `pyrazole_pyridine.mol2` | `tests/data/` | BSD-3-Clause |
 | DSSP algorithm, behavior following DSSP 4 ([PDB-REDO/dssp](https://github.com/PDB-REDO/dssp)), Copyright (c) 2020 NKI/AVL, Netherlands Cancer Institute | `src/dssp.cpp` | BSD-2-Clause |
+| PROPKA 3 ([jensengroup/propka](https://github.com/jensengroup/propka), commit 58ceb7b): parameter file `propka.cfg` and the pKa algorithm ported to C++; Olsson MHM, Søndergaard CR, Rostkowski M, Jensen JH (2011) J Chem Theory Comput 7:525-537, https://doi.org/10.1021/ct100578z | `third_party/propka/` (embedded in the executable), `src/propka.cpp` | LGPL-2.1 |
+| Dimorphite-DL 2.1.0 ([durrantlab/dimorphite_dl](https://github.com/durrantlab/dimorphite_dl), commit 69ec38e): substructure file `site_substructures.smarts` and the protonation rules ported to C++; Ropp PJ, Kaminsky JC, Yablonski S, Durrant JD (2019) J Cheminform 11:14, https://doi.org/10.1186/s13321-019-0336-9 | `third_party/dimorphite_dl/` (embedded in the executable), `src/dimorphite.cpp` | Apache-2.0 |
 
 Linked at build time: RDKit (BSD-3-Clause), Boost (BSL-1.0), Eigen (MPL-2.0).
+
+Note: Apache-2.0 (Dimorphite-DL) is compatible with version 3 of the (L)GPL but not with version 2.1; how executables containing it are licensed is still to be decided (specification 17.2).

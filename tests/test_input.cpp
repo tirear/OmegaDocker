@@ -30,6 +30,11 @@
 #include <omp.h>
 #include <unistd.h>
 
+#include <GraphMol/GraphMol.h>
+#include <GraphMol/MolOps.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
+#include <GraphMol/SmilesParse/SmilesWrite.h>
+
 #include "ad4.hpp"
 #include "box.hpp"
 #include "ad4_pair.hpp"
@@ -60,6 +65,10 @@
 #include "grow.hpp"
 #include "closure.hpp"
 #include "orient.hpp"
+#include "propka.hpp"
+#include "dimorphite.hpp"
+#include "protonate.hpp"
+#include "read_mmcif.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
 #include "sysmem.hpp"
@@ -6341,4 +6350,131 @@ TEST_CASE("score: pose records, reference atom map, Kabsch superposition") {
   CHECK(od::rotationAngle(k, q) < 1e-6);
   std::filesystem::remove(two);
   std::filesystem::remove(bad);
+}
+
+
+TEST_CASE("protonation: PROPKA 3 port, Dimorphite-DL port") {
+  // PROPKA 3 (Python, commit 58ceb7b) pKa values of 1L2Y.
+  const od::RawStructure s = od::readMmcif(kData + "/1L2Y.cif", ccd(), true);
+  std::vector<od::propka::InputAtom> in;
+  for (const auto& a : s.atoms) {
+    if (a.atomicNum == 1) continue;
+    const auto& r = s.residues[a.residue].info;
+    in.push_back({a.name, r.name, r.chain, r.seq, r.iCode, od::elementSymbol(a.atomicNum), a.hetatm, a.xyz});
+  }
+  const auto g = od::propka::calculate(in);
+  const std::vector<std::pair<std::string, double>> ref{{"N+    1 A", 7.734941}, {"TYR   3 A", 10.404878}, {"LYS   8 A", 10.272701},
+                                                        {"ASP   9 A", 4.100234}, {"ARG  16 A", 12.266749}, {"C-   20 A", 3.348626}};
+  REQUIRE(g.size() == ref.size());
+  for (std::size_t k = 0; k < g.size(); ++k) {
+    CHECK(g[k].label == ref[k].first);
+    CHECK(g[k].pka == doctest::Approx(ref[k].second).epsilon(1e-6));
+  }
+
+  // Dimorphite-DL 2.1.0 (Python) at one pH.
+  auto dimo = [](const std::string& smi, double pH) {
+    std::unique_ptr<RDKit::RWMol> m(RDKit::SmilesToMol(smi));
+    std::vector<bool> none(m->getNumAtoms(), false);
+    auto r = od::dimorphite::protonate(*m, pH, none, none);
+    RDKit::MolOps::sanitizeMol(*r.mol);
+    return RDKit::MolToSmiles(*r.mol);
+  };
+  auto canon = [](const std::string& smi) {
+    std::unique_ptr<RDKit::RWMol> m(RDKit::SmilesToMol(smi));
+    return RDKit::MolToSmiles(*m);
+  };
+  const std::vector<std::tuple<std::string, std::string, std::string>> cases{
+      {"CC(=O)O", "CC(=O)[O-]", "CC(=O)[O-]"},
+      {"CN", "C[NH3+]", "C[NH3+]"},
+      {"c1c[nH]cn1", "c1c[nH]cn1", "c1c[nH+]c[nH]1"},
+      {"Oc1ccccc1", "Oc1ccccc1", "Oc1ccccc1"},
+      {"NC(=N)N", "NC(N)=[NH2+]", "NC(N)=[NH2+]"},
+      {"OP(=O)(O)OCC1OC(n2cnc3c(N)ncnc32)C(O)C1O", "Nc1ncnc2c1ncn2C1OC(COP(=O)([O-])[O-])C(O)C1O",
+       "Nc1ncnc2c1ncn2C1OC(COP(=O)([O-])O)C(O)C1O"},
+      {"c1nn[nH]n1", "c1nn[n-]n1", "c1nn[nH]n1"},
+      {"CC(=O)NC", "CNC(C)=O", "CNC(C)=O"}};
+  for (const auto& [in7, at74, at4] : cases) {
+    CHECK(dimo(in7, 7.4) == canon(at74));
+    CHECK(dimo(in7, 4.0) == canon(at4));
+  }
+}
+
+TEST_CASE("protonation: hydrogens of 1L2Y, overrides, pose records") {
+  // The NMR hydrogens are removed and placed again: same count and names, the same positions
+  // for hydrogens that cannot rotate.
+  od::ProtonationOptions opt;
+  od::ProtonationReport rep;
+  const od::RawStructure ref = od::readMmcif(kData + "/1L2Y.cif", ccd());
+  const od::RawStructure s = od::readMmcif(kData + "/1L2Y.cif", ccd(), false, &opt, &rep);
+  CHECK(rep.removedH == 150);
+  CHECK(rep.addedH == 150);
+  REQUIRE(s.atoms.size() == ref.atoms.size());
+  std::map<std::string, od::Vec3> refH;
+  for (const auto& a : ref.atoms)
+    if (a.atomicNum == 1) refH[std::format("{}:{}", ref.residues[a.residue].info.seq, a.name)] = a.xyz;
+  int close = 0, total = 0;
+  std::set<std::string> nterm;
+  for (const auto& a : s.atoms) {
+    if (a.atomicNum != 1) continue;
+    const auto& r = s.residues[a.residue].info;
+    if (r.seq == 1 && (a.name == "H1" || a.name == "H2" || a.name == "H3")) nterm.insert(a.name);
+    const auto it = refH.find(std::format("{}:{}", r.seq, a.name));
+    REQUIRE(it != refH.end());
+    ++total;
+    const double d = std::sqrt(std::pow(a.xyz[0] - it->second[0], 2) + std::pow(a.xyz[1] - it->second[1], 2) +
+                               std::pow(a.xyz[2] - it->second[2], 2));
+    if (d < 0.2) ++close;
+  }
+  CHECK(nterm.size() == 3);
+  CHECK(close >= 110);  // methyl / NH3+ / OH hydrogens may rotate, Asn / Arg NH2 names follow the CCD
+  std::map<std::string, std::string> state;
+  for (const auto& x : rep.sites) state[x.atom] = x.state;
+  CHECK(state["A:9:ASP:OD2"] == "ASP");
+  CHECK(state["A:8:LYS:NZ"] == "LYS");
+  CHECK(state["A:20:SER:OXT"] == "COO-");
+  CHECK(state["A:1:ASN:N"] == "NH3+");
+  int q = 0;
+  for (const auto& a : s.atoms) q += a.formalCharge;
+  CHECK(q == 1);
+
+  // Overrides.
+  od::ProtonationOptions o2;
+  o2.overrides = {{"x", "A:9", "ASH", std::nullopt, "t:1"}, {"x", "A:1:N", "", 0, "t:2"}};
+  od::ProtonationReport rep2;
+  const od::RawStructure s2 = od::readMmcif(kData + "/1L2Y.cif", ccd(), false, &o2, &rep2);
+  int q2 = 0;
+  for (const auto& a : s2.atoms) q2 += a.formalCharge;
+  CHECK(q2 == 1 + 1 - 1);  // ASH (+1) and a neutral N terminus (-1)
+  o2.overrides = {{"x", "A:9", "HIP", std::nullopt, "t:1"}};
+  CHECK_THROWS_AS(od::readMmcif(kData + "/1L2Y.cif", ccd(), false, &o2, &rep2), od::Error);
+  o2.overrides = {{"x", "A:99:N", "", 1, "t:1"}};
+  CHECK_THROWS_AS(od::readMmcif(kData + "/1L2Y.cif", ccd(), false, &o2, &rep2), od::Error);
+
+  // Zinc finger: metal-bonded Cys and His.
+  od::CcdLibrary lib;
+  lib.addFile(kData + "/1ZNF_ccd.cif");
+  od::ProtonationReport rep3;
+  od::readMmcif(kData + "/1ZNF.cif", lib, false, &opt, &rep3);
+  std::map<std::string, std::string> st3;
+  for (const auto& x : rep3.sites) st3[x.atom] = x.method + " " + x.state;
+  CHECK(st3["A:3:CYS:SG"] == "metal CYM");
+  CHECK(st3["A:19:HIS:CG"] == "metal HID");
+
+  // SDF: carboxylic acid of biotin deprotonated; pose records get the same hydrogens.
+  const std::string sdf = kData + "/BTN_ideal.sdf";
+  std::ifstream f(sdf);
+  const std::string rec((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  const std::string two = (std::filesystem::temp_directory_path() / std::format("od_test_prot_{}.sdf", ::getpid())).string();
+  std::ofstream(two) << rec << rec;
+  od::ProtonationReport rep4;
+  const od::PoseRecords p = od::loadPoseRecords(two, od::Role::MobM, ccd(), &opt, &rep4);
+  REQUIRE(p.xyz.size() == 2);
+  CHECK(p.xyz[0].size() == p.mol.atoms.size());
+  CHECK(p.xyz[1].size() == p.mol.atoms.size());
+  int qb = 0;
+  for (const auto& a : p.mol.atoms) qb += a.formalCharge;
+  CHECK(qb == -1);
+  CHECK(rep4.removedH == 16);
+  CHECK(rep4.addedH == 15);
+  std::filesystem::remove(two);
 }

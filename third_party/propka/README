@@ -1,0 +1,3 @@
+PROPKA 3, https://github.com/jensengroup/propka, commit 58ceb7ba5cbfa836805fe515e08aaf512044a878 (2026-07-25).
+propka.cfg is the unmodified parameter file of the program; LICENSE is its license (LGPL-2.1).
+OmegaDocker embeds propka.cfg and ports the pKa calculation to C++ (src/propka.cpp).

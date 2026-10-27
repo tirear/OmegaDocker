@@ -605,3 +605,22 @@ TEST_CASE("cli: run.mode, run.unbound, --refFiles, output.allSummary") {
   r.resume = "/tmp/run1";
   CHECK_THROWS_AS(od::validateOptions(r), od::Error);
 }
+
+TEST_CASE("cli: stam.protonation, mobm.protonation, protonation.pH") {
+  const auto d = parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20", "--outPrefix=out",
+                        "--dock9b_posm=posm1"});
+  CHECK(d.stamProtonation == "input");
+  CHECK(d.mobmProtonation == "input");
+  CHECK(d.protonationPH == doctest::Approx(7.4));
+  const auto p = parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20", "--outPrefix=out",
+                        "--dock9b_posm=posm1", "--stam_protonation=pH", "--protonation_pH=6.5"});
+  CHECK(p.stamProtonation == "pH");
+  CHECK(p.mobmProtonation == "input");
+  CHECK(p.protonationPH == doctest::Approx(6.5));
+  CHECK_NOTHROW(od::validateOptions(p));
+  CHECK(od::paramsText(p).find("protonation = \"pH\"") != std::string::npos);
+  CHECK_THROWS_AS(parse({"--mobm_protonation=ph"}), od::Error);
+  auto bad = p;
+  bad.protonationPH = 15;
+  CHECK_THROWS_AS(od::validateOptions(bad), od::Error);
+}

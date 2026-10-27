@@ -36,6 +36,7 @@ struct Atom {
   Vec3 xyz{};
   int residue = -1;          // index into Molecule::residues, -1 if none
   int fileSerial = 0;        // 1-based atom index within the input record
+  bool hetatm = false;       // mmCIF HETATM record
 };
 
 struct Bond {

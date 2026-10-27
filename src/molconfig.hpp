@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "molecule.hpp"
+#include "protonate.hpp"
 #include "topology.hpp"
 #include "torsion_tree.hpp"
 
@@ -71,11 +72,17 @@ bool hasMetalRing(const Molecule& m);
 // Built-in ssType names: R, O and the Ramachandran types of spec 7.5.
 const std::vector<std::string>& builtinSsTypes();
 
-std::string defaultMolConfigText(const std::vector<MolInput>& mols);
+// protonationText: the [[protonation]] section (spec 3.4), inserted before the molecules.
+std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::string& protonationText = "");
 
 // Writes the default configuration to <outPrefix>.molconfig.default.toml, or to
 // <outPrefix>.molconfig.default.<n>.toml when that file exists; returns the path.
-std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vector<MolInput>& mols);
+std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vector<MolInput>& mols,
+                                  const std::string& protonationText = "");
+
+// [[protonation]] entries of a configuration file (spec 3.4); none when the file is missing or
+// cannot be parsed (readMolConfig reports that). Throws on invalid entries.
+std::vector<ProtonationOverride> readProtonationOverrides(const std::string& path);
 
 // Reads and validates a configuration. Returns nothing and fills errors
 // ("line <n>: <field>: <reason>") when the file is not valid. base holds the

@@ -825,7 +825,7 @@ bool hasMetalRing(const Molecule& m) {
   return false;
 }
 
-std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
+std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::string& protonationText) {
   std::string o;
   o += "# OmegaDocker molecule configuration (spec section 5).\n";
   o += "# Edit a copy and pass it with --molConfig. Entries must match the detected\n";
@@ -856,6 +856,7 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
   o += "# point gives phi and psi uniformly within +-ssHalfWidth of its values; the remaining\n";
   o += "# probability gives angles outside all point ranges.\n";
   for (const auto& n : builtinSsTypes()) o += std::format("\n[[ssType]]\nname    = {}\nbuiltin = true\n", quote(n));
+  o += protonationText;
   o += "\n# ---------- molecules ----------\n";
   o += "# [[molecule.ringBreak]] bond = [\"<atom>\", \"<atom>\"] breaks a ring bond (spec 4.5).\n";
   o += "# [[molecule.chainBreak]] source = \"auto-loop\" | \"auto-crosslink\" | \"auto-metal\" | \"user\" (spec 4.8).\n";
@@ -872,12 +873,13 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols) {
   return o;
 }
 
-std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vector<MolInput>& mols) {
+std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vector<MolInput>& mols,
+                                  const std::string& protonationText) {
   std::string path = outPrefix + ".molconfig.default.toml";
   for (int n = 1; std::filesystem::exists(path); ++n) path = std::format("{}.molconfig.default.{}.toml", outPrefix, n);
   std::ofstream f(path);
   if (!f) fail("Cannot write {}", path);
-  f << defaultMolConfigText(mols);
+  f << defaultMolConfigText(mols, protonationText);
   if (!f) fail("Cannot write {}", path);
   return path;
 }
@@ -888,7 +890,7 @@ std::optional<MolConfig> readMolConfigTable(const toml::table& root, const std::
                                             const TopologyParams& base, std::vector<std::string>& errors,
                                             bool ignoreOthers) {
   Errors e;
-  checkKeys(root, {"formatVersion", "generatedBy", "ssHalfWidth", "ssOriginalProb", "ssType", "molecule"}, "", e);
+  checkKeys(root, {"formatVersion", "generatedBy", "ssHalfWidth", "ssOriginalProb", "ssType", "protonation", "molecule"}, "", e);
   if (auto v = get<std::int64_t>(root, "formatVersion", "", e, true); v && *v != kMolConfigFormatVersion)
     e.add(lineOf(*root.get("formatVersion")), "formatVersion", std::format("must be {}", kMolConfigFormatVersion));
   get<std::string>(root, "generatedBy", "", e, false);
@@ -949,6 +951,48 @@ std::optional<MolConfig> readMolConfig(const std::string& path, const std::vecto
     return std::nullopt;
   }
   return readMolConfigTable(root, mols, base, errors, ignoreOthers);
+}
+
+std::vector<ProtonationOverride> readProtonationOverrides(const std::string& path) {
+  if (!std::filesystem::exists(path)) return {};
+  toml::table root;
+  try {
+    root = toml::parse_file(path);
+  } catch (const toml::parse_error&) {
+    return {};  // reported by readMolConfig
+  }
+  Errors e;
+  std::vector<ProtonationOverride> out;
+  std::set<std::pair<std::string, std::string>> seen;
+  for (const toml::table* t : tablesOf(root, "protonation", "", e)) {
+    checkKeys(*t, {"file", "site", "state", "charge"}, "protonation", e);
+    auto file = get<std::string>(*t, "file", "protonation", e, true);
+    auto site = get<std::string>(*t, "site", "protonation", e, true);
+    auto state = get<std::string>(*t, "state", "protonation", e, false);
+    auto charge = get<std::int64_t>(*t, "charge", "protonation", e, false);
+    if (state.has_value() == charge.has_value()) {
+      e.add(lineOf(*t), "protonation", "give either state (residue) or charge (atom)");
+      continue;
+    }
+    if (!file || !site) continue;
+    if (charge && (*charge < -3 || *charge > 3)) e.add(lineOf(*t->get("charge")), "protonation.charge", "must be in [-3, 3]");
+    if (!seen.insert({*file, *site}).second) e.add(lineOf(*t), "protonation", std::format("site \"{}\" of {} is listed more than once", *site, *file));
+    ProtonationOverride o;
+    o.file = *file;
+    o.site = *site;
+    if (state) o.state = *state;
+    if (charge) o.charge = static_cast<int>(*charge);
+    o.origin = std::format("{}:{}", path, lineOf(*t));
+    out.push_back(std::move(o));
+  }
+  if (e.count() > 0) {
+    std::vector<std::string> list;
+    e.flush(list);
+    std::string msg = std::format("{}: {} problem(s) found:", path, list.size());
+    for (const auto& x : list) msg += "\n  " + x;
+    throw Error(msg);
+  }
+  return out;
 }
 
 std::optional<MolConfig> parseMolConfig(const std::string& text, const std::vector<MolInput>& mols,

@@ -60,7 +60,8 @@ gemmi::Structure readGemmi(const std::string& path) {
 }
 
 RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const std::string& path, const CcdLibrary& ccd,
-                       bool connectivityOnly) {
+                       bool connectivityOnly, const ProtonationOptions* prot = nullptr, ProtonationReport* report = nullptr,
+                       ProtonationPlan* planOut = nullptr, const ProtonationPlan* planIn = nullptr) {
   RawStructure s;
   s.sourceFile = path;
   s.hasResidueInfo = true;
@@ -70,7 +71,7 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
   std::set<std::pair<int, int>> bonded;
   std::map<std::string, int> atomByAddress;  // "chain|seq|icode|atom"
   std::vector<ResidueRec> recs;
-  int altlocSkipped = 0, duplicateResidues = 0;
+  int altlocSkipped = 0, duplicateResidues = 0, skippedH = 0;
 
   auto addBond = [&](int a, int b, BondOrder o, bool aromatic) {
     auto key = std::minmax(a, b);
@@ -109,6 +110,10 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
             continue;
           }
         }
+        if (prot && at.element.is_hydrogen()) {
+          ++skippedH;
+          continue;
+        }
         if (rec.atomByName.contains(at.name)) {
           errors.push_back(std::format("{}:{}{}:{}:{}: duplicate atom name", info.chain, info.seq,
                                        info.iCode, info.name, at.name));
@@ -119,6 +124,7 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
         a.atomicNum = atomicNumber(at.element.name());
         a.xyz = {at.pos.x, at.pos.y, at.pos.z};
         a.residue = ri;
+        a.hetatm = res.het_flag == 'H';
         a.fileSerial = static_cast<int>(s.atoms.size()) + 1;
         int idx = static_cast<int>(s.atoms.size());
         int ci = comp->find(at.name);
@@ -194,7 +200,14 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
     addBond(ia, ib, metal ? BondOrder::Metal : BondOrder::Single, false);
   }
 
-  if (errors.empty() && !connectivityOnly) assignChargesAndKekule(s, aromaticCandidate, ccdCharge, errors);
+  if (errors.empty() && prot) {
+    ProtonationReport scratch;
+    ProtonationReport& r = report ? *report : scratch;
+    protonate(s, &ccd, *prot, r, &ccdCharge, &aromaticCandidate, errors, planOut, planIn);
+    r.removedH += skippedH;
+  } else if (errors.empty() && !connectivityOnly) {
+    assignChargesAndKekule(s, aromaticCandidate, ccdCharge, errors);
+  }
   if (!errors.empty()) {
     std::string msg = std::format("{}: {} problem(s) found:", path, errors.size());
     for (std::size_t i = 0; i < errors.size() && i < kMaxListedErrors; ++i) msg += "\n  " + errors[i];
@@ -222,16 +235,23 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
 
 }  // namespace
 
-RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd, bool connectivityOnly) {
+RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd, bool connectivityOnly, const ProtonationOptions* prot,
+                       ProtonationReport* report) {
   const gemmi::Structure st = readGemmi(path);
   if (st.models.size() > 1) logWarn(std::format("{}: {} models found; only the first is used", path, st.models.size()));
-  return readModel(st, 0, path, ccd, connectivityOnly);
+  return readModel(st, 0, path, ccd, connectivityOnly, prot, report);
 }
 
-std::vector<RawStructure> readMmcifModels(const std::string& path, const CcdLibrary& ccd) {
+std::vector<RawStructure> readMmcifModels(const std::string& path, const CcdLibrary& ccd, const ProtonationOptions* prot,
+                                          ProtonationReport* report) {
   const gemmi::Structure st = readGemmi(path);
   std::vector<RawStructure> v;
-  for (std::size_t k = 0; k < st.models.size(); ++k) v.push_back(readModel(st, k, path, ccd, false));
+  ProtonationPlan plan;
+  for (std::size_t k = 0; k < st.models.size(); ++k) {
+    ProtonationReport scratch;
+    v.push_back(readModel(st, k, path, ccd, false, prot, k == 0 ? report : &scratch, k == 0 ? &plan : nullptr,
+                          k == 0 ? nullptr : &plan));
+  }
   return v;
 }
 

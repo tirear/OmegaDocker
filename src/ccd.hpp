@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,6 +16,8 @@ struct CcdComp {
     std::string name;
     int atomicNum = 0;
     int charge = 0;
+    std::array<double, 3> xyz{};  // model or ideal coordinates of the definition
+    bool hasXyz = false;
   };
   struct Bond {
     int a = 0;

@@ -70,6 +70,12 @@ set(OD_RAMA_EMBED ${CMAKE_CURRENT_BINARY_DIR}/generated/rama_embedded.cpp)
 configure_file(cmake/rama_embedded.cpp.in ${OD_RAMA_EMBED} @ONLY)
 set_source_files_properties(${OD_RAMA_EMBED} PROPERTIES OBJECT_DEPENDS "${OD_RAMA_FILES}")
 
+set(OD_PROT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+set(OD_PROT_EMBED ${CMAKE_CURRENT_BINARY_DIR}/generated/protonation_embedded.cpp)
+configure_file(cmake/protonation_embedded.cpp.in ${OD_PROT_EMBED} @ONLY)
+set_source_files_properties(${OD_PROT_EMBED} PROPERTIES OBJECT_DEPENDS
+  "${OD_PROT_DIR}/propka/propka.cfg;${OD_PROT_DIR}/dimorphite_dl/site_substructures.smarts")
+
 configure_file(src/version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp @ONLY)
 
 # ---------- core library ----------
@@ -111,7 +117,11 @@ add_library(od_core STATIC
   src/checkpoint.cpp
   src/closure.cpp
   src/box.cpp
+  src/propka.cpp
+  src/dimorphite.cpp
+  src/protonate.cpp
   ${OD_CCD_EMBED}
+  ${OD_PROT_EMBED}
   ${OD_RAMA_EMBED})
 target_include_directories(od_core PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_include_directories(od_core SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pocketfft)

@@ -196,6 +196,15 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
   const std::string who = stam ? "StaM group: " : "Every MobM: ";
   auto acc = [stam](auto& o) -> auto& { return stam ? o.stam : o.mobm; };
   auto csgm = [stam](auto& o) -> auto& { return stam ? o.stamCsgm : o.mobmCsgm; };
+  t.push_back({set + ".protonation", Type::Str, "input|pH", "input",
+               who + "hydrogens as in the input file (input), or removed and replaced by those of the dominant "
+                     "protonation state at protonation.pH (pH; spec 3.4)",
+               [stam](Options& o, const Tokens& v) {
+                 const std::string& s = one(v);
+                 if (s != "input" && s != "pH") fail("expected input or pH but got '{}'", s);
+                 (stam ? o.stamProtonation : o.mobmProtonation) = s;
+               },
+               [stam](const Options& o) -> std::optional<Tokens> { return Tokens{stam ? o.stamProtonation : o.mobmProtonation}; }});
   if (stam) {
     t.push_back(real("stam.flexMargin", "<dist>", "4",
                      "StaM torsions are rotatable by default within the box extended by this margin (Å)",
@@ -329,6 +338,9 @@ const std::vector<Param>& params() {
                    o.runUnbound = s;
                  },
                  [](const Options& o) -> std::optional<Tokens> { return Tokens{o.runUnbound}; }});
+    t.push_back(real("protonation.pH", "<pH>", "7.4",
+                     "pH of stam.protonation / mobm.protonation = pH: the dominant protonation state (spec 3.4)",
+                     OD_ACC(protonationPH)));
 
     t.push_back(vec3("box.center", "Docking box center (Å, input coordinates; automatic box: replaces the computed center)", OD_ACC(boxCenter)));
     t.push_back(vec3("box.size", "Docking box size (Å; automatic box: along the box axes, replaces the computed size)", OD_ACC(boxSize)));
@@ -936,6 +948,7 @@ void validateOptions(const Options& o) {
   check(o.reachProtein > 0 && o.reachNucleic > 0, "topology.reachPerRes", "> 0 (both values)");
   check(o.closureG > 0, "energy.closureG", "> 0");
   check(o.clashDistance > 0, "energy.clashDistance", "> 0");
+  check(o.protonationPH >= 0 && o.protonationPH <= 14, "protonation.pH", "in [0, 14]");
   check(o.Kclash >= 0, "energy.Kclash", ">= 0");
   check(o.EclashBase > o.Emax, "energy.EclashBase", "greater than energy.Emax");
   check(o.gridSpacing > 0, "grid.spacing", "> 0");

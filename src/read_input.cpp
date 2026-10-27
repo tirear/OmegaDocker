@@ -35,13 +35,40 @@ std::string chainKey(const Molecule& m) {
 
 }  // namespace
 
-std::vector<RawStructure> readStructureFile(const std::string& path, const CcdLibrary& ccd) {
+namespace {
+
+// SDF / mol2 record: hydrogens replaced (spec 3.4); partial charges are then computed.
+void protonateRecord(RawStructure& s, const std::string& path, std::size_t record, const ProtonationOptions& prot,
+                     ProtonationReport& report, ProtonationPlan* planOut, const ProtonationPlan* planIn) {
+  std::vector<std::string> errors;
+  protonate(s, nullptr, prot, report, nullptr, nullptr, errors, planOut, planIn);
+  if (!errors.empty()) {
+    std::string msg = std::format("{} record {}: protonation failed:", path, record + 1);
+    for (const auto& e : errors) msg += "\n  " + e;
+    throw Error(msg);
+  }
+  if (s.hasPartialCharges)
+    logWarn(std::format("{} record {}: partial charges of the file are not used after protonation; Gasteiger charges will be computed",
+                        path, record + 1));
+  s.hasPartialCharges = false;
+}
+
+}  // namespace
+
+std::vector<RawStructure> readStructureFile(const std::string& path, const CcdLibrary& ccd, const ProtonationOptions* prot,
+                                            ProtonationReport* report) {
   if (!std::filesystem::exists(path)) fail("File not found: {}", path);
   const std::string e = lowerExtension(path);
-  if (e == ".cif" || e == ".mmcif") return {readMmcif(path, ccd)};
-  if (e == ".sdf" || e == ".sd" || e == ".mol") return readSdf(path);
-  if (e == ".mol2") return readMol2(path);
-  fail("{}: unsupported input format '{}' (supported: mmCIF, SDF/MOL, mol2)", path, e);
+  if (e == ".cif" || e == ".mmcif") return {readMmcif(path, ccd, false, prot, report)};
+  std::vector<RawStructure> v;
+  if (e == ".sdf" || e == ".sd" || e == ".mol") v = readSdf(path);
+  else if (e == ".mol2") v = readMol2(path);
+  else fail("{}: unsupported input format '{}' (supported: mmCIF, SDF/MOL, mol2)", path, e);
+  if (prot) {
+    ProtonationReport scratch;
+    for (std::size_t k = 0; k < v.size(); ++k) protonateRecord(v[k], path, k, *prot, report ? *report : scratch, nullptr, nullptr);
+  }
+  return v;
 }
 
 namespace {
@@ -79,19 +106,32 @@ std::set<std::pair<int, int>> bondSet(const Molecule& m) {
 
 }  // namespace
 
-std::vector<Molecule> loadMolecules(const std::string& path, Role role, const CcdLibrary& ccd) {
+std::vector<Molecule> loadMolecules(const std::string& path, Role role, const CcdLibrary& ccd, const ProtonationOptions* prot,
+                                    ProtonationReport* report) {
   std::vector<Molecule> mols;
-  for (const RawStructure& s : readStructureFile(path, ccd))
+  for (const RawStructure& s : readStructureFile(path, ccd, prot, report))
     for (Molecule& m : splitMolecules(s)) mols.push_back(std::move(m));
   nameAndPerceive(mols, path, role);
   return mols;
 }
 
-PoseRecords loadPoseRecords(const std::string& path, Role role, const CcdLibrary& ccd) {
+PoseRecords loadPoseRecords(const std::string& path, Role role, const CcdLibrary& ccd, const ProtonationOptions* prot,
+                            ProtonationReport* report) {
   if (!std::filesystem::exists(path)) fail("File not found: {}", path);
   const std::string e = lowerExtension(path);
-  const std::vector<RawStructure> recs =
-      e == ".cif" || e == ".mmcif" ? readMmcifModels(path, ccd) : readStructureFile(path, ccd);
+  std::vector<RawStructure> recs;
+  if (e == ".cif" || e == ".mmcif") {
+    recs = readMmcifModels(path, ccd, prot, report);
+  } else {
+    recs = readStructureFile(path, ccd);
+    if (prot) {
+      ProtonationPlan plan;
+      ProtonationReport scratch;
+      for (std::size_t k = 0; k < recs.size(); ++k)
+        protonateRecord(recs[k], path, k, *prot, k == 0 && report ? *report : scratch, k == 0 ? &plan : nullptr,
+                        k == 0 ? nullptr : &plan);
+    }
+  }
   PoseRecords out;
   std::set<std::pair<int, int>> bonds;
   for (std::size_t k = 0; k < recs.size(); ++k) {

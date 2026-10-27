@@ -65,6 +65,65 @@
 
 namespace {
 
+// Protonation of one input file (spec 3.4): log summary.
+void logProtonation(const std::string& file, const od::ProtonationReport& r, double pH) {
+  std::map<std::string, int> states;
+  for (const auto& s : r.sites) ++states[s.state];
+  std::string st;
+  for (const auto& [k, n] : states) st += std::format("{}{} {}", st.empty() ? "" : ", ", k, n);
+  od::logInfo(std::format("Protonation at pH {} ({}): {} input hydrogen(s) removed, {} added; {} titratable site(s){}{}", pH, file,
+                          r.removedH, r.addedH, r.sites.size(), st.empty() ? "" : ": ", st));
+  od::logInfo(std::format("  hydrogen optimization: {} rotor(s), {} flip group(s), {} flipped{}; {} component(s){}", r.rotors,
+                          r.flipGroups, r.flipped.size(),
+                          r.flipped.empty() ? "" : " (" + [&] {
+                            std::string v;
+                            for (const auto& x : r.flipped) v += (v.empty() ? "" : " ") + x;
+                            return v;
+                          }() + ")",
+                          r.components,
+                          r.greedyComponents > 0 ? std::format(", {} solved greedily (too many states)", r.greedyComponents) : ""));
+  for (const auto& s : r.sites)
+    if (s.method == "override" || s.method == "metal" ||
+        (s.state != "ASP" && s.state != "GLU" && s.state != "COO-" && s.state != "NH3+" && s.state != "CYS" && s.state != "TYR" &&
+         s.state != "LYS" && s.state != "ARG" && s.state != "HID/HIE" && s.method.starts_with("PROPKA")))
+      od::logInfo(std::format("  {:<24} {:<20} {}{}", s.atom, s.state, s.method, std::isnan(s.pka) ? "" : std::format(" pKa {:.2f}", s.pka)));
+  if (!r.addedOxt.empty()) {
+    std::string v;
+    for (const auto& x : r.addedOxt) v += (v.empty() ? "" : " ") + x;
+    od::logInfo(std::format("  OXT added (C terminus without a link): {}", v));
+  }
+  if (!r.incomplete.empty()) {
+    std::string v;
+    for (const auto& x : r.incomplete) v += (v.empty() ? "" : " ") + x;
+    od::logWarn(std::format("{}: residue(s) with missing heavy atoms; their open valences are filled with hydrogens: {}", file, v));
+  }
+}
+
+// [[protonation]] section of the default molecule configuration (spec 3.4, 5).
+std::string protonationText(const od::Options& opt, const std::vector<std::pair<std::string, od::ProtonationReport>>& reports,
+                            const std::vector<od::ProtonationOverride>& overrides) {
+  if (reports.empty()) return "";
+  std::string o = "\n# ---------- protonation (stam.protonation / mobm.protonation = \"pH\", spec 3.4) ----------\n";
+  o += std::format("# protonation.pH = {}. Predicted states: atom, state, method (pKa).\n", opt.protonationPH);
+  o += "# Change a state with an entry (the default configuration may then need to be written again):\n";
+  o += "#   [[protonation]]  file = \"<input file>\", site = \"<chain>:<seq><iCode>\", state = \"<state>\"\n";
+  o += "#     ASP/ASH, GLU/GLH, HID/HIE/HIP, CYS/CYM, TYR/TYM, LYS/LYN, ARG/ARN\n";
+  o += "#   [[protonation]]  file = \"<input file>\", site = \"<atom>\", charge = <formal charge>\n";
+  o += "#     <atom>: <chain>:<seq><iCode>:<name> or #<atom serial in the input record>; hydrogens follow\n";
+  o += "#     from the valence (e.g. termini: N charge 0 or 1, OXT charge -1 or 0)\n";
+  for (const auto& [file, r] : reports) {
+    o += std::format("# {}\n", file);
+    for (const auto& s : r.sites)
+      o += std::format("#   {:<24} {:<20} {}{}\n", s.atom, s.state, s.method, std::isnan(s.pka) ? "" : std::format(" ({:.2f})", s.pka));
+  }
+  for (const auto& v : overrides) {
+    o += std::format("\n[[protonation]]\nfile = \"{}\"\nsite = \"{}\"\n", v.file, v.site);
+    if (v.charge) o += std::format("charge = {}\n", *v.charge);
+    else o += std::format("state = \"{}\"\n", v.state);
+  }
+  return o;
+}
+
 void printMolecule(const od::Molecule& m) {
   int netCharge = 0;
   double sumPartial = 0.0;
@@ -2367,18 +2426,50 @@ int run(int argc, char** argv) {
   od::CcdLibrary ccd;
   for (const auto& f : opt.ccd) ccd.addFile(f);
 
-  auto sta = od::loadMolecules(opt.stamFile, od::Role::StaM, ccd);
+  // Protonation (spec 3.4).
+  const std::vector<od::ProtonationOverride> overrides =
+      opt.molConfig.empty() ? std::vector<od::ProtonationOverride>{} : od::readProtonationOverrides(opt.molConfig);
+  for (const auto& v : overrides) {
+    const bool stam = v.file == opt.stamFile;
+    const bool mobm = std::find(opt.mobmFiles.begin(), opt.mobmFiles.end(), v.file) != opt.mobmFiles.end();
+    if (!stam && !mobm) od::fail("{}: [[protonation]] file \"{}\" is neither --stamFile nor a --mobmFiles file", v.origin, v.file);
+    if ((stam && opt.stamProtonation != "pH") || (!stam && opt.mobmProtonation != "pH"))
+      od::fail("{}: [[protonation]] entries need {}.protonation = \"pH\"", v.origin, stam ? "stam" : "mobm");
+  }
+  auto protOf = [&](const std::string& file, bool stam) -> std::optional<od::ProtonationOptions> {
+    if ((stam ? opt.stamProtonation : opt.mobmProtonation) != "pH") return std::nullopt;
+    od::ProtonationOptions p;
+    p.pH = opt.protonationPH;
+    for (const auto& v : overrides)
+      if (v.file == file) p.overrides.push_back(v);
+    return p;
+  };
+  std::vector<std::pair<std::string, od::ProtonationReport>> protReports;
+  auto load = [&](const std::string& file, od::Role role, bool poseRecords, od::PoseRecords* pr) {
+    const auto p = protOf(file, role == od::Role::StaM);
+    od::ProtonationReport rep;
+    std::vector<od::Molecule> v;
+    if (poseRecords) *pr = od::loadPoseRecords(file, role, ccd, p ? &*p : nullptr, &rep);
+    else v = od::loadMolecules(file, role, ccd, p ? &*p : nullptr, &rep);
+    if (p) {
+      logProtonation(file, rep, p->pH);
+      protReports.push_back({file, std::move(rep)});
+    }
+    return v;
+  };
+  auto sta = load(opt.stamFile, od::Role::StaM, false, nullptr);
   std::vector<od::Molecule> mobs;
   std::vector<std::vector<std::vector<od::Vec3>>> poses;  // score / localMin: coordinates of every record (spec 6.1)
   for (const auto& f : opt.mobmFiles) {
     if (opt.runMode != "dock") {
-      od::PoseRecords p = od::loadPoseRecords(f, od::Role::MobM, ccd);
+      od::PoseRecords p;
+      load(f, od::Role::MobM, true, &p);
       od::logInfo(std::format("{}: {} pose record(s)", f, p.xyz.size()));
       mobs.push_back(std::move(p.mol));
       poses.push_back(std::move(p.xyz));
       continue;
     }
-    auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
+    auto mob = load(f, od::Role::MobM, false, nullptr);
     if (mob.size() != 1) od::fail("{}: --mobmFiles file must contain exactly one molecule, found {}", f, mob.size());
     mobs.push_back(std::move(mob.front()));
   }
@@ -2429,8 +2520,9 @@ int run(int argc, char** argv) {
   std::vector<od::MolInput> inputs;
   for (std::size_t i = 0; i < sta.size(); ++i) inputs.push_back({&sta[i], &staTopo[i]});
   for (std::size_t i = 0; i < mobs.size(); ++i) inputs.push_back({&mobs[i], &mobTopo[i]});
+  const std::string protText = protonationText(opt, protReports, overrides);
   if (opt.molConfig.empty()) {
-    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs);
+    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs, protText);
     od::logInfo(std::format("Default molecule configuration written to {}\n"
                             "Review it (a copy may be edited) and run again with --molConfig <file>.",
                             path));
@@ -2439,7 +2531,7 @@ int run(int argc, char** argv) {
   std::vector<std::string> errors;
   auto cfg = od::readMolConfig(opt.molConfig, inputs, topologyParams(opt), errors);
   if (!cfg) {
-    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs);
+    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs, protText);
     std::string list;
     for (const auto& e : errors) list += "\n  " + e;
     od::fail("{}: {} problem(s) found:{}\nDefault molecule configuration written to {}", opt.molConfig, errors.size(),
