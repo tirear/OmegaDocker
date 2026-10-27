@@ -79,11 +79,11 @@ void nameAndPerceive(std::vector<Molecule>& mols, const std::string& path, Role 
   std::map<std::string, int> keyCount;
   for (const Molecule& m : mols)
     if (m.hasResidueInfo) ++keyCount[chainKey(m)];
-  std::set<std::string> used;
+  std::vector<std::string> tails(mols.size());
   for (std::size_t k = 0; k < mols.size(); ++k) {
-    Molecule& m = mols[k];
-    m.role = role;
-    std::string tail = m.hasResidueInfo ? chainKey(m) : std::string();
+    const Molecule& m = mols[k];
+    std::string& tail = tails[k];
+    tail = m.hasResidueInfo ? chainKey(m) : std::string();
     if (!tail.empty()) {
       if (keyCount[tail] > 1) {
         const ResidueInfo& r = m.residues.front().info;
@@ -92,7 +92,25 @@ void nameAndPerceive(std::vector<Molecule>& mols, const std::string& path, Role 
     } else {
       tail = std::to_string(k + 1);
     }
-    m.id = std::format("{}:{}:{}", roleTag(role), fileName, tail);
+  }
+  // Fragments of one residue (e.g. missing atoms): the name of the first atom, then the order in the file.
+  std::map<std::string, int> tailCount;
+  for (const auto& t : tails) ++tailCount[t];
+  for (std::size_t k = 0; k < mols.size(); ++k) {
+    if (tailCount[tails[k]] < 2) continue;
+    const Molecule& m = mols[k];
+    const int a = m.residues.empty() || m.residues.front().atoms.empty() ? 0 : m.residues.front().atoms.front();
+    tails[k] += ":" + m.atoms[a].name;
+  }
+  std::map<std::string, int> nameCount, ordinal;
+  for (const auto& t : tails) ++nameCount[t];
+  for (std::size_t k = 0; k < mols.size(); ++k)
+    if (nameCount[tails[k]] > 1) tails[k] += std::format("#{}", ++ordinal[tails[k]]);
+  std::set<std::string> used;
+  for (std::size_t k = 0; k < mols.size(); ++k) {
+    Molecule& m = mols[k];
+    m.role = role;
+    m.id = std::format("{}:{}:{}", roleTag(role), fileName, tails[k]);
     if (!used.insert(m.id).second) fail("{}: molecule id {} is not unique", path, m.id);
     perceiveChemistry(m);
   }

@@ -135,6 +135,26 @@ TEST_CASE("ccd: embedded subset") {
   CHECK(ccd().find("PCA") == nullptr);
 }
 
+TEST_CASE("mmCIF: molecule ids of fragments of one residue (1L2Y without A:1 CA)") {
+  const std::string path =
+      (std::filesystem::temp_directory_path() / std::format("od_test_frag_{}.cif", ::getpid())).string();
+  {
+    std::ifstream in(kData + "/1L2Y.cif");
+    std::ofstream out(path);
+    std::string line;
+    while (std::getline(in, line))
+      if (line.rfind("ATOM", 0) != 0 || line.find(" C CA   . ASN A 1 1 ") == std::string::npos) out << line << "\n";
+  }
+  const od::ProtonationOptions prot;  // fills the open valences of the residue with missing atoms
+  const auto mols = od::loadMolecules(path, od::Role::StaM, ccd(), &prot);
+  std::filesystem::remove(path);
+  std::vector<std::string> ids;
+  for (const auto& m : mols) ids.push_back(m.id);
+  std::sort(ids.begin(), ids.end());
+  const std::string f = std::format("stam:od_test_frag_{}.cif:A:ASN1:", ::getpid());
+  CHECK(ids == std::vector<std::string>{f + "C", f + "CB", f + "N"});  // backbone C onwards, side chain, N
+}
+
 TEST_CASE("mmCIF: Trp-cage 1L2Y") {
   auto mols = od::loadMolecules(kData + "/1L2Y.cif", od::Role::StaM, ccd());
   REQUIRE(mols.size() == 1);
@@ -1318,6 +1338,91 @@ TEST_CASE("energy: metal restraints (1ZNF)") {
   const auto a = perturbed(sys.inputAngles(), 10, 7);
   CHECK(sys.evaluate(a).closure > 0);
   CHECK(gradientMismatches(sys, a) == 0);
+}
+
+TEST_CASE("energy: no clash checks for metal atoms (1ZNF)") {
+  using od::Ad4Type;
+  for (Ad4Type t : {Ad4Type::Mg, Ad4Type::Ca, Ad4Type::Mn, Ad4Type::Fe, Ad4Type::Zn}) {
+    CHECK(od::ad4IsMetal(t));
+    CHECK_FALSE(od::ad4Clashes(t));
+  }
+  for (Ad4Type t : {Ad4Type::H, Ad4Type::HD, Ad4Type::HS, Ad4Type::Merged}) CHECK_FALSE(od::ad4Clashes(t));
+  for (Ad4Type t : {Ad4Type::C, Ad4Type::A, Ad4Type::OA, Ad4Type::NA, Ad4Type::SA, Ad4Type::Cl}) CHECK(od::ad4Clashes(t));
+
+  ConfigFixture f;
+  f.mols.push_back(zincFinger());
+  f.topos.push_back(od::analyzeTopology(f.mols.back(), {}));
+  od::assignDssp({&f.mols.back()}, {&f.topos.back()});
+  f.inputs.clear();
+  for (std::size_t i = 0; i < f.mols.size(); ++i) f.inputs.push_back({&f.mols[i], &f.topos[i]});
+  std::ofstream(f.path) << od::defaultMolConfigText(f.inputs);
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  od::Molecule m = f.mols.back();
+  const auto& tree = cfg->molecules.back().tree;
+  int zn = -1;
+  for (std::size_t a = 0; a < m.atoms.size(); ++a)
+    if (m.atoms[a].atomicNum == 30) zn = static_cast<int>(a);
+  REQUIRE(zn >= 0);
+  {
+    const od::EnergySystem sys({{&m, &tree}}, {});
+    const int zi = sys.coordOffset(0) + zn;
+    int withZn = 0, clashing = 0;
+    for (const auto& p : sys.pairs()) {
+      if (p.i == zi || p.j == zi) {
+        ++withZn;
+        CHECK_FALSE(p.clash);
+      }
+      clashing += p.clash;
+    }
+    CHECK(withZn > 0);
+    CHECK(clashing > 0);
+
+    // Distance grid: Zn is not one of its atoms.
+    std::vector<od::Vec3> x;
+    sys.evaluate(sys.inputAngles(), nullptr, &x);
+    const od::GridAtoms ga = od::gridAtoms(sys, {{&m, &tree}}, x);
+    double nearest = 1e9;
+    for (std::size_t a = 0; a < ga.size(); ++a) {
+      if (ga.type[a] == Ad4Type::Zn) CHECK_FALSE(ga.clash[a]);
+      else if (ga.clash[a]) nearest = std::min(nearest, distance(ga.xyz[a], m.atoms[zn].xyz));
+    }
+    const auto geom = od::boxGrid(m.atoms[zn].xyz, {4, 4, 4}, 0.5);
+    const auto dist = od::buildDistanceGrid(geom, ga, 6.0);
+    CHECK(dist.d[geom.index(4, 4, 4)] == doctest::Approx(nearest).epsilon(1e-6));
+    CHECK(nearest > 1.8);
+
+    // 9d pair sum: a MobM Zn or O 1.0 Å from a StaM heavy atom.
+    std::vector<od::Vec3f> xf;
+    for (const auto& v : x) xf.push_back({static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2])});
+    const od::ShakeAtoms stam = od::shakeAtoms(sys, {{&m, &tree}}, xf);
+    std::size_t c = 0;
+    while (!stam.heavy[c] || !od::ad4Clashes(stam.type[c])) ++c;
+    od::ShakeAtoms one;
+    one.xyz = {{stam.xyz[c][0] + 1.0f, stam.xyz[c][1], stam.xyz[c][2]}};
+    one.type = {Ad4Type::Zn};
+    one.charge = {0};
+    one.heavy = {1};
+    one.near = {{}};
+    const od::EnergyParams ep;
+    CHECK(od::exactInter(stam, one, ep).clash == 0);
+    one.type = {Ad4Type::OA};
+    CHECK(od::exactInter(stam, one, ep).clash > 0);
+  }
+
+  // Startup check: a fixed heavy atom 1.0 Å from Zn is not an error.
+  std::vector<char> moved(m.atoms.size(), 0);
+  for (const auto& t : tree.torsions)
+    for (int c : t.moving)
+      if (c < static_cast<int>(moved.size())) moved[c] = 1;
+  REQUIRE_FALSE(moved[zn]);
+  int far = -1;
+  for (std::size_t a = 0; a < m.atoms.size(); ++a)
+    if (!moved[a] && m.atoms[a].atomicNum > 1 && distance(m.atoms[a].xyz, m.atoms[zn].xyz) > 8) far = static_cast<int>(a);
+  REQUIRE(far >= 0);
+  m.atoms[zn].xyz = {m.atoms[far].xyz[0] + 1.0, m.atoms[far].xyz[1], m.atoms[far].xyz[2]};
+  CHECK_NOTHROW(od::EnergySystem({{&m, &tree}}, {}));
 }
 
 TEST_CASE("energy: clash between fixed atoms in the input (2KJJ)") {
@@ -2863,7 +2968,7 @@ TEST_CASE("grid: energy and distance grids (2KJJ, 1L2Y)") {
     one.xyz = {geom.point(i, j, l)};
     one.type = {x.mobm.type[a]};
     one.charge = {x.mobm.charge[a]};
-    one.heavy = {x.mobm.heavy[a]};
+    one.clash = {x.mobm.clash[a]};
     const double eg = od::gridEnergy(grids, one).energy;
     const double ep = od::pairInterEnergy(x.stam, one, {});
     CHECK(eg == doctest::Approx(ep).epsilon(1e-5).scale(1e-3));
@@ -2877,7 +2982,7 @@ TEST_CASE("grid: energy and distance grids (2KJJ, 1L2Y)") {
     const auto p = geom.point(i, j, l);
     double best = 6.0;
     for (std::size_t a = 0; a < x.stam.size(); ++a)
-      if (x.stam.heavy[a]) {
+      if (x.stam.clash[a]) {
         const double dx = p[0] - x.stam.xyz[a][0], dy = p[1] - x.stam.xyz[a][1], dz = p[2] - x.stam.xyz[a][2];
         best = std::min(best, std::sqrt(dx * dx + dy * dy + dz * dz));
       }
@@ -2897,7 +3002,7 @@ TEST_CASE("grid: energy and distance grids (2KJJ, 1L2Y)") {
     m.xyz.push_back(p);
     m.type.push_back(x.mobm.type[a]);
     m.charge.push_back(x.mobm.charge[a]);
-    m.heavy.push_back(x.mobm.heavy[a]);
+    m.clash.push_back(x.mobm.clash[a]);
   }
   std::vector<od::Vec3> g;
   const auto em = od::gridEnergy(grids, m, &g);
@@ -2908,7 +3013,7 @@ TEST_CASE("grid: energy and distance grids (2KJJ, 1L2Y)") {
     one.xyz = {m.xyz[a]};
     one.type = {m.type[a]};
     one.charge = {m.charge[a]};
-    one.heavy = {m.heavy[a]};
+    one.clash = {m.clash[a]};
     CHECK(od::gridEnergy(grids, one).energy == doctest::Approx(od::pairInterEnergy(x.stam, one, {})).epsilon(0.15).scale(1.0));
     const double h = 1e-5;
     for (int k = 0; k < 3; ++k) {
@@ -3218,7 +3323,7 @@ TEST_CASE("grid: flexres and delta fields (2KJJ, 1L2Y)") {
     one.xyz = {p};
     one.type = {g->types[m]};
     one.charge = {q};
-    one.heavy = {1};
+    one.clash = {1};
     return one;
   };
   std::mt19937 rng(11);
@@ -4290,7 +4395,7 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
   od::Vec3 hc{};
   int nh = 0;
   for (std::size_t a = 0; a < f.x.mobm.size(); ++a)
-    if (f.x.mobm.heavy[a]) {
+    if (f.x.mobm.clash[a]) {
       for (int k = 0; k < 3; ++k) hc[k] += f.x.mobm.xyz[a][k];
       ++nh;
     }
@@ -4379,12 +4484,12 @@ TEST_CASE("dock9b: poses, quick filter and gradient (2KJJ, 1L2Y)") {
     int overlap = 0;
     double dmin = 1e9;
     for (std::size_t a = 0; a < f.x.mobm.size(); ++a) {
-      if (!f.x.mobm.heavy[a]) continue;
+      if (!f.x.mobm.clash[a]) continue;
       const auto r = od::rotate(pose.q, rel[a]);
       const od::Vec3 w{r[0] + pose.t[0], r[1] + pose.t[1], r[2] + pose.t[2]};
       double da = 1e9;
       for (std::size_t b = 0; b < f.x.stam.size(); ++b)
-        if (f.x.stam.heavy[b]) {
+        if (f.x.stam.clash[b]) {
           const double dx = w[0] - f.x.stam.xyz[b][0], dy = w[1] - f.x.stam.xyz[b][1], dz = w[2] - f.x.stam.xyz[b][2];
           da = std::min(da, std::sqrt(dx * dx + dy * dy + dz * dz));
         }
@@ -4518,7 +4623,7 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   dk.dockPair(angles, 9, out);
   REQUIRE(out.size() >= 10);
   const od::MobmHeavyAtoms heavy(*f.x.mobSys);
-  CHECK(heavy.size() == static_cast<std::size_t>(std::count_if(f.x.mobm.heavy.begin(), f.x.mobm.heavy.end(), [](char h) { return h != 0; })));
+  CHECK(heavy.size() == static_cast<std::size_t>(std::count_if(f.x.mobm.clash.begin(), f.x.mobm.clash.end(), [](char h) { return h != 0; })));
   // World coordinates: inside the docking box, and the energy of the sample re-evaluates from the same pose.
   for (const auto& p : heavy.world(out[0]))
     for (int d = 0; d < 3; ++d) CHECK(std::abs(p[d] - f.p.boxCenter[d]) <= 0.5 * f.p.boxSize[d] + 1e-3);
@@ -4808,10 +4913,10 @@ TEST_CASE("score9d: pair recalculation and atom shaking entropy (2KJJ, 1L2Y)") {
     // Clash: nearest StaM heavy atom of every MobM heavy atom.
     double clash = 0;
     for (std::size_t i = 0; i < md.size(); ++i) {
-      if (!md.heavy[i]) continue;
+      if (!md.clash[i]) continue;
       double nearest = 1e30;
       for (std::size_t j = 0; j < x.stam.size(); ++j)
-        if (x.stam.heavy[j]) nearest = std::min(nearest, std::hypot(md.xyz[i][0] - x.stam.xyz[j][0], md.xyz[i][1] - x.stam.xyz[j][1], md.xyz[i][2] - x.stam.xyz[j][2]));
+        if (x.stam.clash[j]) nearest = std::min(nearest, std::hypot(md.xyz[i][0] - x.stam.xyz[j][0], md.xyz[i][1] - x.stam.xyz[j][1], md.xyz[i][2] - x.stam.xyz[j][2]));
       if (nearest < ep.clashDistance) clash += ep.clashBase + ep.clashK * (ep.clashDistance - nearest) * (ep.clashDistance - nearest);
     }
     CHECK(it.clash == doctest::Approx(clash).epsilon(1e-3));
@@ -6353,6 +6458,56 @@ TEST_CASE("score: pose records, reference atom map, Kabsch superposition") {
   std::filesystem::remove(bad);
 }
 
+
+TEST_CASE("score: reference without the C-terminal OXT (1L2Y)") {
+  const od::Molecule mol = od::loadMolecules(kData + "/1L2Y.cif", od::Role::MobM, ccd()).front();
+  std::vector<int> heavy;
+  int oxt = -1;
+  for (std::size_t a = 0; a < mol.atoms.size(); ++a) {
+    if (mol.atoms[a].atomicNum == 1) continue;
+    if (mol.atoms[a].name == "OXT") oxt = static_cast<int>(heavy.size());
+    heavy.push_back(static_cast<int>(a));
+  }
+  REQUIRE(oxt >= 0);
+  // ref: mol without atom x.
+  auto without = [](const od::Molecule& m, int x) {
+    od::Molecule r = m;
+    r.atoms.erase(r.atoms.begin() + x);
+    r.bonds.clear();
+    for (od::Bond b : m.bonds) {
+      if (b.a == x || b.b == x) continue;
+      b.a -= b.a > x;
+      b.b -= b.b > x;
+      r.bonds.push_back(b);
+    }
+    for (auto& res : r.residues) {
+      std::erase(res.atoms, x);
+      for (int& a : res.atoms) a -= a > x;
+    }
+    r.id = "ref";
+    return r;
+  };
+  const od::Molecule ref = without(mol, heavy[oxt]);
+  const auto map = od::referenceAtomMap(mol, heavy, ref);
+  REQUIRE(map.size() == heavy.size());
+  for (std::size_t k = 0; k < heavy.size(); ++k) {
+    if (static_cast<int>(k) == oxt) {
+      CHECK(map[k] == -1);
+      continue;
+    }
+    REQUIRE(map[k] >= 0);
+    CHECK(ref.atoms[map[k]].name == mol.atoms[heavy[k]].name);
+    CHECK(ref.atoms[map[k]].xyz == mol.atoms[heavy[k]].xyz);
+  }
+  // With the OXT: every atom maps.
+  for (int v : od::referenceAtomMap(mol, heavy, mol)) CHECK(v >= 0);
+  // Another heavy atom missing as well: an error.
+  int ca = -1;
+  for (std::size_t a = 0; a < ref.atoms.size(); ++a)
+    if (ref.atoms[a].name == "CA") ca = static_cast<int>(a);
+  REQUIRE(ca >= 0);
+  CHECK_THROWS_AS(od::referenceAtomMap(mol, heavy, without(ref, ca)), od::Error);
+}
 
 TEST_CASE("protonation: PROPKA 3 port, pKa rules") {
   // PROPKA 3 (Python, commit 58ceb7b) pKa values of 1L2Y.

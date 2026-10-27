@@ -61,7 +61,7 @@ enum : int { kPass = 0, kOutside = 1, kOverlap = 2, kFar = 3 };
 struct FilterArgs {
   FieldView field;
   const float* y;
-  const int* heavy;
+  const int* clash;
   int probes;
   float c[3], lo[3], hi[3], cd, nearD;
   int maxOverlap;
@@ -100,7 +100,7 @@ __device__ int classify(const FilterArgs& a, const float t[3], const float q[4])
     if constexpr (!InBox)
       for (int d = 0; d < 3; ++d)
         if (w[d] < a.lo[d] || w[d] > a.hi[d]) return kOutside;
-    if (!a.heavy[k]) continue;
+    if (!a.clash[k]) continue;
     const float dd = field::distance<float>(a.field, w, nullptr);
     if (dd < a.cd && ++overlap >= a.maxOverlap && InBox) return kOverlap;
     if (dd <= a.nearD) near = true;
@@ -456,7 +456,7 @@ struct GpuDockPrep::Impl {
   cudaStream_t stream = nullptr;
   // filter
   DevBuf<float> y, quats;
-  DevBuf<int> heavy, range;
+  DevBuf<int> clash, range;
   DevBuf<long long> offset, pass;
   DevBuf<FilterPose> poses;
   DevBuf<unsigned long long> counters;  // passCount, outside, overlap, far
@@ -619,13 +619,13 @@ struct GpuDockPrep::Impl {
 
   FilterArgs args(const GpuField& field, const FilterSetup& s) {
     y.upload(s.y, stream);
-    heavy.upload(s.heavy, stream);
+    clash.upload(s.clash, stream);
     counters.reserve(4);
     FilterArgs a{};
     a.field = field.deviceView();
     a.y = y.p;
-    a.heavy = heavy.p;
-    a.probes = static_cast<int>(s.heavy.size());
+    a.clash = clash.p;
+    a.probes = static_cast<int>(s.clash.size());
     for (int d = 0; d < 3; ++d) {
       a.c[d] = s.center[d];
       a.lo[d] = s.boxLo[d];

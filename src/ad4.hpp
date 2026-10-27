@@ -42,6 +42,9 @@ const Ad4TypeParams& ad4Params(Ad4Type t);
 const char* ad4TypeName(Ad4Type t);
 bool ad4IsHbDonor(Ad4Type t);     // HD, HS
 bool ad4IsHbAcceptor(Ad4Type t);  // NA, NS, OA, OS, SA
+bool ad4IsMetal(Ad4Type t);       // Mg, Ca, Mn, Fe, Zn
+// Heavy atom other than a metal: the atoms of clash checks (spec 7.9).
+bool ad4Clashes(Ad4Type t);
 
 struct Ad4Typing {
   std::vector<Ad4Type> type;    // per atom

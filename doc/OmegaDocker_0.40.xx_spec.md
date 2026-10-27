@@ -2,8 +2,8 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.110 |
-| 日期 | 2026-10-27 |
+| 文件版本 | 1.111 |
+| 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
 | 狀態 | 定案（1.0）；實作中需修正時遞增版本，修訂紀錄見第 19 節 |
@@ -426,7 +426,7 @@ flowchart TD
 - `metalBond` 只在金屬配位鍵位於環內的分子寫出（4.7），預設檔的值為 `"keep"`，並以註解列出選項 B 的 `auto-metal` 斷鍵。檔案開頭的註解說明兩個選項與改選方式。
 
 分子 `id`：
-- 有殘基與鏈資訊：`<stam|mobm>:<檔名>:<鏈名稱，多條以 + 連接>`；同一檔案中有重複時，再加上 `:<第一個殘基名稱><序號><插入碼>`（例如水分子 `stam:r.cif:A:HOH501`）。
+- 有殘基與鏈資訊：`<stam|mobm>:<檔名>:<鏈名稱，多條以 + 連接>`；同一檔案中有重複時，再加上 `:<第一個殘基名稱><序號><插入碼>`（例如水分子 `stam:r.cif:A:HOH501`）。仍重複時（同一殘基因缺原子而分成數個分子，例如 1M2Z 的 BOG），再加上 `:<該分子第一個原子的名稱>`（例如 `stam:r.cif:A:BOG501:C1`、`stam:r.cif:A:BOG501:C1'`）；若還是重複，依檔案中的順序加上 `#<n>`（1 起算）。
 - 沒有殘基或鏈資訊：`<stam|mobm>:<檔名>:<k>`，`k` 為該分子在檔案中的順序（1 起算）。
 
 ```toml
@@ -789,6 +789,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 斷鍵約束能量（4.5）。
 - **碰撞懲罰**：對每個重原子對（排除 1-2、1-3、1-4），距離 d < `clashDistance`（預設 1.8 Å）時加上
   `E_clash = E_clashBase + K_clash·(clashDistance − d)²`
+- 金屬原子（AD4 類型 Mg、Ca、Mn、Fe、Zn）與任何原子之間不做碰撞判定（1.111）：金屬配位距離（約 1.8–2.3 Å）可能小於 `clashDistance`。本規格書所有碰撞判定都適用（9a 原子對、輸入結構檢查、grow、loop 閉合的碰撞檢查與 `rcdClash`、9b 距離網格與 8.5 重疊、9d 重算）。
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
@@ -1109,7 +1110,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 
 ### 8.2 距離網格
 
-- 每個格點存「到最近 StaM 重原子的距離」（distance transform），上限為 `max(maxNearDistance, clashDistance)` 再加 2 個 `gridSpacing`；超過者存上限值。
+- 每個格點存「到最近 StaM 重原子的距離」（distance transform；不含金屬原子，7.9），上限為 `max(maxNearDistance, clashDistance)` 再加 2 個 `gridSpacing`；超過者存上限值。
 - 查詢以三線性內插取值。
 - 與能量網格使用相同的 `grid.mode`（`flexres` 時：固定原子用網格，可動原子逐對計算；`delta` 時與能量網格一起分區塊儲存）。
 - 用途：8.5 的快速篩選。
@@ -1334,7 +1335,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 太遠 | 所有原子 d > `maxNearDistance` | `maxNearDistance` = 6 Å |
 | 超出範圍 | 任一 MobM 原子在對接範圍外 | — |
 
-- d 由距離網格三線性內插取得；「重疊」「太遠」只看重原子，「超出範圍」看所有探針原子（8.1）。
+- d 由距離網格三線性內插取得；「重疊」「太遠」只看重原子（不含金屬原子，7.9；距離網格也不含 StaM 的金屬原子，因此「太遠」也不以金屬原子判定），「超出範圍」看所有探針原子（8.1）。
 - 檢查順序：超出範圍 → 重疊 → 太遠；每個 pos 只計入第一個成立的條件。
 - posm1、posm2 產生的 pos 已在範圍內（8.4），「超出範圍」只作為保險；posm1 放不下的定向也計入此項。
 - posm3／posm4 的 posm3 部分：產生 pos 時已確認所有探針原子在範圍內（留 `kPosMargin`，比本表的「超出範圍」嚴格），因此重疊原子數達到 `maxOverlapAtomNum` 時即可判定為「重疊」，不必檢查其餘原子；結果與計數不變（1.81 起，15.1.21）。
@@ -1502,7 +1503,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 座標：與 9b 相同的單精度 pose 與兩面角（R(float q)(y − float center) + float t），不再最佳化。
 - StaM–MobM 分子間能量改用逐原子對計算（單精度逐對項，雙精度加總；截斷距離與函式同 8.1），取代網格內插。
   - 實測（2KJJ 對 BTN，約 1,850 個樣本）：預設網格間距 0.375 Å 時，網格值與逐對雙精度值的最大差 0.55 kcal/mol、平均 0.17；網格值一律偏高（最佳化後的 pose 位於能量井底，三線性內插墊高井底）；網格用 float 或 double 結果相同；逐對 float 與 double 最大差 0.0006（1L2Y：0.0055）。前 200 名中 11 個與逐對計算的排序不同。
-- 碰撞懲罰：每個 MobM 重原子與最近的 StaM 重原子距離 < `clashDistance` 時計入（同 9b 距離網格的定義）。
+- 碰撞懲罰：每個 MobM 重原子與最近的 StaM 重原子距離 < `clashDistance` 時計入（同 9b 距離網格的定義；兩邊都不含金屬原子，7.9）。
 - MobM 分子內能量與碰撞懲罰：以單精度重算（同 9b）。
 - StaM 分子內能量與碰撞懲罰：該 StaM 構型樣本單獨以單精度計算。
 - 9b 排序能量（重算）E_9b = 分子間 + 分子間碰撞懲罰 + MobM 分子內 + MobM 碰撞懲罰 + StaM 項（第 9 節，相對於所有 StaM 構型樣本 9a 能量的最低值）。
@@ -1584,7 +1585,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - `summary.tsv`：每個輸出樣本一列，依 pose 編號排序。`output.allSummary = true` 時改為列出整個 topSampleSet（依 9b 排序；沒有輸出結構檔的樣本 `pose`、`mobm_files`、`stam_files` 為 `-`）。欄位：
   - `pose`、`mobm_files`、`stam_files`（以逗號分隔的檔名）、`stam_sample`、`mobm_sample`。
   - `score`／`localMin`（6.1）：`fit_rmsd`、`grid_status`。
-  - 有 `--refFiles` 時：`rmsd_ref`，與參考結構的重原子對稱校正 RMSD（不疊合；與 9d 篩選相同的 `SymmetryRmsd`，C1／C2 依 `dock9d.symMaxPerm`）。參考結構與 MobM 的原子對應：原子順序相同且鍵結相同時直接對應，否則以元素標記的重原子鍵結圖（不含金屬配位鍵）找一個同構；找不到 → 報錯並結束。`rank_*.tsv` 也加上 `rmsd_ref`。
+  - 有 `--refFiles` 時：`rmsd_ref`，與參考結構的重原子對稱校正 RMSD（不疊合；與 9d 篩選相同的 `SymmetryRmsd`，C1／C2 依 `dock9d.symMaxPerm`）。參考結構與 MobM 的原子對應：原子順序相同且鍵結相同時直接對應，否則以元素標記的重原子鍵結圖（不含金屬配位鍵）找一個同構；找不到 → 報錯並結束。MobM 殘基中名為 OXT 的原子（C 端；OmegaDocker 會補上缺少的 OXT，3.4）在參考結構中沒有對應時不計入 `rmsd_ref`（原子數差只能由這些 OXT 補足，否則報錯；執行紀錄列出排除的原子數）。`rank_*.tsv` 也加上 `rmsd_ref`。
   - `rank_<方法>`：在整個 topSampleSet 中的名次（`rank_9b`、`rank_adgpu_16`、`rank_od_0100`）。
   - `E_9b`（重算）、`E_9b_grid`（9c 排序能量，網格）、`inter`、`inter_clash`、`mobm_intra`、`mobm_clash`、`stam_term`、`stam_intra`、`stam_clash`、`clash`（任一碰撞懲罰 > 0 時為 `yes`）。
   - `dG_adgpu_16`（啟用時）。
@@ -3267,3 +3268,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.108 | 2026-10-27 | 3.4.1 中性 His 的互變異構體依 AD4 能量選擇（`l2`、`final` 單獨：該組 9a 能量；`final` 複合物：加分子間能量，兩組輪流）；選擇用的能量系統不給變體編號；實測；17.1 決定 |
 | 1.109 | 2026-10-27 | 17.1 評分函數校準的決定：指標 a／b／c、聯合目標函數、`c0` 固定為 0 並保留、取樣失敗與評分失敗的區分、b 的資料來源與四步驗證、切分規則、不使用 PDBbind |
 | 1.110 | 2026-10-28 | 修正 6.1 `score`／`localMin`：9d 以紀錄編號當作 MobM 樣本編號讀取樣本（質子化變體與質子化自由能），`E_9b`、`G_complex`、`dG_od_0100` 可能含無效值；改用輸入構型的樣本，`mobm_sample` 仍為紀錄編號（規格不變） |
+| 1.111 | 2026-10-28 | 金屬原子與任何原子之間不做碰撞判定（7.9、8.2、8.5、10.1）；同一殘基分成數個分子時的分子 id（5.2）；`rmsd_ref` 排除參考結構沒有的 C 端 OXT（10.3） |

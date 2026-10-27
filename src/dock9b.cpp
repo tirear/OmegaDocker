@@ -425,6 +425,7 @@ MobmDocker::MobmDocker(const EnergySystem& sys, const StamField& field, const Do
     map_.push_back(m);
     charge_.push_back(t.charge[a]);
     heavy_.push_back(t.type[a] != Ad4Type::H && t.type[a] != Ad4Type::HD && t.type[a] != Ad4Type::HS);
+    clash_.push_back(ad4Clashes(t.type[a]));
   }
   for (int c = 0; c < 3; ++c) posN_[c] = static_cast<int>(std::floor(p.boxSize[c] / p.posStep + 1e-9)) + 1;
   if (p.posm != Posm::Posm1) hopf_ = hopfGrid(p.hopfLevel);
@@ -886,7 +887,7 @@ bool MobmDocker::quickFilterT(const Conf& c, const Pose& pose, Dock9bStats& stat
           ++stats.outsideBox;
           return false;
         }
-    if (!heavy_[k]) continue;
+    if (!clash_[k]) continue;
     const float dd = field_.distance<float>(w, nullptr);
     if (dd < cd && ++overlap >= p_.maxOverlapAtomNum && InBox) {
       ++stats.overlap;
@@ -938,7 +939,7 @@ MobmDocker::PoseEnergy MobmDocker::evaluateT(const Conf& c, const Pose& pose, st
       const T q = static_cast<T>(charge_[k]);
       V gw{}, dg{};
       pe.inter += field_.energy<T>(map_[k], q, w, g ? &gw : nullptr);
-      if (heavy_[k]) {
+      if (clash_[k]) {
         const T d = field_.distance<T>(w, g ? &dg : nullptr);
         if (d < cd) {
           pe.interClash += clashBase + clashK * (cd - d) * (cd - d);
@@ -981,7 +982,7 @@ MobmDocker::PoseEnergy MobmDocker::evaluateDouble(const Conf& c, const Pose& pos
 
 std::vector<DockProbe> MobmDocker::probes() const {
   std::vector<DockProbe> v(probe_.size());
-  for (std::size_t k = 0; k < probe_.size(); ++k) v[k] = {probe_[k], map_[k], charge_[k], heavy_[k] ? 1 : 0};
+  for (std::size_t k = 0; k < probe_.size(); ++k) v[k] = {probe_[k], map_[k], charge_[k], clash_[k] ? 1 : 0};
   return v;
 }
 

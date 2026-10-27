@@ -270,6 +270,7 @@ class MobmDocker {
   std::vector<int> map_;    // type map per probe atom
   std::vector<double> charge_;
   std::vector<char> heavy_;
+  std::vector<char> clash_;  // heavy and not a metal: clash checks
   std::array<int, 3> posN_{};  // positions per axis
   std::vector<Quat> hopf_;
   const std::vector<StamSepa>* sepas_ = nullptr;

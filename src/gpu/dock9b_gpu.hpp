@@ -270,7 +270,7 @@ class GpuPoseEvaluator : public PoseEvaluator {
     GpuDockPrep::FilterSetup s;
     for (const DockProbe& pr : dk.probes()) {
       for (int d = 0; d < 3; ++d) s.y.push_back(c.coords[pr.coord][d]);
-      s.heavy.push_back(pr.heavy);
+      s.clash.push_back(pr.clash);
     }
     for (int d = 0; d < 3; ++d) {
       s.center[d] = static_cast<float>(c.center[d]);

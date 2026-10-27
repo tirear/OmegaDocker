@@ -89,7 +89,7 @@ class EnergySystem {
   struct Pair {
     int i, j;            // coordinate indices
     std::uint16_t type;  // index into the type-pair table
-    bool heavy;          // both heavy atoms: clash penalty applies
+    bool clash;          // both heavy atoms, neither a metal: clash penalty applies
   };
   const std::vector<Pair>& pairs() const { return pairs_; }
   // Flat form for the shared CPU/GPU kernels (energy_kernel.hpp).

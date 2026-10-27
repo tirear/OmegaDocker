@@ -292,12 +292,12 @@ OD_HD inline T energy(const FieldView& f, int m, T q, const T p[3], T* grad) {
   return static_cast<T>(grid + movedSum(f, m, q, p, grad));
 }
 
-// flexres part of distance: d, the map value, or the distance to the nearest moved StaM heavy atom
+// flexres part of distance: d, the map value, or the distance to the nearest moved StaM heavy atom (no metal)
 // when closer.
 template <class T>
 OD_HD inline T movedNearest(const FieldView& f, const T p[3], T d, T* grad);
 
-// Distance to the nearest StaM heavy atom (at most the cap); grad: dd/dp.
+// Distance to the nearest StaM heavy atom other than a metal (at most the cap); grad: dd/dp.
 template <class T>
 OD_HD inline T distance(const FieldView& f, const T p[3], T* grad) {
   const T d = interpolate(f, f.typeMapCount + 2, p, grad);

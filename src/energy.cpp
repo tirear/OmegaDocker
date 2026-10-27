@@ -86,7 +86,7 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
   struct EAtom {
     int part, atom, index;
     Ad4Type type;
-    bool heavy;
+    bool clash;  // heavy atom, not a metal
   };
   std::vector<EAtom> atoms;
   std::vector<Groups> groups;
@@ -103,7 +103,7 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
       charge_[idx] = q;
       sv_[idx] = ad4Params(t).solpar + params_.coeffs.qasp * std::abs(q);
       vol_[idx] = ad4Params(t).volume;
-      atoms.push_back({static_cast<int>(k), a, idx, t, m.atoms[a].atomicNum > 1});
+      atoms.push_back({static_cast<int>(k), a, idx, t, m.atoms[a].atomicNum > 1 && ad4Clashes(t)});
     }
   }
 
@@ -147,7 +147,7 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
       if (p.part == q.part && std::binary_search(near[p.part][p.atom].begin(), near[p.part][p.atom].end(), q.atom))
         continue;
       if (intersect(gp, groups[q.part][q.atom])) {
-        if (!p.heavy || !q.heavy) continue;
+        if (!p.clash || !q.clash) continue;
         const Molecule& mp = *parts_[p.part].mol;
         const Molecule& mq = *parts_[q.part].mol;
         const Vec3& a = mp.atoms[p.atom].xyz;
@@ -159,7 +159,7 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
         continue;
       }
       pairs_.push_back({p.index, q.index, static_cast<std::uint16_t>(static_cast<int>(p.type) * kTypes + static_cast<int>(q.type)),
-                        p.heavy && q.heavy});
+                        p.clash && q.clash});
     }
   }
   if (!fixedClashes.empty()) {
@@ -265,7 +265,7 @@ EnergyTerms EnergySystem::evaluateT(std::span<const T> anglesDeg, std::vector<do
                  rMin, ee, de);
     e.desolv += ee;
     dedr += de;
-    if (p.heavy && r2 < cd2) {
+    if (p.clash && r2 < cd2) {
       clashPenalty<T>(r, cd, clashBase, clashK, ee, de);
       e.clash += ee;
       ++e.clashPairs;
@@ -360,7 +360,7 @@ EnergyModel EnergySystem::model() const {
   m.vol = vol_;
   for (const Ad4PairParams& pp : pairParams_) m.pairParams.push_back({pp.AC, pp.BD, pp.reqm, pp.m, pp.n});
   m.pairs.reserve(pairs_.size());
-  for (const Pair& p : pairs_) m.pairs.push_back({p.i, p.j, p.type, p.heavy ? 1 : 0});
+  for (const Pair& p : pairs_) m.pairs.push_back({p.i, p.j, p.type, p.clash ? 1 : 0});
   m.halfSmooth = 0.5 * params_.smooth;
   m.clashDistance = params_.clashDistance;
   m.clashBase = params_.clashBase;

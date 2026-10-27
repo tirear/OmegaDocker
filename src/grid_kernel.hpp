@@ -99,7 +99,7 @@ OD_HD inline void gridPoint(const GridBuildView& v, int i, int j, int k, double*
 }
 
 // Distance grid value at one point (buildDistanceGrid, spec 8.2): distance to the nearest
-// StaM heavy atom, at most cap.
+// StaM heavy atom other than a metal, at most cap.
 struct DistBuildView {
   double origin[3], spacing;
   int n[3];

@@ -28,7 +28,8 @@ std::vector<int> graphIsomorphism(const std::vector<std::vector<int>>& adjA, std
 
 // Reference structure (spec 10.3): for each of atoms (heavy atoms of mol), the index of the
 // corresponding ref atom, by the heavy-atom bond graph labelled with the element (metal
-// coordination bonds excluded); the same atom order when it fits. Throws od::Error when none.
+// coordination bonds excluded); the same atom order when it fits. C-terminal OXT atoms of mol
+// (residue atoms named OXT) absent from ref map to -1. Throws od::Error when none.
 std::vector<int> referenceAtomMap(const Molecule& mol, std::span<const int> atoms, const Molecule& ref);
 
 // Smallest sum of squared distances over one-to-one pairings of a and b within

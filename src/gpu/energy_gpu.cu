@@ -69,12 +69,12 @@ __device__ inline double warpMax(double v) {
   return v;
 }
 
-// Pair data of the kernel: pairs (tf: type << 2 | hbond << 1 | heavy), per-atom constants in T.
+// Pair data of the kernel: pairs (tf: type << 2 | hbond << 1 | clash), per-atom constants in T.
 struct GpuPair {
   int i, j, tf;
 };
 inline int pairFlags(const EnergyModel& m, const FlatPair& pr) {
-  return pr.type << 2 | (m.pairParams[pr.type].n == 10 ? 2 : 0) | (pr.heavy ? 1 : 0);
+  return pr.type << 2 | (m.pairParams[pr.type].n == 10 ? 2 : 0) | (pr.clash ? 1 : 0);
 }
 // Aligned to their size: one vector load each.
 template <class T>

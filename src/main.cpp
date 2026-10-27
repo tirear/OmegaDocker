@@ -745,6 +745,8 @@ struct MobState {
   std::unique_ptr<od::MobmHeavyAtoms> heavy;
   std::unique_ptr<od::SymmetryRmsd> sym;
   std::vector<od::Vec3f> ref;  // reference heavy atoms (box frame) in MobmHeavyAtoms order; empty without --refFiles
+  std::vector<int> refSel;     // MobmHeavyAtoms positions present in the reference; empty: all
+  std::unique_ptr<od::SymmetryRmsd> refSym;  // SymmetryRmsd over refSel (refSel not empty)
   // score / localMin (spec 6.1), per entry of top: record (from 1), fit RMSD of the record, grid status.
   struct Input {
     int record = 0;
@@ -753,6 +755,38 @@ struct MobState {
   };
   std::vector<Input> inputs;
 };
+
+// Reference heavy atoms (spec 10.3) in MobmHeavyAtoms order (ref in the box frame); MobM atoms
+// absent from the reference (C-terminal OXT) are left out, with m.refSel and m.refSym over the rest.
+void setReference(MobState& m, const ConfSet& mob, const od::Molecule& ref, const od::Options& opt) {
+  const std::vector<int> map = od::referenceAtomMap(*mob.parts()[0].mol, m.heavy->atoms(), ref);
+  m.ref.clear();
+  m.refSel.clear();
+  m.refSym.reset();
+  std::vector<int> atoms, types;
+  for (std::size_t k = 0; k < map.size(); ++k) {
+    if (map[k] < 0) continue;
+    const od::Vec3& p = ref.atoms[map[k]].xyz;
+    m.ref.push_back({static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2])});
+    m.refSel.push_back(static_cast<int>(k));
+    atoms.push_back(m.heavy->atoms()[k]);
+    types.push_back(m.heavy->types()[k]);
+  }
+  if (m.refSel.size() == map.size()) {
+    m.refSel.clear();
+    return;
+  }
+  m.refSym = std::make_unique<od::SymmetryRmsd>(*mob.parts()[0].mol, atoms, types, static_cast<std::size_t>(opt.symMaxPerm));
+  od::logInfo(std::format("{}: {} atom(s) absent from the reference (C-terminal OXT) are left out of rmsd_ref", mob.name(),
+                          map.size() - m.refSel.size()));
+}
+
+double refRmsd(const MobState& m, const std::vector<od::Vec3f>& world) {
+  if (m.refSel.empty()) return m.sym->rmsd(world, m.ref);
+  std::vector<od::Vec3f> w;
+  for (int k : m.refSel) w.push_back(world[k]);
+  return m.refSym->rmsd(w, m.ref);
+}
 
 std::uint64_t pairKey(int stam, int mobm) {
   return static_cast<std::uint64_t>(stam) << 32 | static_cast<std::uint32_t>(mobm);
@@ -1099,7 +1133,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       const od::EnergySystem& msys = mob.sysOf(pm.variant);
       const auto y = msys.coordinates(std::span<const float>(r.s.angles));
       w.world = od::dockWorld(y, r.s);
-      if (!ms[i].ref.empty()) w.rmsdRef = ms[i].sym->rmsd(ms[i].heavy->world(r.s), ms[i].ref);
+      if (!ms[i].ref.empty()) w.rmsdRef = refRmsd(ms[i], ms[i].heavy->world(r.s));
       const od::ShakeAtoms mobAtoms = od::shakeAtoms(msys, mob.partsOf(pm.variant), w.world);
       const od::EnergyTerms mt = msys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
       const od::InterTerms it = od::exactInter(st.atoms, mobAtoms, ep);
@@ -1292,16 +1326,6 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       od::logInfo(std::format("    lowest {:<9}{}", methods[m].name + ":", s));
     }
   }
-}
-
-// Reference heavy atoms (spec 10.3) in MobmHeavyAtoms order (ref in the box frame).
-std::vector<od::Vec3f> refHeavy(const ConfSet& mob, const od::MobmHeavyAtoms& heavy, const od::Molecule& ref) {
-  std::vector<od::Vec3f> v;
-  for (int a : od::referenceAtomMap(*mob.parts()[0].mol, heavy.atoms(), ref)) {
-    const od::Vec3& p = ref.atoms[a].xyz;
-    v.push_back({static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2])});
-  }
-  return v;
 }
 
 // Checkpoints (spec 16).
@@ -1615,7 +1639,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     ms[i].sym = std::make_unique<od::SymmetryRmsd>(*mobSets[i]->parts()[0].mol, ms[i].heavy->atoms(), ms[i].heavy->types(),
                                                    static_cast<std::size_t>(opt.symMaxPerm));
     const double symSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
-    if (!refs.empty()) ms[i].ref = refHeavy(*mobSets[i], *ms[i].heavy, refs[i]);
+    if (!refs.empty()) setReference(ms[i], *mobSets[i], refs[i], opt);
     od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
                             mobSets[i]->name(), ms[i].topNum, ms[i].bufferNum,
                             ms[i].sym->usesPermutations()
@@ -2628,7 +2652,7 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     if (!refs.empty()) {
       m.sym = std::make_unique<od::SymmetryRmsd>(*mob.parts()[0].mol, m.heavy->atoms(), m.heavy->types(),
                                                  static_cast<std::size_t>(opt.symMaxPerm));
-      m.ref = refHeavy(mob, *m.heavy, refs[i]);
+      setReference(m, mob, refs[i], opt);
     }
     const od::MobmDocker dk(mob.sys(), field, dp);
     const od::TorsionTree& tree = *mob.parts()[0].tree;

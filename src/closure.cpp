@@ -256,7 +256,7 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
       links_.push_back(std::move(l));
     }
   }
-  // Clash pairs (heavy atoms). Default: pairs with a ring path atom (metal
+  // Clash pairs (heavy atoms, no metal). Default: pairs with a ring path atom (metal
   // distance: its two atoms) moved by the adjustable torsions. growClose:
   // pairs with any atom moved by them, neither atom built after the closure.
   const int nc = sys_.coordOffset(static_cast<int>(parts_.size()) - 1) + parts_.back().tree->atomCount +
@@ -291,7 +291,7 @@ LoopCloser::LoopCloser(const EnergySystem& sys, const std::vector<EnergyPart>& p
         if (moved[c]) checked[co + c] = 1;
     }
     for (const auto& pr : sys_.pairs())
-      if (pr.heavy && (checked[pr.i] || checked[pr.j]) && !later[pr.i] && !later[pr.j])
+      if (pr.clash && (checked[pr.i] || checked[pr.j]) && !later[pr.i] && !later[pr.j])
         l.clashPairs.push_back({pr.i, pr.j});
     for (int g : l.dof) {
       std::vector<int> mv;

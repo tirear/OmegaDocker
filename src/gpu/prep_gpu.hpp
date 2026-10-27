@@ -27,7 +27,7 @@ class GpuDockPrep {
 
   struct FilterSetup {
     std::vector<float> y;   // probe atoms (torsion-tree frame), 3 per atom
-    std::vector<int> heavy;  // per probe atom
+    std::vector<int> clash;  // per probe atom: heavy and not a metal
     float center[3];
     float boxLo[3], boxHi[3];
     float clashDistance, nearDistance;

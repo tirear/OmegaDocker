@@ -50,7 +50,7 @@ struct GridAtoms {
   std::vector<Vec3> xyz;
   std::vector<Ad4Type> type;
   std::vector<double> charge;
-  std::vector<char> heavy;
+  std::vector<char> clash;  // heavy atom, not a metal: atoms of the distance grid
   std::size_t size() const { return xyz.size(); }
 };
 // coords: coordinates of sys.evaluate for the same parts.
@@ -73,7 +73,7 @@ struct EnergyGrids {
 EnergyGrids buildEnergyGrids(const GridGeometry& geom, const GridAtoms& stam, std::span<const Ad4Type> probeTypes,
                              const EnergyParams& params);
 
-// Each point holds the distance to the nearest StaM heavy atom, at most cap.
+// Each point holds the distance to the nearest StaM heavy atom other than a metal, at most cap.
 struct DistanceGrid {
   GridGeometry geom;
   std::vector<float> d;
@@ -217,7 +217,7 @@ class StamField {
   // Energy of a probe atom of map `map` and charge q at p (inside geom()); grad: dE/dp.
   template <class T>
   T energy(int map, T q, const Vec3T<T>& p, Vec3T<T>* grad) const;
-  // Distance to the nearest StaM heavy atom (at most distanceCap()); grad: dd/dp.
+  // Distance to the nearest StaM heavy atom other than a metal (at most distanceCap()); grad: dd/dp.
   template <class T>
   T distance(const Vec3T<T>& p, Vec3T<T>* grad) const;
 

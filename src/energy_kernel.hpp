@@ -22,7 +22,7 @@ struct FlatPairParams {
 struct FlatPair {
   int i, j;   // coordinate indices
   int type;   // index into pairParams
-  int heavy;  // both heavy atoms: clash penalty applies
+  int clash;  // both heavy atoms, neither a metal: clash penalty applies
 };
 
 // Torsions of all parts in part order; index = angle index. Applied last to first.
@@ -161,7 +161,7 @@ OD_HD inline bool pairTerm(const EnergyModelView& m, int p, const T* x, double e
   e[3] += ee;
   dedr += de;
   const T cd = static_cast<T>(m.clashDistance);
-  if (pr.heavy && r2 < cd * cd) {
+  if (pr.clash && r2 < cd * cd) {
     clashPenalty<T>(r, cd, static_cast<T>(m.clashBase), static_cast<T>(m.clashK), ee, de);
     e[4] += ee;
     ++clashPairs;

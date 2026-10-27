@@ -127,9 +127,9 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
   }
   auto stepOfCoord = [&](int c) { return owner[c] < 0 ? -1 : stepOf[owner[c]]; };
 
-  // Heavy-atom pairs, checked at the step that places the later atom.
+  // Clash pairs (heavy atoms, no metal), checked at the step that places the later atom.
   for (const auto& pr : sys.pairs()) {
-    if (!pr.heavy) continue;
+    if (!pr.clash) continue;
     const int s = std::max(stepOfCoord(pr.i), stepOfCoord(pr.j));
     if (s >= 0 && !steps_[s].fixed) steps_[s].pairs.emplace_back(pr.i, pr.j);
   }

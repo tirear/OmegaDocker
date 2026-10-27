@@ -85,7 +85,7 @@ GridAtoms gridAtoms(const EnergySystem& sys, const std::vector<EnergyPart>& part
       g.xyz.push_back(coords[off + a]);
       g.type.push_back(t.type[a]);
       g.charge.push_back(t.charge[a]);
-      g.heavy.push_back(m.atoms[a].atomicNum > 1);
+      g.clash.push_back(m.atoms[a].atomicNum > 1 && ad4Clashes(t.type[a]));
     }
   }
   return g;
@@ -202,7 +202,7 @@ EnergyGrids buildEnergyGrids(const GridGeometry& geom, const GridAtoms& stam, st
 DistBuildData::DistBuildData(const GridGeometry& geom, const GridAtoms& stam, double cap) {
   std::vector<Vec3> heavy;
   for (std::size_t a = 0; a < stam.size(); ++a)
-    if (stam.heavy[a]) {
+    if (stam.clash[a]) {
       heavy.push_back(stam.xyz[a]);
       for (int k = 0; k < 3; ++k) xyz.push_back(stam.xyz[a][k]);
     }
@@ -335,7 +335,7 @@ GridAtoms subset(const GridAtoms& atoms, std::span<const char> mask, bool keep) 
     g.xyz.push_back(atoms.xyz[a]);
     g.type.push_back(atoms.type[a]);
     g.charge.push_back(atoms.charge[a]);
-    g.heavy.push_back(atoms.heavy[a]);
+    g.clash.push_back(atoms.clash[a]);
   }
   return g;
 }
@@ -424,7 +424,7 @@ StamField StamField::flexres(std::shared_ptr<const EnergyGrids> fixed, std::shar
     m.elecQ = c.elec * moved.charge[a];
     m.S = ad4Params(moved.type[a]).solpar + c.qasp * std::abs(moved.charge[a]);
     m.V = ad4Params(moved.type[a]).volume;
-    m.heavy = moved.heavy[a] != 0;
+    m.heavy = moved.clash[a] != 0;
     if (m.heavy) {
       f.movedHeavy_.push_back(static_cast<int>(a));
       heavyXyz.push_back(m.xyz);

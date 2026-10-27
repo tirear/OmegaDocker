@@ -44,7 +44,7 @@ InterTerms exactInter(const ShakeAtoms& stam, const ShakeAtoms& mob, const Energ
       const float r2 = dx * dx + dy * dy + dz * dz;
       if (r2 >= static_cast<float>(kElecCutoff * kElecCutoff)) continue;
       const float r = std::sqrt(r2);
-      if (stam.heavy[j]) nearest = std::min(nearest, r);
+      if (stam.heavy[j] && ad4Clashes(stam.type[j])) nearest = std::min(nearest, r);
       const Ad4TypeParams& pj = ad4Params(stam.type[j]);
       const float Sj = static_cast<float>(pj.solpar + c.qasp * std::abs(stam.charge[j]));
       float ee, de;
@@ -64,7 +64,7 @@ InterTerms exactInter(const ShakeAtoms& stam, const ShakeAtoms& mob, const Energ
     hbond += sh;
     elec += se;
     desolv += sd;
-    if (mob.heavy[i] && nearest < cd) clash += ep.clashBase + ep.clashK * (cd - nearest) * (cd - nearest);
+    if (mob.heavy[i] && ad4Clashes(mob.type[i]) && nearest < cd) clash += ep.clashBase + ep.clashK * (cd - nearest) * (cd - nearest);
   }
   out.vdw = vdw;
   out.hbond = hbond;

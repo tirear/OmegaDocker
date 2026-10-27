@@ -19,7 +19,8 @@ std::vector<Vec3f> dockWorld(std::span<const Vec3f> local, const DockSample& s);
 
 // StaM–MobM energy by atom pairs (single precision terms, double sums):
 // AD4 terms; clash = penalty of every MobM heavy atom whose nearest StaM heavy
-// atom is closer than clashDistance (as the 9b distance grid).
+// atom is closer than clashDistance (as the 9b distance grid); metal atoms are
+// not checked on either side.
 struct InterTerms {
   double vdw = 0, hbond = 0, elec = 0, desolv = 0, clash = 0;
   double inter() const { return vdw + hbond + elec + desolv; }

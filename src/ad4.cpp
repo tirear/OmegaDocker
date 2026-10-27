@@ -54,6 +54,14 @@ bool ad4IsHbAcceptor(Ad4Type t) {
   return t == Ad4Type::NA || t == Ad4Type::NS || t == Ad4Type::OA || t == Ad4Type::OS || t == Ad4Type::SA;
 }
 
+bool ad4IsMetal(Ad4Type t) {
+  return t == Ad4Type::Mg || t == Ad4Type::Ca || t == Ad4Type::Mn || t == Ad4Type::Fe || t == Ad4Type::Zn;
+}
+
+bool ad4Clashes(Ad4Type t) {
+  return t != Ad4Type::Merged && t != Ad4Type::H && t != Ad4Type::HD && t != Ad4Type::HS && !ad4IsMetal(t);
+}
+
 Ad4Typing assignAd4Types(const Molecule& m) {
   const int n = static_cast<int>(m.atoms.size());
   std::vector<std::vector<int>> nb(n);

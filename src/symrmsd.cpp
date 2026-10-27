@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -162,12 +163,11 @@ std::vector<int> graphIsomorphism(const std::vector<std::vector<int>>& adjA, std
   return v.empty() ? std::vector<int>{} : std::move(v.front());
 }
 
-std::vector<int> referenceAtomMap(const Molecule& mol, std::span<const int> atoms, const Molecule& ref) {
-  std::vector<int> refAtoms;
-  for (std::size_t i = 0; i < ref.atoms.size(); ++i)
-    if (ref.atoms[i].atomicNum != 1) refAtoms.push_back(static_cast<int>(i));
-  if (refAtoms.size() != atoms.size())
-    fail("{}: {} heavy atoms, {} has {}", ref.id, refAtoms.size(), mol.id, atoms.size());
+namespace {
+
+// referenceAtomMap for atoms with as many heavy atoms as refAtoms; empty when the graphs differ.
+std::vector<int> mapHeavy(const Molecule& mol, std::span<const int> atoms, const Molecule& ref,
+                          std::span<const int> refAtoms) {
   std::vector<int> la, lb;
   for (int a : atoms) la.push_back(mol.atoms[a].atomicNum);
   for (int a : refAtoms) lb.push_back(ref.atoms[a].atomicNum);
@@ -186,10 +186,44 @@ std::vector<int> referenceAtomMap(const Molecule& mol, std::span<const int> atom
     std::iota(map.begin(), map.end(), 0);
   } else {
     map = graphIsomorphism(adjA, la, adjB, lb);
-    if (map.empty()) fail("{}: the heavy-atom bond graph differs from {}", ref.id, mol.id);
   }
   for (int& m : map) m = refAtoms[m];
   return map;
+}
+
+}  // namespace
+
+std::vector<int> referenceAtomMap(const Molecule& mol, std::span<const int> atoms, const Molecule& ref) {
+  std::vector<int> refAtoms;
+  for (std::size_t i = 0; i < ref.atoms.size(); ++i)
+    if (ref.atoms[i].atomicNum != 1) refAtoms.push_back(static_cast<int>(i));
+  // C-terminal OXT of the MobM (OmegaDocker adds missing ones, spec 3.4): may be absent from ref.
+  std::vector<int> oxt;
+  for (std::size_t k = 0; k < atoms.size(); ++k)
+    if (mol.atoms[atoms[k]].residue >= 0 && mol.atoms[atoms[k]].name == "OXT") oxt.push_back(static_cast<int>(k));
+  const std::size_t extra = atoms.size() - std::min(atoms.size(), refAtoms.size());
+  if (refAtoms.size() > atoms.size() || extra > oxt.size())
+    fail("{}: {} heavy atoms, {} has {}{}", ref.id, refAtoms.size(), mol.id, atoms.size(),
+         oxt.empty() ? "" : std::format(" ({} of them OXT)", oxt.size()));
+  // Leave out `extra` of the OXT atoms, in lexicographic order of the left-out set.
+  std::vector<char> out(oxt.size(), 0);
+  std::fill(out.end() - static_cast<long>(extra), out.end(), 1);
+  do {
+    std::vector<int> kept, pos;
+    std::size_t o = 0;
+    for (std::size_t k = 0; k < atoms.size(); ++k) {
+      if (o < oxt.size() && oxt[o] == static_cast<int>(k) && out[o++]) continue;
+      kept.push_back(atoms[k]);
+      pos.push_back(static_cast<int>(k));
+    }
+    const std::vector<int> m = mapHeavy(mol, kept, ref, refAtoms);
+    if (!m.empty()) {
+      std::vector<int> map(atoms.size(), -1);
+      for (std::size_t k = 0; k < m.size(); ++k) map[pos[k]] = m[k];
+      return map;
+    }
+  } while (std::next_permutation(out.begin(), out.end()));
+  fail("{}: the heavy-atom bond graph differs from {}", ref.id, mol.id);
 }
 
 double hungarianSquaredSum(std::span<const Vec3f> a, std::span<const Vec3f> b,
