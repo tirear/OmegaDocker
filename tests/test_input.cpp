@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "ad4.hpp"
+#include "box.hpp"
 #include "ad4_pair.hpp"
 #include "ccd.hpp"
 #include "conf9a.hpp"
@@ -2411,6 +2412,115 @@ TEST_CASE("closure: coupled links closed together (2KJJ A:8-15 with the disulfid
     // With the clash check most closed groups clash with residues 1-6 (1.4-1.7 Å), packing rather than geometry.
     CHECK(closed >= (clash == 0 ? total * 3 / 4 : 0));
   }
+}
+
+TEST_CASE("box: automatic box (spec 3.3)") {
+  // An elongated cloud along a turned axis.
+  std::vector<od::Vec3> x;
+  od::Rng r(5, 0, 0);
+  const od::Vec3 u{0.6, 0.64, 0.48}, v{-0.8, 0.48, 0.36}, w{0.0, -0.6, 0.8};
+  for (int k = 0; k < 400; ++k) {
+    const double a = r.uniform(-15, 15), b = r.uniform(-4, 4), c = r.uniform(-2, 2);
+    x.push_back({10 + a * u[0] + b * v[0] + c * w[0], -3 + a * u[1] + b * v[1] + c * w[1], 7 + a * u[2] + b * v[2] + c * w[2]});
+  }
+  od::AutoBoxParams p;
+  p.stamMargin = 4;
+  p.mobmRadius = 3;
+  const double add = 4 + 2 * 3;
+  auto volume = [](const od::BoxFrame& b) { return b.size[0] * b.size[1] * b.size[2]; };
+  auto contains = [&](const od::BoxFrame& b, double margin) {
+    for (const auto& q : x) {
+      const od::Vec3 y = b.toBox(q);
+      for (int k = 0; k < 3; ++k)
+        if (std::abs(y[k] - b.center[k]) > b.size[k] / 2 - margin + 1e-9) return false;
+    }
+    return true;
+  };
+  p.autoRotate = false;
+  const od::BoxFrame plain = od::autoBox(x, p);
+  CHECK_FALSE(plain.rotated);
+  CHECK(contains(plain, add / 2));
+  p.autoRotate = true;
+  const od::BoxFrame rot = od::autoBox(x, p);
+  CHECK(rot.rotated);
+  CHECK(contains(rot, add / 2));
+  CHECK(volume(rot) < 0.5 * volume(plain));
+  // About the generating axes: extents 30 x 8 x 4 plus the margins.
+  CHECK(volume(rot) <= (30 + add) * (8 + add) * (4 + add) * 1.01);
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j) {
+      const double d = rot.axes[i][0] * rot.axes[j][0] + rot.axes[i][1] * rot.axes[j][1] + rot.axes[i][2] * rot.axes[j][2];
+      CHECK(d == doctest::Approx(i == j ? 1.0 : 0.0).epsilon(1e-12));
+    }
+  const od::Vec3 back = rot.toInput(rot.toBox(x[7]));
+  for (int k = 0; k < 3; ++k) CHECK(back[k] == doctest::Approx(x[7][k]).epsilon(1e-12));
+  // A given center: the box is symmetric about it and still holds the points with the margins.
+  p.center = od::Vec3{12, -2, 8};
+  const od::BoxFrame c = od::autoBox(x, p);
+  const od::Vec3 cIn = c.toInput(c.center);
+  for (int k = 0; k < 3; ++k) CHECK(cIn[k] == doctest::Approx((*p.center)[k]).epsilon(1e-12));
+  CHECK(contains(c, add / 2));
+  // A given size replaces the computed one.
+  p.size = od::Vec3{20, 21, 22};
+  const od::BoxFrame s = od::autoBox(x, p);
+  CHECK(s.size == *p.size);
+}
+
+TEST_CASE("box: MobM radius (box.mobmRadius) and fixAuto") {
+  auto mols = od::loadMolecules(kData + "/BTN_ideal.sdf", od::Role::MobM, ccd());
+  const od::Molecule& m = mols[0];
+  od::Topology topo = od::analyzeTopology(m, {});
+  const std::vector<od::MolInput> in{{&m, &topo}};
+  std::vector<std::string> errors;
+  auto cfg = od::parseMolConfig(od::defaultMolConfigText(in), in, {}, errors);
+  REQUIRE(cfg);
+  const od::MolSettings& s = cfg->molecules[0];
+  REQUIRE(s.tree.torsions.size() >= 4);
+  const double rInput = od::radiusOf(od::heavyCoords(m));
+  const double rMax = od::mobmRadiusMax(m, s.tree);
+  const od::EnergySystem sys({{&m, &s.tree}}, {});
+  od::Csgm1GroupSampler smp;
+  smp.add(od::Csgm1Sampler(m, s, *cfg, {}));
+  const od::SampledRadius rs = od::mobmRadiusSampled(m, sys, smp, 500, 3, 9);
+  MESSAGE(std::format("BTN radius: input {:.3f}, sampled {:.3f} ({} of 500 without clashes), max {:.3f} Å", rInput,
+                      rs.radius, rs.accepted, rMax));
+  CHECK(rs.accepted > 0);
+  CHECK(rs.radius >= rInput);
+  CHECK(rMax >= rs.radius);
+  // Also for every sample with clashes: the bound holds for any conformation.
+  for (int k = 0; k < 200; ++k) {
+    od::Rng r(11, 0, k);
+    std::vector<double> a = sys.inputAngles();
+    smp.sample(r, a);
+    const auto c = sys.coordinates(std::span<const double>(a));
+    std::vector<od::Vec3> h;
+    for (std::size_t i = 0; i < m.atoms.size(); ++i)
+      if (m.atoms[i].atomicNum > 1) h.push_back(c[sys.coordOffset(0) + i]);
+    CHECK(od::radiusOf(h) <= rMax + 1e-9);
+  }
+  // Without torsions: max_i (1/N) sum_j |x_i - x_j|.
+  const od::TorsionTree rigid{.atomCount = static_cast<int>(m.atoms.size())};
+  const auto h = od::heavyCoords(m);
+  double ref = 0;
+  for (const auto& p : h) {
+    double sum = 0;
+    for (const auto& q : h) sum += std::sqrt((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2]));
+    ref = std::max(ref, sum / static_cast<double>(h.size()));
+  }
+  CHECK(od::mobmRadiusMax(m, rigid) == doctest::Approx(ref).epsilon(1e-12));
+  CHECK(od::mobmRadiusMax(m, rigid) >= rInput);
+
+  // fixAuto: no StaM torsion is rotatable by default; MobM unchanged.
+  const od::Molecule sta = od::loadMolecules(kData + "/2KJJ.cif", od::Role::StaM, ccd()).front();
+  od::TopologyParams tp;
+  tp.stamAllFixed = true;
+  const od::Topology ts = od::analyzeTopology(sta, tp);
+  CHECK(std::none_of(ts.torsions.begin(), ts.torsions.end(), [](const od::Torsion& x) { return x.rotatable; }));
+  const od::Topology tsDefault = od::analyzeTopology(sta, {});
+  CHECK(std::any_of(tsDefault.torsions.begin(), tsDefault.torsions.end(), [](const od::Torsion& x) { return x.rotatable; }));
+  const od::Topology tm = od::analyzeTopology(m, tp);
+  CHECK(std::count_if(tm.torsions.begin(), tm.torsions.end(), [](const od::Torsion& x) { return x.rotatable; }) ==
+        std::count_if(topo.torsions.begin(), topo.torsions.end(), [](const od::Torsion& x) { return x.rotatable; }));
 }
 
 #ifdef OD_HAVE_CUDA

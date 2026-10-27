@@ -882,19 +882,11 @@ std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vecto
   return path;
 }
 
-std::optional<MolConfig> readMolConfig(const std::string& path, const std::vector<MolInput>& mols,
-                                       const TopologyParams& base, std::vector<std::string>& errors) {
-  if (!std::filesystem::exists(path)) {
-    errors.push_back(std::format("{}: file not found", path));
-    return std::nullopt;
-  }
-  toml::table root;
-  try {
-    root = toml::parse_file(path);
-  } catch (const toml::parse_error& ex) {
-    errors.push_back(std::format("line {}: {}", ex.source().begin.line, ex.description()));
-    return std::nullopt;
-  }
+namespace {
+
+std::optional<MolConfig> readMolConfigTable(const toml::table& root, const std::vector<MolInput>& mols,
+                                            const TopologyParams& base, std::vector<std::string>& errors,
+                                            bool ignoreOthers) {
   Errors e;
   checkKeys(root, {"formatVersion", "generatedBy", "ssHalfWidth", "ssOriginalProb", "ssType", "molecule"}, "", e);
   if (auto v = get<std::int64_t>(root, "formatVersion", "", e, true); v && *v != kMolConfigFormatVersion)
@@ -918,8 +910,9 @@ std::optional<MolConfig> readMolConfig(const std::string& path, const std::vecto
   for (const toml::table* t : tablesOf(root, "molecule", "", e)) {
     auto id = get<std::string>(*t, "id", "molecule", e, true);
     if (!id) continue;
-    if (std::none_of(mols.begin(), mols.end(), [&](const MolInput& in) { return in.mol->id == *id; }))
-      e.add(lineOf(*t), "molecule", std::format("id '{}' does not match any input molecule", *id));
+    if (std::none_of(mols.begin(), mols.end(), [&](const MolInput& in) { return in.mol->id == *id; })) {
+      if (!ignoreOthers) e.add(lineOf(*t), "molecule", std::format("id '{}' does not match any input molecule", *id));
+    }
     else if (!byId.emplace(*id, t).second)
       e.add(lineOf(*t), "molecule", std::format("id '{}' is listed more than once", *id));
   }
@@ -937,6 +930,37 @@ std::optional<MolConfig> readMolConfig(const std::string& path, const std::vecto
     return std::nullopt;
   }
   return cfg;
+}
+
+}  // namespace
+
+std::optional<MolConfig> readMolConfig(const std::string& path, const std::vector<MolInput>& mols,
+                                       const TopologyParams& base, std::vector<std::string>& errors,
+                                       bool ignoreOthers) {
+  if (!std::filesystem::exists(path)) {
+    errors.push_back(std::format("{}: file not found", path));
+    return std::nullopt;
+  }
+  toml::table root;
+  try {
+    root = toml::parse_file(path);
+  } catch (const toml::parse_error& ex) {
+    errors.push_back(std::format("line {}: {}", ex.source().begin.line, ex.description()));
+    return std::nullopt;
+  }
+  return readMolConfigTable(root, mols, base, errors, ignoreOthers);
+}
+
+std::optional<MolConfig> parseMolConfig(const std::string& text, const std::vector<MolInput>& mols,
+                                        const TopologyParams& base, std::vector<std::string>& errors) {
+  toml::table root;
+  try {
+    root = toml::parse(text);
+  } catch (const toml::parse_error& ex) {
+    errors.push_back(std::format("line {}: {}", ex.source().begin.line, ex.description()));
+    return std::nullopt;
+  }
+  return readMolConfigTable(root, mols, base, errors, false);
 }
 
 }  // namespace od

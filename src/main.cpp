@@ -27,6 +27,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "box.hpp"
 #include "ccd.hpp"
 #include "checkpoint.hpp"
 #include "closure.hpp"
@@ -77,7 +78,8 @@ void printMolecule(const od::Molecule& m) {
 
 od::TopologyParams topologyParams(const od::Options& opt) {
   od::TopologyParams p;
-  p.box = od::Box{*opt.boxCenter, *opt.boxSize};
+  p.box = od::Box{opt.box.center, opt.box.size};
+  p.stamAllFixed = opt.boxMode == "fixAuto";
   p.stamFlexMargin = opt.stamFlexMargin;
   p.stamFixedResMovable = opt.stamFixedResMovable;
   return p;
@@ -511,8 +513,8 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   dp.sepaSingle = opt.sepaSamplingSingle;
   dp.sepaTriple = opt.sepaSamplingTriple;
   dp.rotStep = opt.rotStep;
-  dp.boxCenter = *opt.boxCenter;
-  dp.boxSize = *opt.boxSize;
+  dp.boxCenter = opt.box.center;
+  dp.boxSize = opt.box.size;
   dp.maxOverlapAtomNum = opt.maxOverlapAtomNum;
   dp.maxNearDistance = opt.maxNearDistance;
   dp.clashDistance = opt.clashDistance;
@@ -644,13 +646,19 @@ std::string energyList(const std::vector<od::RoundSample>& v, std::size_t n, flo
 }
 
 // Output structure of the parts of sys at coordinates x (one entry per coordinate of sys).
+// Output coordinates in the input frame (spec 3.3).
 std::vector<od::StructPart> structParts(const od::EnergySystem& sys, const std::vector<od::EnergyPart>& parts,
-                                        const std::vector<od::Vec3f>& x) {
+                                        const std::vector<od::Vec3f>& x, const od::BoxFrame& box) {
   std::vector<od::StructPart> out;
   for (std::size_t k = 0; k < parts.size(); ++k) {
     const int off = sys.coordOffset(static_cast<int>(k));
     const std::size_t n = parts[k].mol->atoms.size();
     out.push_back({parts[k].mol, std::vector<od::Vec3f>(x.begin() + off, x.begin() + off + static_cast<long>(n))});
+    if (box.rotated)
+      for (od::Vec3f& p : out.back().xyz) {
+        const od::Vec3 q = box.toInput({p[0], p[1], p[2]});
+        p = {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2])};
+      }
   }
   return out;
 }
@@ -852,13 +860,13 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         const Alone& st = stamOf(stamSet.sample(r.stam).angles);
         bool fb = false;
         stamFiles[r.stam] = od::writeStructure(dir + std::format("/stam_{}", r.stam),
-                                               structParts(stamSet.sys(), stamSet.parts(), st.x), fmt,
+                                               structParts(stamSet.sys(), stamSet.parts(), st.x, opt.box), fmt,
                                                std::format("StaM conformation sample {}", r.stam), fb);
         fallback += fb;
       }
       bool fb = false;
       poseFiles[k] = od::writeStructure(dir + std::format("/pose_{:04}", pose[k]),
-                                        structParts(mob.sys(), mob.parts(), rows[k].world), fmt,
+                                        structParts(mob.sys(), mob.parts(), rows[k].world, opt.box), fmt,
                                         std::format("{} pose {} (StaM sample {}, MobM sample {}) E_9b {:.3f}", mob.name(),
                                                     pose[k], r.stam, r.mobm, rows[k].e9b),
                                         fb);
@@ -961,12 +969,12 @@ void writeTopSnapshot(const std::string& dir, const ConfSet& stamSet, const std:
           stamDone[r.stam] = true;
           const auto& sa = stamSet.sample(r.stam).angles;
           od::writeStructure(d + std::format("/stam_{}", r.stam),
-                             structParts(stamSet.sys(), stamSet.parts(), stamSet.sys().coordinates(std::span<const float>(sa))),
+                             structParts(stamSet.sys(), stamSet.parts(), stamSet.sys().coordinates(std::span<const float>(sa)), opt.box),
                              fmt, std::format("StaM conformation sample {}", r.stam), fb);
         }
         const auto y = mob.sys().coordinates(std::span<const float>(r.s.angles));
         files = joinNames(od::writeStructure(d + std::format("/top_{:04}", k + 1),
-                                             structParts(mob.sys(), mob.parts(), od::dockWorld(y, r.s)), fmt,
+                                             structParts(mob.sys(), mob.parts(), od::dockWorld(y, r.s), opt.box), fmt,
                                              std::format("{} topSampleSet {} (StaM sample {}, MobM sample {}) E {:.3f}",
                                                          mob.name(), k + 1, r.stam, r.mobm, r.rank() + shift),
                                              fb));
@@ -997,6 +1005,31 @@ void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::u
                           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
 }
 
+// Automatic box (spec 3.3): the grids of one StaM conformation (type maps of the MobM probe
+// types, electrostatic, desolvation and distance grid, float) must fit in the free host memory
+// and in the free memory of each device.
+void checkGridMemory(const od::GridGeometry& geom, std::size_t probeTypes, const od::Options& opt, bool gpu) {
+  const std::size_t need = geom.size() * (probeTypes + 3) * sizeof(float);
+  const auto fail = [&](const std::string& where, std::size_t avail) {
+    od::fail("the automatic docking box (box.mode = {}; size {:.1f} x {:.1f} x {:.1f} Å, {} x {} x {} = {} grid points, "
+             "{} maps) needs {} MiB for the grids of one StaM conformation, more than the {} ({} MiB); increase "
+             "grid.spacing or use box.mode = manual with a smaller box.size",
+             opt.boxMode, opt.box.size[0], opt.box.size[1], opt.box.size[2], geom.n[0], geom.n[1], geom.n[2], geom.size(),
+             probeTypes + 3, need >> 20, where, avail >> 20);
+  };
+  const od::HostMemLimit lim = od::hostMemLimit(opt.memHostLimit);
+  const std::size_t resident = od::residentBytes();
+  const std::size_t host = lim.bytes > resident ? lim.bytes - resident : 0;
+  if (lim.bytes > 0 && need > host) fail(std::format("free host memory of memory.hostLimit ({})", lim.source), host);
+#ifdef OD_HAVE_CUDA
+  if (gpu)
+    for (int dev : opt.gpuDevices)
+      if (const std::size_t f = od::gpuFreeMem(dev); need > f) fail(std::format("free memory of GPU {}", dev), f);
+#else
+  (void)gpu;
+#endif
+}
+
 // gpu.dock9bStamNum = auto (spec 15.1.16): L2poss of a window per pose evaluated at the same time on the GPU.
 constexpr long long kWindowPosesPerResident = 48;
 // posm2_fft: most StaM conformations whose translations are found together (spec 15.1.22).
@@ -1009,7 +1042,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   for (const auto& m : mobSets)
     for (od::Ad4Type t : m->sys().typing(0).type)
       if (t != od::Ad4Type::Merged && std::find(probe.begin(), probe.end(), t) == probe.end()) probe.push_back(t);
-  const od::GridGeometry geom = od::boxGrid(*opt.boxCenter, *opt.boxSize, opt.gridSpacing);
+  const od::GridGeometry geom = od::boxGrid(opt.box.center, opt.box.size, opt.gridSpacing);
+  if (opt.boxMode != "manual") checkGridMemory(geom, probe.size(), opt, gpu);
   {
     const int level = od::hopfLevelForStep(opt.rotStep);
     od::logInfo(std::format("9b grids: {} x {} x {} points, spacing {} Å; orientations: Hopf level {}, {} "
@@ -2013,6 +2047,118 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   return opt;
 }
 
+std::string vecText(const od::Vec3& v) { return std::format("{:.3f}, {:.3f}, {:.3f}", v[0], v[1], v[2]); }
+
+// Settings of the MobMs for box.mobmRadius = sampled / max (spec 3.3): from --molConfig when it is
+// valid for them, otherwise from their default configuration; nullopt for a MobM without either.
+std::vector<std::optional<od::MolSettings>> boxMobmSettings(const od::Options& opt, const std::vector<od::Molecule>& mobs,
+                                                            od::MolConfig& cfgOut) {
+  std::vector<od::Topology> topo;
+  for (const auto& m : mobs) {
+    topo.push_back(od::analyzeTopology(m, {}));
+    od::assignDssp({&m}, {&topo.back()});
+  }
+  std::vector<od::MolInput> in;
+  for (std::size_t i = 0; i < mobs.size(); ++i) in.push_back({&mobs[i], &topo[i]});
+  std::vector<std::optional<od::MolSettings>> out(mobs.size());
+  std::vector<std::string> errors;
+  if (!opt.molConfig.empty())
+    if (auto cfg = od::readMolConfig(opt.molConfig, in, {}, errors, true)) {
+      for (std::size_t i = 0; i < mobs.size(); ++i) out[i] = std::move(cfg->molecules[i]);
+      cfg->molecules.clear();
+      cfgOut = std::move(*cfg);
+      return out;
+    }
+  bool haveCfg = false;
+  for (std::size_t i = 0; i < mobs.size(); ++i) {
+    errors.clear();
+    if (auto cfg = od::parseMolConfig(od::defaultMolConfigText({in[i]}), {in[i]}, {}, errors)) {
+      out[i] = std::move(cfg->molecules[0]);
+      if (!haveCfg) {
+        cfg->molecules.clear();
+        cfgOut = std::move(*cfg);
+        haveCfg = true;
+      }
+    }
+  }
+  return out;
+}
+
+// Docking box of the run (spec 3.3). Automatic modes: from the StaM heavy atoms and the MobM radii.
+od::BoxFrame resolveBox(const od::Options& opt, const std::vector<od::Molecule>& sta, const std::vector<od::Molecule>& mobs,
+                        std::uint64_t seed) {
+  od::BoxFrame b;
+  if (opt.boxMode == "manual") {
+    b.center = *opt.boxCenter;
+    b.size = *opt.boxSize;
+    od::logInfo(std::format("Docking box (box.mode = manual): center {} Å (input coordinates), size {} Å (along the input axes)",
+                            vecText(b.center), vecText(b.size)));
+    return b;
+  }
+  if (opt.boxCenter)
+    od::logWarn(std::format("box.center is given with box.mode = {}: it replaces the computed center", opt.boxMode));
+  if (opt.boxSize)
+    od::logWarn(std::format("box.size is given with box.mode = {}: it replaces the computed size", opt.boxMode));
+  const auto t0 = std::chrono::steady_clock::now();
+  double rmax = 0;
+  std::string rInfo;
+  {
+    od::MolConfig cfg;
+    std::vector<std::optional<od::MolSettings>> settings;
+    if (opt.boxMobmRadius != "input") settings = boxMobmSettings(opt, mobs, cfg);
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+      const od::Molecule& m = mobs[i];
+      const std::vector<od::Vec3> heavy = od::heavyCoords(m);
+      double r = od::radiusOf(heavy);
+      std::string how = "input conformation";
+      if (opt.boxMobmRadius != "input" && !settings[i]) {
+        od::logWarn(std::format("{}: no valid molecule configuration for box.mobmRadius = {}; the radius of the input "
+                                "conformation is used",
+                                m.id, opt.boxMobmRadius));
+      } else if (opt.boxMobmRadius == "max") {
+        r = od::mobmRadiusMax(m, settings[i]->tree);
+        how = std::format("upper bound, {} rotatable torsions", settings[i]->tree.torsions.size());
+      } else if (opt.boxMobmRadius == "sampled") {
+        const od::EnergySystem sys({{&m, &settings[i]->tree}}, energyParams(opt));
+        od::Csgm1GroupSampler smp;
+        smp.add(od::Csgm1Sampler(m, *settings[i], cfg, {opt.mobmCsgm.csgm1AngleStep, opt.mobmCsgm.ramaFloor}));
+        // Random streams of the box samples, apart from those of 9a.
+        const od::SampledRadius s = od::mobmRadiusSampled(m, sys, smp, opt.boxMobmSampleNum, seed, (1ULL << 62) + i);
+        r = s.radius;
+        how = sys.torsionCount() == 0 ? std::string("no rotatable torsions")
+                                      : std::format("input and {} of {} csgm1 samples without clashes", s.accepted,
+                                                    opt.boxMobmSampleNum);
+      }
+      od::logInfo(std::format("  box: MobM {:<40} radius {:.3f} Å ({})", m.id, r, how));
+      rmax = std::max(rmax, r);
+    }
+  }
+  std::vector<od::Vec3> heavy;
+  for (const auto& m : sta) {
+    const auto h = od::heavyCoords(m);
+    heavy.insert(heavy.end(), h.begin(), h.end());
+  }
+  od::AutoBoxParams ap;
+  ap.stamMargin = opt.boxStamMargin;
+  ap.mobmRadius = rmax;
+  ap.autoRotate = opt.boxAutoRotate;
+  ap.center = opt.boxCenter;
+  ap.size = opt.boxSize;
+  b = od::autoBox(heavy, ap);
+  const char* axes = b.rotated ? "box axes" : "input axes";
+  od::logInfo(std::format("Docking box (box.mode = {}, box.autoRotate = {}; r_max {:.3f} Å, box.stamMargin {} Å): "
+                          "center {} Å (input coordinates, {}), size {} Å (along the {}, {})  {:.2f} s",
+                          opt.boxMode, opt.boxAutoRotate ? "true" : "false", rmax, opt.boxStamMargin,
+                          vecText(b.toInput(b.center)), opt.boxCenter ? "given" : "computed", vecText(b.size), axes,
+                          opt.boxSize ? "given" : "computed",
+                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+  if (b.rotated)
+    od::logInfo(std::format("  box axes in input coordinates: x' ({}), y' ({}), z' ({}); the molecules are turned to "
+                            "them internally, output coordinates are in the input frame",
+                            vecText(b.axes[0]), vecText(b.axes[1]), vecText(b.axes[2])));
+  return b;
+}
+
 int run(int argc, char** argv) {
   od::Options opt = od::parseCommandLine(argc, argv);
   if (opt.showHelp) {
@@ -2036,6 +2182,23 @@ int run(int argc, char** argv) {
   for (const auto& f : opt.ccd) ccd.addFile(f);
 
   auto sta = od::loadMolecules(opt.stamFile, od::Role::StaM, ccd);
+  std::vector<od::Molecule> mobs;
+  for (const auto& f : opt.mobmFiles) {
+    auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
+    if (mob.size() != 1) od::fail("{}: --mobmFiles file must contain exactly one molecule, found {}", f, mob.size());
+    mobs.push_back(std::move(mob.front()));
+  }
+  // Random seeds fit in a TOML integer (63 bits).
+  const std::uint64_t seed =
+      opt.seed ? *opt.seed
+               : ((static_cast<std::uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}()) >> 1;
+  od::logInfo(std::format("seed {}", seed));
+  opt.seed = seed;
+  opt.box = resolveBox(opt, sta, mobs, seed);
+  if (opt.box.rotated)
+    for (auto* v : {&sta, &mobs})
+      for (auto& m : *v)
+        for (auto& a : m.atoms) a.xyz = opt.box.toBox(a.xyz);
   od::logInfo(std::format("StaM group from {}: {} molecule(s)", opt.stamFile, sta.size()));
   std::vector<od::Topology> staTopo;
   for (const auto& m : sta) {
@@ -2052,17 +2215,13 @@ int run(int argc, char** argv) {
     od::assignDssp(mols, topos);
     for (const auto& t : staTopo) printDssp(t);
   }
-  std::vector<od::Molecule> mobs;
   std::vector<od::Topology> mobTopo;
-  for (const auto& f : opt.mobmFiles) {
-    auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
-    if (mob.size() != 1) od::fail("{}: --mobmFiles file must contain exactly one molecule, found {}", f, mob.size());
-    od::logInfo(std::format("MobM from {}:", f));
-    printMolecule(mob.front());
-    od::Topology t = analyze(mob.front(), opt);
-    od::assignDssp({&mob.front()}, {&t});
+  for (std::size_t i = 0; i < mobs.size(); ++i) {
+    od::logInfo(std::format("MobM from {}:", opt.mobmFiles[i]));
+    printMolecule(mobs[i]);
+    od::Topology t = analyze(mobs[i], opt);
+    od::assignDssp({&mobs[i]}, {&t});
     printDssp(t);
-    mobs.push_back(std::move(mob.front()));
     mobTopo.push_back(std::move(t));
   }
 
@@ -2125,12 +2284,6 @@ int run(int argc, char** argv) {
   for (std::size_t i = 0; i < mobs.size(); ++i)
     printInputEnergy(mobs[i].id, {{&mobs[i], &cfg->molecules[sta.size() + i].tree}}, opt);
 
-  // Random seeds fit in a TOML integer (63 bits).
-  const std::uint64_t seed =
-      opt.seed ? *opt.seed
-               : ((static_cast<std::uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}()) >> 1;
-  od::logInfo(std::format("seed {}", seed));
-  opt.seed = seed;
   {
     std::filesystem::create_directories(opt.outPrefix);
     const std::string path = opt.outPrefix + "/params.used.toml";

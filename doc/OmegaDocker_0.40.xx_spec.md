@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.98 |
+| 文件版本 | 1.99 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -92,7 +92,24 @@
 
 ### 3.3 對接範圍
 
-- `box.center x,y,z`、`box.size x,y,z`（Å）。
+- `box.mode`（1.99）：
+  - `manual`（預設）：`box.center x,y,z`、`box.size x,y,z`（Å）必須有值；盒子的三軸為輸入座標軸（不旋轉）。
+  - `sidechainAuto`：自動決定盒子；StaM 的預設可轉動範圍依 4.4（盒子決定後再判斷）。
+  - `fixAuto`：自動決定盒子；StaM 的兩面角預設全部不可轉動（使用者仍可在分子設定檔中改為可轉動）。
+- 自動模式（`sidechainAuto`、`fixAuto`）：
+  - `box.center`／`box.size` 不必有值；有值時給警告，有值的項目（整個向量）取代計算結果。只給 `box.center` 時，每軸邊長 = 2 × StaM 重原子到該中心的最大投影距離 + 邊距（盒子以該中心對稱）。`box.center` 以輸入座標系解讀；`box.size` 以盒子座標軸解讀。
+  - 盒子的方向（`box.autoRotate`，預設 `true`）：以 StaM 重原子座標的主軸（PCA，依變異數由大到小；前兩軸絕對值最大的分量為正，第三軸為外積）為起點，再測試三輪旋轉（繞盒子三軸各 −3…3 步，步長 10°、2°、0.4°，每輪以目前最佳者為中心），取加完邊距後體積最小者（有 `box.center` 時以對稱的邊長計算體積）。`false`：三軸為輸入座標軸。
+  - 中心：旋轉後 StaM 重原子包圍盒的中點。
+  - 每軸邊長 = StaM 重原子沿該軸的投影範圍 + `box.stamMargin`（預設 4 Å，每軸總共）+ 2 × r_max。
+  - r_max：MobM 重原子中心（不加權平均）到最遠重原子的距離，取所有 MobM 中最大者；`box.mobmRadius`：
+    - `max`（預設）：拓撲上限。剛性片段為扭轉樹（4.7）中同一個最內層扭轉移動的原子；每個片段另含與相鄰片段之間扭轉的兩個鍵原子。任兩個重原子距離的上限 d_ub(i, j) 為沿片段樹路徑上固定距離之和，r_max = maxᵢ (1/N) Σⱼ d_ub(i, j)（|xᵢ − c| = |(1/N) Σⱼ (xᵢ − xⱼ)| ≤ (1/N) Σⱼ |xᵢ − xⱼ|，任何構型都不超過）。
+    - `sampled`：輸入構型與 `box.mobmSampleNum`（預設 1000）個 csgm1 樣本（無重原子碰撞，`energy.clashDistance`）中最大的半徑；第 i 個 MobM 的樣本 k 使用 `Rng(seed, 2⁶² + i, k)`（與 9a 的亂數流分開）。
+    - `input`：輸入構型。
+    - `max`／`sampled` 的扭轉樹與 csgm1 設定：取自 `--molConfig`（只讀 MobM，略過其他分子）；未指定或驗證失敗時用該 MobM 的預設設定檔內容；都無法使用時改用輸入構型並給警告。
+  - 執行紀錄寫出各 MobM 的半徑與來源、r_max、`box.center`（輸入座標系）與 `box.size`（盒子座標軸或輸入座標軸）的數值與來源（`computed`／`given`）、旋轉時盒子三軸在輸入座標系的方向。
+  - 旋轉時，所有分子在讀檔後立即轉到盒子座標系（中心為輸入座標的原點，不平移），之後的計算（拓撲、9a–9d）都在盒子座標系；輸出的結構座標一律轉回輸入座標系（StaM 不動的原子位置與輸入相同）。因座標的數值不同，結果與在輸入座標系計算的不逐位元相同。
+  - 盒子在讀檔後、拓撲分析前決定，各輪不變；`--resume` 時以相同的參數與輸入重新計算，得到相同的盒子。
+  - 一個 StaM 構型的網格（MobM 探針類型數 + 3 張 float 圖：各類型、靜電、去溶劑化、距離）超過可用的主機記憶體（`memory.hostLimit` 減常駐記憶體）或任一 GPU 的可用記憶體時報錯，寫出盒子大小、格點數與所需記憶體，提示加大 `grid.spacing` 或改用 `manual`（不另設上限參數）。
 - 能量網格與距離網格涵蓋此範圍。
 - posm1、posm2 只產生使 MobM 所有探針原子都在範圍內的 pos（8.4）；8.5 仍保留「超出範圍」檢查。
 
@@ -159,7 +176,7 @@
 - 分類依下列順序，取第一個符合者：金屬 → 芳香 → 環內 → 三鍵／共線（任一端的所有其他重原子鄰居與鍵的夾角 > 170°）→ 雙鍵 → 醯胺（C(=O)–N）→ 共振（其他 C(=X)–Y，X ∈ {O, S, N}，Y ∈ {N, O}）→ 對稱 → 單鍵。
 - 對稱基團：鍵的一端除另一端外，其餘鄰居（至少兩個，含氫）都是只連接該端的重原子，且元素與氫數相同。不依鍵級判斷，因此共振等價的基團（–COO⁻、–NO2、–SO3⁻、–PO3²⁻）也屬於此類；例如 Asp χ2、Glu χ3、C 端 ψ。
 
-**StaM 的範圍限制**：StaM 中，只有「任一重原子位於對接範圍外擴 `stamFlexMargin`（預設 4 Å）內」的殘基（無殘基資訊時以原子為單位），其兩面角才依上述規則預設可轉動；其餘預設不可轉動。使用者可在分子設定檔中修改。
+**StaM 的範圍限制**：StaM 中，只有「任一重原子位於對接範圍外擴 `stamFlexMargin`（預設 4 Å）內」的殘基（無殘基資訊時以原子為單位），其兩面角才依上述規則預設可轉動；其餘預設不可轉動。`box.mode = fixAuto` 時 StaM 的兩面角預設全部不可轉動（3.3）。使用者可在分子設定檔中修改。
 
 ### 4.5 環狀結構斷鍵
 
@@ -1615,7 +1632,12 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | `--resume` | 無 | 16 |
 | `seed` | `--seed` | 隨機（寫入執行紀錄與 `params.used.toml`） | 7.9 |
 | `ccd` | `--ccd` | `[]` | 3.1 |
-| `box.center`、`box.size` | `--box_center`、`--box_size` | 必填 | 3.3 |
+| `box.center`、`box.size` | `--box_center`、`--box_size` | `box.mode = manual` 時必填 | 3.3（自動模式：取代計算結果；`box.size` 沿盒子座標軸） |
+| `box.mode` | `--box_mode` | `manual` | 3.3（`manual`、`sidechainAuto`、`fixAuto`） |
+| `box.autoRotate` | `--box_autoRotate` | `true` | 3.3（自動模式：盒子三軸依 StaM 主軸旋轉到體積最小） |
+| `box.stamMargin` | `--box_stamMargin` | 4 Å | 3.3（≥ 0；每軸總共） |
+| `box.mobmRadius` | `--box_mobmRadius` | `max` | 3.3（`sampled`、`input`、`max`） |
+| `box.mobmSampleNum` | `--box_mobmSampleNum` | 1000 | 3.3（≥ 1；`box.mobmRadius = sampled`） |
 | `grid.spacing` | `--grid_spacing` | 0.375 Å | 8.1 |
 | `grid.mode` | `--grid_mode` | `auto`（依主鏈可動與否） | 8.1（`auto`、`full`、`flexres`、`delta`） |
 | `grid.deltaThreshold` | `--grid_deltaThreshold` | 1×10⁻⁴ | 8.1（kcal/mol；距離網格為 Å） |
@@ -2685,6 +2707,13 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 **(3) 第一個視窗的準備分給各裝置（未實作）**
 - RB4 posm3（Nsight Systems）：第一個視窗的準備 2.08 s 中，快速篩選的 kernel 在主要裝置 0.96 s，其餘為主機端（posm3 的配對與三點比對，已平行化）；第二個裝置在 2.95 s 開始對接。分給兩個裝置最多省約 0.5 s（約 1%），其他例子少於 0.2 s。收益小，未實作。
 
+### 15.1.38 自動決定盒子（1.99）
+
+- 實作：`src/box.hpp`、`src/box.cpp`（`BoxFrame`、`autoBox`、`principalAxes`、`mobmRadiusMax`、`mobmRadiusSampled`）；`src/main.cpp` 的 `resolveBox` 在讀檔後決定盒子並把分子轉到盒子座標系，`structParts` 輸出時轉回；`TopologyParams::stamAllFixed`（`fixAuto`）；`readMolConfig(..., ignoreOthers)` 與 `parseMolConfig`（半徑估計用的 MobM 設定）；網格記憶體檢查 `checkGridMemory`。
+- 例子 C（2KJJ、BTN，分子設定檔同 15.1.37）：`sidechainAuto`／`fixAuto` 的盒子 47.1 × 40.1 × 37.1 Å（r_max 6.709 Å，`max`；不旋轉時 `sampled` 6.296 Å），網格 127 × 109 × 101 點；決定盒子 0.01 s。輸出 StaM 在 loop 外的主鏈原子與輸入的最大差距 0.0000 Å（PDB 精度）。全部 3.43 s（manual 30 Å）→ 3.48 s。未指定 `--molConfig` 時，預設設定檔可轉動的兩面角：`sidechainAuto` 88、`fixAuto` 5（只有 MobM）。
+- BTN 的半徑：輸入 6.296、500 個 csgm1 樣本（354 個無碰撞）6.296、上限 6.709 Å；200 個樣本（含碰撞）都不超過上限。
+- 測試：`box: automatic box (spec 3.3)`（旋轉後體積小於不旋轉的一半、接近生成軸的體積、邊距、給定中心與大小）、`box: MobM radius (box.mobmRadius) and fixAuto`、`cli: automatic docking box (box.mode)`。
+
 ### 15.2 依賴套件
 
 | 用途 | 套件 | 形式 | 取得方式 | 授權 |
@@ -2962,7 +2991,6 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | F4 | 抽樣時考慮雙硫鍵的幾何 | csgm1 各兩面角獨立抽樣，Cys χ1 等隨機取值幾乎都把雙硫鍵拉開，之後才靠閉合修正。方向：抽樣時依雙硫鍵的常見構形（χ1、χ2、χ3、χss 的分布，或 CB–CB／CA–CA 距離）只抽能閉合的組合，或先抽一側再由幾何解出另一側 |
 | F5 | 同時調整多個兩面角的閉合方法 | RCD 是座標輪流下降，一次只調一個兩面角；耦合的組（例如 2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11，20 個兩面角）多數會收斂，但需數千至數萬次更新，不是停滯（`rcdStallTolerance` 無法加速，7.11.1 嘗試 5）。方向：以閉合偏差對兩面角的 Jacobian 做最小平方法（Gauss–Newton／Levenberg–Marquardt，或 damped least squares），每步同時更新組內所有兩面角；可保留 RCD 作為起始或後備 |
 | F6 | 以 Tensor Core 加總 block 內的能量與梯度（AutoDock-GPU 的 `TENSOR=ON`） | 加總為 double 的 warp shuffle；上限估計每次評估只快 2–3%（15.1.32）。先在完整的標準測試（17.3）之後，測試以 float 加總對結果（排名、第 1 名能量、RMSD）的影響，再決定是否實作 |
-| F7 | 自動決定盒子（`box.mode`） | 只能由使用者指定 `box.center`、`box.size`。已決定的設計（1.98，排在不再進行效能最佳化之後實作）：<br>• `box.mode`：`manual`（預設；`box.center`／`box.size` 必須有值，不旋轉，與目前相同）、`sidechainAuto`（自動決定，StaM 的可轉動範圍依 4.4）、`fixAuto`（自動決定，StaM 預設全部不可轉動，使用者仍可在分子設定檔中改為可轉動）。<br>• 自動模式的 `box.center`／`box.size` 不必有值；有值時給警告訊息，有值的項目（整個向量）覆蓋自動計算的結果。只給 `box.center` 時，`box.size` 以該中心對稱地包住 StaM 再加邊距。`box.autoRotate = true` 時，使用者的 `box.center` 以輸入座標系解讀、`box.size` 以盒子座標軸解讀。無論 `box.autoRotate` 的值，都在執行紀錄寫出 `box.center`、`box.size` 的數值與解讀方式（座標系）。<br>• `box.autoRotate`（預設 `true`）：內部在盒子座標系計算，輸出座標一律轉回輸入座標系（StaM 的輸出位置不變）。方向：以 StaM 重原子座標的主軸分析（PCA）對齊三軸，再在其附近測試一組旋轉，選加完所有邊距後盒子體積最小者。`false`：三軸為輸入座標軸。<br>• 中心：旋轉後 StaM 重原子包圍盒的中點。<br>• 每軸邊長 = StaM 重原子沿該軸的投影範圍 + `box.stamMargin`（預設 4 Å，每軸總共）+ 2 × r_max。<br>• r_max：MobM 重原子中心到最遠重原子的距離，取所有 MobM 中最大者；`box.mobmRadius` 為 `sampled`（以 csgm1 加碰撞檢查產生 `box.mobmSampleNum` 個構型估計）、`input`（輸入構型）、`max`（預設，拓撲上限）。`max`：先以剛性片段之間路徑上的固定距離相加，得到任兩個重原子距離的上限 d_ub(i, j)，r_max ≤ maxᵢ (1/N) Σⱼ d_ub(i, j)（任何構型都不超過）。<br>• 盒子在第 1 輪之前決定，之後各輪不變（網格快取與檢查點依賴它）。<br>• 盒子的格點與網格所需記憶體超過可用的主機或裝置記憶體時報錯，寫出盒子大小、格點數與所需記憶體，並提示可加大 `grid.spacing` 或改用 `manual`（不另設 `box.maxSize`）。 |
 
 ---
 
@@ -3069,3 +3097,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.96 | 2026-10-26 | `cpu.threadNum` 多於可用 CPU 數（affinity mask，cgroup CPU 配額為上限）時報錯並寫出可用 CPU 數與來源；auto 也以可用 CPU 數為上限（13）；多個 GPU：一輪最後的最小化由空閒的裝置接手（`DockStealHub`、`stealDock`），posm2_fft 的平移分給各裝置，posm3／posm4 配對與三點比對平行化；修正接手時視窗佇列的競爭（15.1.35） |
 | 1.97 | 2026-10-26 | GPU posm2_fft 只轉換需要的 z 平面（[z][定向][y][x] 排列，2D 轉換加沿 z 的 1D；正向只轉探針原子觸及的平面、逆向只轉平移範圍的平面，8／4／2／1 個平面的 plan 精確覆蓋）；散佈改為每個（定向、z 平面）一個執行緒，不用 `atomicAdd`，多個 GPU 分攤時與單一 GPU 逐位元相同；單卡平移時間的量測（15.1.5、15.1.36） |
 | 1.98 | 2026-10-27 | 多個 GPU：9a 的 GPU RCD 分給各裝置（slot 輪流分配，結果與單一裝置逐位元相同），C 的 9a 2.84 → 2.17 s；單一 GPU 視窗準備與對接重疊、第一個視窗的準備分給各裝置的量測（無收益或約 1%，未實作）（15.1.37）；自動決定盒子的設計（18，F7） |
+| 1.99 | 2026-10-27 | 自動決定盒子：`box.mode`（`manual`、`sidechainAuto`、`fixAuto`）、`box.autoRotate`、`box.stamMargin`、`box.mobmRadius`（`max` 拓撲上限、`sampled`、`input`）、`box.mobmSampleNum`；旋轉時內部在盒子座標系計算、輸出轉回輸入座標系；網格超過可用記憶體時報錯（3.3、4.4、14、15.1.38）；18 移除 F7 |

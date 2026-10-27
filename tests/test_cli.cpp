@@ -93,6 +93,40 @@ TEST_CASE("cli: required options and values") {
   CHECK(t.stamFlexMargin == doctest::Approx(6.5));
 }
 
+TEST_CASE("cli: automatic docking box (box.mode)") {
+  const std::vector<const char*> base{"--stamFile=r.cif", "--mobmFiles=a.sdf", "--outPrefix=o", "--dock9b_posm=posm1"};
+  auto with = [&](std::vector<const char*> extra) {
+    auto a = base;
+    a.insert(a.end(), extra.begin(), extra.end());
+    return parse(a);
+  };
+  const auto d = with({});
+  CHECK(d.boxMode == "manual");
+  CHECK(d.boxAutoRotate);
+  CHECK(d.boxStamMargin == 4.0);
+  CHECK(d.boxMobmRadius == "max");
+  CHECK(d.boxMobmSampleNum == 1000);
+  CHECK_THROWS_AS(od::validateOptions(d), od::Error);  // manual: box.center and box.size required
+  CHECK_THROWS_AS(od::validateOptions(with({"--box_center=0,0,0"})), od::Error);
+  for (const char* m : {"--box_mode=sidechainAuto", "--box_mode=fixAuto"}) {
+    CHECK_NOTHROW(od::validateOptions(with({m})));
+    CHECK_NOTHROW(od::validateOptions(with({m, "--box_center=1,2,3"})));
+    CHECK_THROWS_AS(od::validateOptions(with({m, "--box_size=10,0,10"})), od::Error);
+  }
+  const auto o = with({"--box_mode=fixAuto", "--box_autoRotate=false", "--box_stamMargin=6", "--box_mobmRadius=sampled",
+                       "--box_mobmSampleNum=50"});
+  CHECK(o.boxMode == "fixAuto");
+  CHECK_FALSE(o.boxAutoRotate);
+  CHECK(o.boxStamMargin == 6.0);
+  CHECK(o.boxMobmRadius == "sampled");
+  CHECK(o.boxMobmSampleNum == 50);
+  CHECK_THROWS_AS(parse({"--box_mode=auto"}), od::Error);
+  CHECK_THROWS_AS(parse({"--box_mobmRadius=sample"}), od::Error);
+  CHECK_THROWS_AS(od::validateOptions(with({"--box_mode=fixAuto", "--box_stamMargin=-1"})), od::Error);
+  CHECK_THROWS_AS(od::validateOptions(with({"--box_mode=fixAuto", "--box_mobmSampleNum=0"})), od::Error);
+  CHECK(od::paramsText(o).find("mode = \"fixAuto\"") != std::string::npos);
+}
+
 TEST_CASE("cli: --resume") {
   auto o = parse({"--resume=/tmp/run1", "--dock9c_maxRound=9"});
   CHECK(o.resume == "/tmp/run1");

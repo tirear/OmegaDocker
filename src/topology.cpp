@@ -412,9 +412,9 @@ Topology analyzeTopology(const Molecule& m, const TopologyParams& p) {
   }
 
   // StaM flexible range (spec 4.4).
-  const bool restrict = m.role == Role::StaM && p.box.has_value();
-  std::vector<bool> atomIn(m.atoms.size(), true), resIn(m.residues.size(), !restrict);
-  if (restrict) {
+  const bool restrict = m.role == Role::StaM && (p.box.has_value() || p.stamAllFixed);
+  std::vector<bool> atomIn(m.atoms.size(), !restrict), resIn(m.residues.size(), !restrict);
+  if (restrict && !p.stamAllFixed) {
     for (std::size_t i = 0; i < m.atoms.size(); ++i) {
       atomIn[i] = g.heavy(static_cast<int>(i)) && insideBox(m.atoms[i].xyz, *p.box, p.stamFlexMargin);
       if (atomIn[i] && m.atoms[i].residue >= 0) resIn[m.atoms[i].residue] = true;

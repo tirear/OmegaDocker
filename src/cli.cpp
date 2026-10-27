@@ -178,7 +178,7 @@ Param boolean(std::string key, std::string def, std::string help, Acc acc) {
 
 template <typename Acc>
 Param vec3(std::string key, std::string help, Acc acc) {
-  return {std::move(key), Type::RealArr, "x,y,z", "required", std::move(help),
+  return {std::move(key), Type::RealArr, "x,y,z", "required with box.mode = manual", std::move(help),
           [acc](Options& o, const Tokens& t) {
             if (t.size() != 3) fail("expected 3 numbers x,y,z");
             acc(o) = Vec3{toReal(t[0]), toReal(t[1]), toReal(t[2])};
@@ -310,8 +310,36 @@ const std::vector<Param>& params() {
                  [](Options& o, const Tokens& v) { o.ccd = v; },
                  [](const Options& o) -> std::optional<Tokens> { return o.ccd; }});
 
-    t.push_back(vec3("box.center", "Docking box center (Å)", OD_ACC(boxCenter)));
-    t.push_back(vec3("box.size", "Docking box size (Å)", OD_ACC(boxSize)));
+    t.push_back(vec3("box.center", "Docking box center (Å, input coordinates; automatic box: replaces the computed center)", OD_ACC(boxCenter)));
+    t.push_back(vec3("box.size", "Docking box size (Å; automatic box: along the box axes, replaces the computed size)", OD_ACC(boxSize)));
+    t.push_back({"box.mode", Type::Str, "manual|sidechainAuto|fixAuto", "manual",
+                 "Docking box: manual (box.center and box.size), or determined from the StaM group and the MobM radii "
+                 "with StaM torsions rotatable by default as spec 4.4 (sidechainAuto) or none (fixAuto)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "manual" && s != "sidechainAuto" && s != "fixAuto")
+                     fail("expected manual, sidechainAuto or fixAuto but got '{}'", s);
+                   o.boxMode = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.boxMode}; }});
+    t.push_back(boolean("box.autoRotate", "true",
+                        "Automatic box: box axes along the StaM principal axes turned to the smallest volume "
+                        "(output coordinates stay in the input frame)",
+                        OD_ACC(boxAutoRotate)));
+    t.push_back(real("box.stamMargin", "<dist>", "4", "Automatic box: added to the StaM extent per axis in total (Å)",
+                     OD_ACC(boxStamMargin)));
+    t.push_back({"box.mobmRadius", Type::Str, "sampled|input|max", "max",
+                 "Automatic box: MobM radius r_max (2 r_max added per axis) from csgm1 samples, the input conformation, "
+                 "or the upper bound over all conformations",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "sampled" && s != "input" && s != "max")
+                     fail("expected sampled, input or max but got '{}'", s);
+                   o.boxMobmRadius = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.boxMobmRadius}; }});
+    t.push_back(integer("box.mobmSampleNum", "<n>", "1000", "Automatic box, box.mobmRadius = sampled: csgm1 samples per MobM",
+                        OD_ACC(boxMobmSampleNum)));
 
     t.push_back(real("grid.spacing", "<dist>", "0.375", "9b: spacing of the energy and distance grids (Å)", OD_ACC(gridSpacing)));
     t.push_back({"grid.mode", Type::Str, "auto|full|flexres|delta", "auto",
@@ -859,16 +887,21 @@ void validateOptions(const Options& o) {
   if (o.stamFile.empty()) fail("--stamFile is required");
   if (o.mobmFiles.empty()) fail("At least one --mobmFiles is required");
   if (o.outPrefix.empty()) fail("--outPrefix is required");
-  if (!o.boxCenter) fail("{} is required", nm("box.center"));
-  if (!o.boxSize) fail("{} is required", nm("box.size"));
-  for (double v : *o.boxSize)
-    if (!(v > 0)) fail("{}: all components must be > 0", nm("box.size"));
+  if (o.boxMode == "manual") {
+    if (!o.boxCenter) fail("{} is required with {} = manual", nm("box.center"), nm("box.mode"));
+    if (!o.boxSize) fail("{} is required with {} = manual", nm("box.size"), nm("box.mode"));
+  }
+  if (o.boxSize)
+    for (double v : *o.boxSize)
+      if (!(v > 0)) fail("{}: all components must be > 0", nm("box.size"));
   if (o.posm.empty()) fail("{} is required", nm("dock9b.posm"));
   auto check = [](bool ok, const std::string& key, const std::string& rule) {
     if (!ok) fail("{} must be {}", nm(key), rule);
   };
   check(o.omegaTolerance >= 0 && o.omegaTolerance <= 90, "topology.omegaTolerance", "within [0, 90]");
   check(o.stamFlexMargin >= 0, "stam.flexMargin", ">= 0");
+  check(o.boxStamMargin >= 0, "box.stamMargin", ">= 0");
+  check(o.boxMobmSampleNum >= 1, "box.mobmSampleNum", ">= 1");
   check(o.maxBreakDist > 0, "topology.maxBreakDist", "> 0");
   check(o.reachProtein > 0 && o.reachNucleic > 0, "topology.reachPerRes", "> 0 (both values)");
   check(o.closureG > 0, "energy.closureG", "> 0");

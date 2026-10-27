@@ -79,8 +79,13 @@ std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vecto
 
 // Reads and validates a configuration. Returns nothing and fills errors
 // ("line <n>: <field>: <reason>") when the file is not valid. base holds the
-// topology parameters of the run; broken bonds come from the file.
+// topology parameters of the run; broken bonds come from the file. ignoreOthers:
+// molecules of the file that are not in mols are skipped instead of reported.
 std::optional<MolConfig> readMolConfig(const std::string& path, const std::vector<MolInput>& mols,
-                                       const TopologyParams& base, std::vector<std::string>& errors);
+                                       const TopologyParams& base, std::vector<std::string>& errors,
+                                       bool ignoreOthers = false);
+// The same for a configuration text (e.g. defaultMolConfigText).
+std::optional<MolConfig> parseMolConfig(const std::string& text, const std::vector<MolInput>& mols,
+                                        const TopologyParams& base, std::vector<std::string>& errors);
 
 }  // namespace od

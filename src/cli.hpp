@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "feparams.hpp"
+#include "box.hpp"
 #include "molecule.hpp"
 
 namespace od {
@@ -63,6 +64,11 @@ struct Options {
   std::vector<std::string> ccd;
   std::optional<Vec3> boxCenter;
   std::optional<Vec3> boxSize;
+  std::string boxMode = "manual";       // manual | sidechainAuto | fixAuto (spec 3.3)
+  bool boxAutoRotate = true;
+  double boxStamMargin = 4.0;
+  std::string boxMobmRadius = "max";    // sampled | input | max
+  int boxMobmSampleNum = 1000;
   bool outPdb = true;
   bool outCif = false;
   bool outSdf = false;
@@ -149,6 +155,9 @@ struct Options {
 
   bool showHelp = false;
   bool showVersion = false;
+
+  // Docking box of the run in box coordinates (spec 3.3); set by the program, not a parameter.
+  BoxFrame box;
 };
 
 // Parses argv and reads --paramFile; throws od::Error on invalid input (all

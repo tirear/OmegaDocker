@@ -84,6 +84,8 @@ struct TopologyParams {
   // residue information, at atoms) within the box extended by stamFlexMargin.
   std::optional<Box> box;
   double stamFlexMargin = 4.0;
+  // StaM (box.mode = fixAuto, spec 3.3): no torsion is rotatable by default.
+  bool stamAllFixed = false;
   // StaM (spec 4.7): false keeps the backbone of fixed residues in place; with
   // false, torsions with backbone atoms on both sides are not rotatable by default.
   bool stamFixedResMovable = false;
