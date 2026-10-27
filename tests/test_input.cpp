@@ -6402,6 +6402,8 @@ TEST_CASE("protonation: PROPKA 3 port, pKa rules") {
       {"Nc1ccn(C2CCCO2)c(=O)n1", "Nc1ccn(C2CCCO2)c(=O)n1", "Nc1ccn(C2CCCO2)c(=O)[nH+]1"},  // cytosine N3 4.2
       {"CC(C)NCC(O)COc1cccc2ccccc12", "CC(C)[NH2+]CC(O)COc1cccc2ccccc12", "CC(C)[NH2+]CC(O)COc1cccc2ccccc12"},  // propranolol
       {"NCC(=O)O", "[NH3+]CC(=O)[O-]", "[NH3+]CC(=O)[O-]"},         // glycine 2.3 / 9.6
+      {"CC(=O)NC(CCO)C(=O)O", "CC(=O)NC(CCO)C(=O)[O-]", "CC(=O)NC(CCO)C(=O)[O-]"},  // N-acyl alpha-amino acid 3.6
+      {"CC(=O)NCCC(=O)O", "CC(=O)NCCC(=O)[O-]", "CC(=O)NCCC(=O)O"},  // beta: carboxylic acid 4.8
       {"C[N+](C)(C)CC(=O)[O-]", "C[N+](C)(C)CC(=O)[O-]", "C[N+](C)(C)CC(=O)[O-]"}};  // betaine: quaternary N kept
   for (const auto& [in, at74, at4] : cases) {
     CHECK(prot(in, 7.4) == canon(at74));

@@ -50,6 +50,7 @@ const std::vector<Rule>& rules() {
       {"tetrazole", "[nH1:1]1nnnc1", Kind::Acid, {4.9}, false},  // tetrazole 4.9
       {"tetrazole", "[nH1:1]1nncn1", Kind::Acid, {4.9}, false},  // tetrazole 4.9
       {"alpha-amino acid carboxyl", "[OX2H1:1][CX3](=O)[CX4][$([NX3;!$(N[C,S]=[O,S,N]);!$(N[SX4](=O)=O);!$(Na)]),$([NX4+])]", Kind::Acid, {2.3}, false},  // glycine 2.3
+      {"N-acyl alpha-amino acid carboxyl", "[OX2H1:1][CX3](=O)[CX4][NX3][CX3]=O", Kind::Acid, {3.6}, false},  // N-acetylglycine 3.6
       {"aromatic carboxylic acid", "[OX2H1:1][CX3](=O)a", Kind::Acid, {4.2}, false},  // benzoic acid 4.2
       {"carboxylic acid", "[OX2H1:1][CX3]=O", Kind::Acid, {4.8}, false},  // acetic acid 4.8
       {"cyclic 1,3-dione enol", "[OX2H1:1][CX3;R]=[CX3;R][CX3;R]=O", Kind::Acid, {5.0}, false},  // 1,3-cyclohexanedione 5.3, ascorbic acid 4.1

@@ -152,13 +152,12 @@ std::unique_ptr<RDKit::RWMol> heavyMol(const RawStructure& s, const std::vector<
 // ---------- hydrogen placement and optimization ----------
 
 struct AtomView {
-  int idx;
-  Vec3 p;
-  int parent;  // hydrogens
-  bool polarH, acceptor, acceptorOnly;
-  double radius;
-  Vec3 pp{};   // hydrogens: parent position in the same state
-  bool donorHeavy = false;  // N / O carrying hydrogens
+  int idx = -1;
+  Vec3 p{};
+  int parent = -1;  // hydrogens
+  bool hydrogen = false, polarH = false, acceptor = false, charged = false, metal = false;
+  double radius = 0;
+  Vec3 pp{};        // hydrogens: parent position in the same state
 };
 
 struct GroupState {
@@ -292,16 +291,25 @@ private:
   std::vector<Vec3> xyz_;
 };
 
-// Score units: one ideal hydrogen bond = -1. Overlaps up to 0.4 Å cost kSmallOverlap per Å;
-// larger overlaps are steric clashes. Flips must gain more than kFlipBias to be applied.
-constexpr double kSmallOverlap = 2.0;
-constexpr double kFlipBias = 1.0;
+// Contact-dot scoring of hydrogen positions and flips (Word et al. 1999, J. Mol. Biol. 285:1711 and
+// 285:1735; parameter values as the documented reduce defaults). Dots on the van der Waals surface of the
+// moving atoms, kDotDensity per Å^2; each dot scores the atom with the smallest gap (dot to its surface).
+// Score units: dot scores / kDotDensity (Å^2); energies are minus scores.
+constexpr double kDotDensity = 16.0;
+constexpr double kGapScale = 0.25;        // contact (gap >= 0): exp(-(gap / kGapScale)^2)
+constexpr double kBumpWeight = 10.0;      // overlap: -kBumpWeight x overlap
+constexpr double kHbWeight = 4.0;         // polar H - acceptor overlap: +kHbWeight x overlap
+constexpr double kHbCut = 0.6;            // hydrogen-bond overlap beyond which the excess bumps
+constexpr double kHbChargedCut = 0.8;     // the same for a charged donor and a charged acceptor
+constexpr double kContactWindow = 0.125;  // dots score atoms with gap below this
+constexpr double kMetalBump = 0.865;      // hydrogens bump metals at radius plus this
+constexpr int kExcludeBonds = 3;          // atom pairs within this many bonds are not scored
+constexpr double kFlipBias = 1.5;         // bias against flipped orientations
 
 struct Scorer {
   const RawStructure& s;
   const std::vector<std::vector<int>>& adj;
-  std::vector<int> hCountFixed;  // hydrogens not in any movable set, per heavy atom
-  std::vector<std::vector<std::pair<int, int>>> near3;  // heavy atoms within 3 bonds: (atom, bonds)
+  std::vector<std::vector<std::pair<int, int>>> near3;  // heavy atoms within kExcludeBonds bonds: (atom, bonds)
 
   Scorer(const RawStructure& st, const std::vector<std::vector<int>>& a) : s(st), adj(a) {
     const int n = static_cast<int>(s.atoms.size());
@@ -313,7 +321,7 @@ struct Scorer {
       for (std::size_t f = 0; f < front.size(); ++f) {
         const auto [x, d] = front[f];
         near3[i].push_back({x, d});
-        if (d == 3) continue;
+        if (d == kExcludeBonds) continue;
         for (int y : adj[x])
           if (s.atoms[y].atomicNum != 1 && seen.insert(y).second) front.push_back({y, d + 1});
       }
@@ -324,49 +332,56 @@ struct Scorer {
       if (x == b) return d;
     return 99;
   }
-  // Bond separation (<= 3 excluded from scoring).
   bool excluded(const AtomView& a, const AtomView& b) const {
+    if (a.idx == b.idx) return true;
     const int pa = a.parent >= 0 ? a.parent : a.idx, pb = b.parent >= 0 ? b.parent : b.idx;
     const int extra = (a.parent >= 0) + (b.parent >= 0);
-    return heavyBonds(pa, pb) + extra <= 3;
+    return heavyBonds(pa, pb) + extra <= kExcludeBonds;
   }
-  double pair(const AtomView& a, const AtomView& b) const {
-    const double d = dist(a.p, b.p);
-    if (d > 4.5 || excluded(a, b)) return 0;
-    auto hb = [&](const AtomView& h, const AtomView& acc) {
-      if (d < 1.5) return 10.0 * (1.5 - d) * (1.5 - d);
-      const double f = d <= 2.2 ? 1.0 : d >= 2.8 ? 0.0 : (2.8 - d) / 0.6;
-      const Vec3 dh = sub(h.pp, h.p), ah = sub(acc.p, h.p);
-      const double c = dot(dh, ah) / (norm(dh) * norm(ah));
-      const double g = c < 0 ? -c : 0.0;
-      return -f * g;
-    };
-    if (a.polarH && b.acceptor) return hb(a, b);
-    if (b.polarH && a.acceptor) return hb(b, a);
-    double e = 0;
-    if (a.polarH && b.polarH && d < 2.2) e += 2.0 * (2.2 - d);
-    if ((a.polarH && b.donorHeavy && !b.acceptor && d < 2.6) || (b.polarH && a.donorHeavy && !a.acceptor && d < 2.6)) e += 2.6 - d;
-    if (a.acceptorOnly && b.acceptorOnly && d < 3.2) e += 3.2 - d;
-    const double ov = a.radius + b.radius - d;
-    if (ov > 0) e += kSmallOverlap * std::min(ov, 0.4);
-    if (ov > 0.4) e += 10.0 * (ov - 0.4) * (ov - 0.4);
-    return e;
+  // Dot of a against b: false when the gap is outside the window.
+  static bool dot(const AtomView& a, const Vec3& p, const AtomView& b, double& gap, double& score) {
+    const double rb = b.radius + (b.metal && a.hydrogen ? kMetalBump : 0.0);
+    gap = dist(p, b.p) - rb;
+    if (gap >= kContactWindow) return false;
+    if (gap >= 0) {
+      score = std::exp(-(gap / kGapScale) * (gap / kGapScale));
+      return true;
+    }
+    const double ov = -gap;
+    if ((a.polarH && b.acceptor) || (b.polarH && a.acceptor)) {
+      const double cut = a.charged && b.charged ? kHbChargedCut : kHbCut;
+      score = kHbWeight * std::min(ov, cut) - kBumpWeight * std::max(0.0, ov - cut);
+    } else {
+      score = -kBumpWeight * ov;
+    }
+    return true;
   }
 };
 
-
-double radiusOf(int z, bool polarH) {
+// Van der Waals radii with explicit hydrogens (Word et al. 1999); metals: ionic radii.
+double radiusOf(int z, bool polarH, int hyb, bool carbonyl) {
   switch (z) {
     case 1: return polarH ? 1.0 : 1.17;
-    case 6: return 1.75;
+    case 6: return hyb == 3 ? 1.70 : carbonyl ? 1.65 : 1.75;
     case 7: return 1.55;
     case 8: return 1.40;
     case 16: return 1.80;
     case 15: return 1.80;
+    case 34: return 1.90;
     case 9: return 1.30;
     case 17: return 1.77;
     case 35: return 1.95;
     case 53: return 2.10;
+    case 11: return 1.02;
+    case 12: return 0.72;
+    case 19: return 1.38;
+    case 20: return 1.00;
+    case 25: return 0.83;
+    case 26: return 0.74;
+    case 27: return 0.75;
+    case 28: return 0.69;
+    case 29: return 0.73;
+    case 30: return 0.74;
     default: return isMetal(z) ? 1.0 : 1.7;
   }
 }
@@ -958,21 +973,39 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
   std::vector<int> hOn(nAll, 0);  // hydrogens per heavy atom (current assignment)
   for (int i = 0; i < nAll; ++i)
     if (parentOf[i] >= 0) ++hOn[parentOf[i]];
+  // Charged groups: charged atoms and their resonance partners (O-C-O, N-C-N, His ND1 / NE2).
+  std::vector<bool> chargedAt(nAll, false), carbonylC(nAll, false);
+  for (int i = 0; i < nAll; ++i) {
+    const int z = s.atoms[i].atomicNum;
+    if (z == 6 && pl.hyb(i) == 2)
+      for (int x : pl.heavyNbrs(i))
+        if (s.atoms[x].atomicNum == 8 && pl.heavyNbrs(x).size() == 1) carbonylC[i] = true;
+    if (z == 1 || s.atoms[i].formalCharge == 0 || isMetal(z)) continue;
+    chargedAt[i] = true;
+    for (int c : pl.heavyNbrs(i))
+      if (pl.hyb(c) == 2)
+        for (int x : pl.heavyNbrs(c))
+          if (s.atoms[x].atomicNum == z) chargedAt[x] = true;
+  }
   auto view = [&](int idx, const Vec3& p, int parent, int hCnt) {
     const int z = s.atoms[idx].atomicNum;
-    AtomView v{idx, p, parent, false, false, false, 0};
+    AtomView v;
+    v.idx = idx;
+    v.p = p;
+    v.parent = parent;
+    v.hydrogen = z == 1;
+    v.metal = isMetal(z);
     if (z == 1) {
       const int pz = parent >= 0 ? s.atoms[parent].atomicNum : 6;
       v.polarH = pz == 7 || pz == 8 || pz == 16;
-    } else if (z == 8 || z == 16) {
-      v.acceptor = s.atoms[idx].formalCharge <= 0;
-    } else if (z == 7) {
-      v.acceptor = hCnt == 0 && s.atoms[idx].formalCharge <= 0 && pl.heavyNbrs(idx).size() < 3;
+      v.charged = v.polarH && chargedAt[parent];
+    } else {
+      if (z == 8 || z == 16) v.acceptor = s.atoms[idx].formalCharge <= 0;
+      else if (z == 7) v.acceptor = hCnt == 0 && s.atoms[idx].formalCharge <= 0 && pl.heavyNbrs(idx).size() < 3;
+      v.charged = chargedAt[idx];
     }
-    v.acceptorOnly = v.acceptor && hCnt == 0;
-    v.donorHeavy = (z == 7 || z == 8 || z == 16) && hCnt > 0;
     if (parent >= 0) v.pp = pl.xyz()[parent];
-    v.radius = radiusOf(z, v.polarH);
+    v.radius = radiusOf(z, v.polarH, z == 1 ? 3 : pl.hyb(idx), carbonylC[idx]);
     return v;
   };
   // Hydrogen counts with movable N-H hydrogens removed (state dependent).
@@ -986,14 +1019,18 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
         }
       }
   std::vector<AtomView> fixedViews;
-  for (int i = 0; i < nAll; ++i)
-    if (!inGroup[i]) fixedViews.push_back(view(i, pl.xyz()[i], parentOf[i], hStatic[i]));
-  // Cell list of fixed atoms.
-  const double cell = 4.5;
+  std::vector<double> radiusAll(nAll);
+  for (int i = 0; i < nAll; ++i) {
+    AtomView v = view(i, pl.xyz()[i], parentOf[i], hStatic[i]);
+    radiusAll[i] = v.radius;
+    if (!inGroup[i]) fixedViews.push_back(v);
+  }
+  // Cell list of fixed atoms; kCell covers the largest atom-atom reach of a dot.
+  constexpr double kCell = 2 * 2.10 + kMetalBump + kContactWindow + 0.01;
   std::unordered_map<long long, std::vector<int>> cells;
   auto key = [&](const Vec3& p, int dx, int dy, int dz) {
-    const long long x = static_cast<long long>(std::floor(p[0] / cell)) + dx, y = static_cast<long long>(std::floor(p[1] / cell)) + dy,
-                    z = static_cast<long long>(std::floor(p[2] / cell)) + dz;
+    const long long x = static_cast<long long>(std::floor(p[0] / kCell)) + dx, y = static_cast<long long>(std::floor(p[1] / kCell)) + dy,
+                    z = static_cast<long long>(std::floor(p[2] / kCell)) + dz;
     return (x * 73856093LL) ^ (y * 19349663LL) ^ (z * 83492791LL);
   };
   for (std::size_t k = 0; k < fixedViews.size(); ++k) cells[key(fixedViews[k].p, 0, 0, 0)].push_back(static_cast<int>(k));
@@ -1014,26 +1051,139 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
     }
     return v;
   };
+
+  // Dots of the atoms of one state (golden-spiral points), without those buried in bonded atoms.
+  struct Dot {
+    Vec3 p;
+    int owner;          // index into the state's atoms
+    double gap = 0, score = 0;
+    bool scored = false;  // against the fixed atoms and the atoms of the same state
+  };
+  std::map<int, std::vector<Vec3>> spheres;
+  auto sphere = [&](double r) -> const std::vector<Vec3>& {
+    const int n = std::max(8, static_cast<int>(std::lround(4 * M_PI * r * r * kDotDensity)));
+    if (auto it = spheres.find(n); it != spheres.end()) return it->second;
+    std::vector<Vec3> v(n);
+    const double ga = M_PI * (3 - std::sqrt(5.0));
+    for (int k = 0; k < n; ++k) {
+      const double z = 1 - (2.0 * k + 1) / n, rr = std::sqrt(std::max(0.0, 1 - z * z));
+      v[k] = {rr * std::cos(ga * k), rr * std::sin(ga * k), z};
+    }
+    return spheres.emplace(n, std::move(v)).first->second;
+  };
+  auto dotsOf = [&](const std::vector<AtomView>& v) {
+    std::vector<Dot> out;
+    std::map<int, Vec3> inState;
+    for (const AtomView& a : v) inState[a.idx] = a.p;
+    auto posOf = [&](int i) { return inState.contains(i) ? inState[i] : pl.xyz()[i]; };
+    for (std::size_t k = 0; k < v.size(); ++k) {
+      const AtomView& a = v[k];
+      std::vector<std::pair<Vec3, double>> bonded;
+      if (a.hydrogen) {
+        if (a.parent >= 0) bonded.push_back({a.pp, radiusAll[a.parent]});
+      } else {
+        for (int x : pl.heavyNbrs(a.idx)) bonded.push_back({posOf(x), radiusAll[x]});
+        for (const AtomView& h : v)
+          if (h.hydrogen && h.parent == a.idx) bonded.push_back({h.p, radiusAll[h.idx]});
+        for (int h : pl.hydrogens(a.idx))
+          if (!inGroup[h] && parentOf[h] == a.idx) bonded.push_back({pl.xyz()[h], radiusAll[h]});
+      }
+      for (const Vec3& u : sphere(a.radius)) {
+        const Vec3 p = add(a.p, mul(u, a.radius));
+        bool buried = false;
+        for (const auto& [c, r] : bonded)
+          if (dist(p, c) < r) {
+            buried = true;
+            break;
+          }
+        if (!buried) out.push_back({p, static_cast<int>(k)});
+      }
+    }
+    return out;
+  };
+  // Atoms an owner's dots can reach (not excluded).
+  auto reach = [&](const AtomView& a, const AtomView& b) {
+    return dist(a.p, b.p) < a.radius + b.radius + kMetalBump + kContactWindow && !sc.excluded(a, b);
+  };
+  auto nearFixed = [&](const AtomView& a, std::vector<const AtomView*>& out) {
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz) {
+          auto it = cells.find(key(a.p, dx, dy, dz));
+          if (it == cells.end()) continue;
+          for (int k : it->second)
+            if (reach(a, fixedViews[k])) out.push_back(&fixedViews[k]);
+        }
+  };
+  // Scores the dots against the fixed atoms, the other atoms of the state and `extra` atoms; returns the
+  // score sum / density.
+  auto scoreDots = [&](const std::vector<AtomView>& v, std::vector<Dot>& dots,
+                       const std::vector<const std::vector<AtomView>*>& extra) {
+    double total = 0;
+    std::size_t d = 0;
+    for (std::size_t k = 0; k < v.size(); ++k) {
+      const AtomView& a = v[k];
+      std::vector<const AtomView*> cand;
+      nearFixed(a, cand);
+      for (std::size_t j = 0; j < v.size(); ++j)
+        if (j != k && reach(a, v[j])) cand.push_back(&v[j]);
+      for (const auto* ex : extra)
+        for (const AtomView& b : *ex)
+          if (reach(a, b)) cand.push_back(&b);
+      for (; d < dots.size() && dots[d].owner == static_cast<int>(k); ++d) {
+        Dot& dt = dots[d];
+        dt.scored = false;
+        for (const AtomView* b : cand) {
+          double g, sc0;
+          if (Scorer::dot(a, dt.p, *b, g, sc0) && (!dt.scored || g < dt.gap)) {
+            dt.gap = g;
+            dt.score = sc0;
+            dt.scored = true;
+          }
+        }
+        if (dt.scored) total += dt.score;
+      }
+    }
+    return total / kDotDensity;
+  };
+  // Change of the dot scores of state va when the atoms vb are added (nearest-atom rule per dot).
+  auto pairScore = [&](const std::vector<AtomView>& va, const std::vector<Dot>& da, const std::vector<AtomView>& vb) {
+    double total = 0;
+    std::size_t d = 0;
+    for (std::size_t k = 0; k < va.size(); ++k) {
+      const AtomView& a = va[k];
+      std::vector<const AtomView*> cand;
+      for (const AtomView& b : vb)
+        if (reach(a, b)) cand.push_back(&b);
+      for (; d < da.size() && da[d].owner == static_cast<int>(k); ++d) {
+        if (cand.empty()) continue;
+        const Dot& dt = da[d];
+        double bg = 0, bs = 0;
+        bool found = false;
+        for (const AtomView* b : cand) {
+          double g, sc0;
+          if (Scorer::dot(a, dt.p, *b, g, sc0) && (!found || g < bg)) {
+            bg = g;
+            bs = sc0;
+            found = true;
+          }
+        }
+        if (found && (!dt.scored || bg < dt.gap)) total += bs - (dt.scored ? dt.score : 0.0);
+      }
+    }
+    return total / kDotDensity;
+  };
   const int G = static_cast<int>(groups.size());
   std::vector<std::vector<std::vector<AtomView>>> views(G);
+  std::vector<std::vector<std::vector<Dot>>> dotsGS(G);
   std::vector<std::vector<double>> self(G);
   for (int g = 0; g < G; ++g) {
     for (const GroupState& st : groups[g].states) {
       auto v = stateViews(st);
-      double e = st.bias;
-      for (const AtomView& a : v) {
-        std::set<int> done;
-        for (int dx = -1; dx <= 1; ++dx)
-          for (int dy = -1; dy <= 1; ++dy)
-            for (int dz = -1; dz <= 1; ++dz) {
-              auto it = cells.find(key(a.p, dx, dy, dz));
-              if (it == cells.end()) continue;
-              for (int k : it->second)
-                if (done.insert(k).second) e += sc.pair(a, fixedViews[k]);
-            }
-      }
-      self[g].push_back(e);
+      auto dt = dotsOf(v);
+      self[g].push_back(st.bias - scoreDots(v, dt, {}));
       views[g].push_back(std::move(v));
+      dotsGS[g].push_back(std::move(dt));
     }
   }
   // Interacting group pairs.
@@ -1052,15 +1202,13 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
       for (int b = a + 1; b < G; ++b) {
         bool close = true;
         for (int d = 0; d < 3; ++d)
-          if (lo[a][d] > hi[b][d] + 4.5 || lo[b][d] > hi[a][d] + 4.5) close = false;
+          if (lo[a][d] > hi[b][d] + kCell || lo[b][d] > hi[a][d] + kCell) close = false;
         if (!close) continue;
         std::vector<std::vector<double>> t(groups[a].states.size(), std::vector<double>(groups[b].states.size(), 0));
         bool any = false;
         for (std::size_t i = 0; i < t.size(); ++i)
           for (std::size_t j = 0; j < t[i].size(); ++j) {
-            double e = 0;
-            for (const AtomView& x : views[a][i])
-              for (const AtomView& y : views[b][j]) e += sc.pair(x, y);
+            const double e = -pairScore(views[a][i], dotsGS[a][i], views[b][j]) - pairScore(views[b][j], dotsGS[b][j], views[a][i]);
             t[i][j] = e;
             any = any || e != 0;
           }
@@ -1207,21 +1355,10 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
   }
   // Refinement of free rotors in 5-degree steps (+-15 degrees), the other groups at their states.
   auto energyOf = [&](int g, const std::vector<AtomView>& v) {
-    double e = 0;
-    for (const AtomView& a : v) {
-      std::set<int> done;
-      for (int dx = -1; dx <= 1; ++dx)
-        for (int dy = -1; dy <= 1; ++dy)
-          for (int dz = -1; dz <= 1; ++dz) {
-            auto it = cells.find(key(a.p, dx, dy, dz));
-            if (it == cells.end()) continue;
-            for (int k : it->second)
-              if (done.insert(k).second) e += sc.pair(a, fixedViews[k]);
-          }
-      for (int y : nbrG[g])
-        for (const AtomView& b : views[y][groups[y].chosen]) e += sc.pair(a, b);
-    }
-    return e;
+    std::vector<const std::vector<AtomView>*> extra;
+    for (int y : nbrG[g]) extra.push_back(&views[y][groups[y].chosen]);
+    auto dt = dotsOf(v);
+    return -scoreDots(v, dt, extra);
   };
   for (int sweep = 0; sweep < 2; ++sweep)
     for (int g = 0; g < G; ++g) {
