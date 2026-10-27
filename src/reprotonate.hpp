@@ -5,6 +5,7 @@
 #pragma once
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -53,7 +54,7 @@ struct StateChange {
   double pka = 0;
 };
 // State changes at the pKa values (protonated when pKa >= pH; a site without a value keeps its state;
-// His becoming neutral: HIE).
+// His becoming neutral: HIE, then chosen by ProtonationVariants::chooseTautomers).
 std::vector<StateChange> stateChanges(const std::vector<TitratableSite>& sites, const PkaMap& pka, double pH);
 // Protonation free energy of the changes (kcal/mol): per site ln(10) RT (pH - pKa) when a proton is gained,
 // ln(10) RT (pKa - pH) when one is lost.
@@ -82,8 +83,18 @@ class ProtonationVariants {
   const std::vector<TitratableSite>& sites(int part) const { return sites_[part]; }
   // Molecules of the base system at coordinates x of the base system (all coordinate indices).
   std::vector<PkaMolecule> pkaMolecules(std::span<const Vec3f> x) const;
-  // Variant of the changes of each part; 0 without changes.
+  // Variant of the changes of each part; 0 without changes. Ids are given in call order.
   int variantOf(const std::vector<std::vector<StateChange>>& changes);
+  // Energy system and parts of the changes (created when first needed, without an id).
+  using TautomerEnergy = std::function<double(const EnergySystem&, const std::vector<EnergyPart>&)>;
+  const EnergySystem& sysOf(const std::vector<std::vector<StateChange>>& changes);
+  const std::vector<EnergyPart>& partsOf(const std::vector<std::vector<StateChange>>& changes);
+  // Tautomers (HID / HIE) of the neutral His sites not locked, by the lowest energy(system of the
+  // changes, its parts): from the current states (a His becoming neutral: HIE), one site at a time with
+  // the others fixed, a change only when the energy is lower, until no site changes (at most
+  // kTautomerPasses passes). Returns the number of sites changed.
+  static constexpr int kTautomerPasses = 4;
+  int chooseTautomers(std::vector<std::vector<StateChange>>& changes, const TautomerEnergy& energy);
   std::size_t count() const;
   const EnergySystem& sys(int id) const;
   std::vector<EnergyPart> parts(int id) const;
@@ -103,9 +114,13 @@ class ProtonationVariants {
   EnergyParams ep_;
   std::vector<std::vector<TitratableSite>> sites_;
   bool active_ = false;
+  using Key = std::vector<std::vector<std::pair<int, std::string>>>;
+  Key keyOf(const std::vector<std::vector<StateChange>>& changes) const;
+  const Variant& entry(const Key& key);  // nullptr sys: no changes
   mutable std::mutex mutex_;
-  std::deque<Variant> variants_;  // index id - 1
-  std::map<std::vector<std::vector<std::pair<int, std::string>>>, int> index_;
+  std::map<Key, std::unique_ptr<Variant>> cache_;
+  std::vector<const Variant*> variants_;  // index id - 1
+  std::map<Key, int> index_;
 };
 
 }  // namespace od

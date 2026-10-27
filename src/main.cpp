@@ -618,16 +618,20 @@ class ConfSet {
     std::vector<char> drop(n, 0);
     std::vector<std::vector<std::vector<od::StateChange>>> ch(n);
     std::vector<double> g(n, 0.0);
+    std::vector<int> tautomerFlips(n, 0);
     od::parallelEach(static_cast<long long>(n), [&](long long k) {
       const od::ConfSample& s = pool_[begin + static_cast<std::size_t>(k)];
       const auto x = sys_.coordinates(std::span<const float>(s.angles));
       const auto pka = od::calculatePka(prot_->pkaMolecules(x));
       ch[k].resize(prot_->partCount());
-      for (std::size_t p = 0; p < ch[k].size(); ++p) {
-        const auto& sites = prot_->sites(static_cast<int>(p));
-        ch[k][p] = od::stateChanges(sites, pka[p], opt_.protonationPH);
-        g[k] += od::protonationFreeEnergy(sites, ch[k][p], opt_.protonationPH, opt_.fe.temperature);
-      }
+      for (std::size_t p = 0; p < ch[k].size(); ++p)
+        ch[k][p] = od::stateChanges(prot_->sites(static_cast<int>(p)), pka[p], opt_.protonationPH);
+      // Neutral His: the tautomer of the lowest energy of the sample.
+      tautomerFlips[k] = prot_->chooseTautomers(ch[k], [&](const od::EnergySystem& sys, const std::vector<od::EnergyPart>&) {
+        return sys.evaluate(std::span<const float>(s.angles), nullptr, nullptr, nullptr).filterEnergy();
+      });
+      for (std::size_t p = 0; p < ch[k].size(); ++p)
+        g[k] += od::protonationFreeEnergy(prot_->sites(static_cast<int>(p)), ch[k][p], opt_.protonationPH, opt_.fe.temperature);
     });
     // Variant ids in sample order (reproducible).
     for (std::size_t k = 0; k < n; ++k) pool_[begin + k].variant = prot_->variantOf(ch[k]);
@@ -649,8 +653,9 @@ class ConfSet {
     }
     pool_ = std::move(kept);
     od::logInfo(std::format("  9a {:<37} protonation.recompute: {} of {} sample(s) changed (E >= Emax with the variant: {} "
-                            "removed); {} variant(s)  {:.2f} s",
+                            "removed); {} variant(s), {} His tautomer change(s)  {:.2f} s",
                             name_, changed, n, dropped, prot_->count() - 1,
+                            std::accumulate(tautomerFlips.begin(), tautomerFlips.end(), 0LL),
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
   }
 
@@ -931,24 +936,35 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     int variant = 0;
     double g = 0;
   };
-  const auto variantFrom = [&](const ConfSet& set, std::span<const od::PkaMap> pka) {
+  using Changes = std::vector<std::vector<od::StateChange>>;
+  const auto changesFrom = [&](const ConfSet& set, std::span<const od::PkaMap> pka) {
+    Changes ch(set.prot() ? set.prot()->partCount() : 0);
+    for (std::size_t p = 0; p < ch.size(); ++p) ch[p] = od::stateChanges(set.prot()->sites(static_cast<int>(p)), pka[p], opt.protonationPH);
+    return ch;
+  };
+  const auto stateOf = [&](const ConfSet& set, const Changes& ch) {
     ProtState s;
     if (!set.prot()) return s;
-    std::vector<std::vector<od::StateChange>> ch(set.prot()->partCount());
-    for (std::size_t p = 0; p < ch.size(); ++p) {
-      const auto& sites = set.prot()->sites(static_cast<int>(p));
-      ch[p] = od::stateChanges(sites, pka[p], opt.protonationPH);
-      s.g += od::protonationFreeEnergy(sites, ch[p], opt.protonationPH, fp.temperature);
-    }
+    for (std::size_t p = 0; p < ch.size(); ++p)
+      s.g += od::protonationFreeEnergy(set.prot()->sites(static_cast<int>(p)), ch[p], opt.protonationPH, fp.temperature);
     s.variant = set.prot()->variantOf(ch);
     return s;
   };
-  // A sample alone: l2, its variant; final, from PROPKA of the set alone.
+  // Energy alone (9a terms) of a conformation with the system of a protonation variant.
+  const auto aloneEnergy = [](const std::vector<float>& angles) {
+    return [&angles](const od::EnergySystem& sys, const std::vector<od::EnergyPart>&) {
+      return sys.evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr).filterEnergy();
+    };
+  };
+  // A sample alone: l2, its variant; final, from PROPKA of the set alone (neutral His: the tautomer
+  // of the lowest energy alone).
   const auto aloneState = [&](const ConfSet& set, const od::ConfSample& s) {
     if (!recFinal || !set.prot()) return ProtState{s.variant, s.protG};
     const auto x = set.sys().coordinates(std::span<const float>(s.angles));
     const auto pka = od::calculatePka(pkaMols(set, x));
-    return variantFrom(set, pka);
+    Changes ch = changesFrom(set, pka);
+    set.prot()->chooseTautomers(ch, aloneEnergy(s.angles));
+    return stateOf(set, ch);
   };
 
   // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.
@@ -1041,8 +1057,40 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         const std::size_t ns = mols.size();
         for (auto& m : pkaMols(mob, xm)) mols.push_back(std::move(m));
         const auto pka = od::calculatePka(mols);
-        ps = variantFrom(stamSet, std::span<const od::PkaMap>(pka).first(ns));
-        pm = variantFrom(mob, std::span<const od::PkaMap>(pka).subspan(ns));
+        Changes cs = changesFrom(stamSet, std::span<const od::PkaMap>(pka).first(ns));
+        Changes cm = changesFrom(mob, std::span<const od::PkaMap>(pka).subspan(ns));
+        // Neutral His: the tautomers of the lowest complex energy (energy alone of the group plus the
+        // intermolecular energy), the StaM group and the MobM in turn.
+        if (stamSet.prot() || mob.prot()) {
+          od::ShakeAtoms sa = od::shakeAtoms(stamSet.sys(), stamSet.parts(), xs);
+          od::ShakeAtoms ma = od::shakeAtoms(mob.sys(), mob.parts(), xm);
+          for (int turn = 0; turn < od::ProtonationVariants::kTautomerPasses; ++turn) {
+            int flips = 0;
+            if (stamSet.prot())
+              flips += stamSet.prot()->chooseTautomers(cs, [&](const od::EnergySystem& sys, const std::vector<od::EnergyPart>& parts) {
+                const auto x = sys.coordinates(std::span<const float>(ss.angles));
+                const od::InterTerms it = od::exactInter(od::shakeAtoms(sys, parts, x), ma, ep);
+                return sys.evaluate(std::span<const float>(ss.angles), nullptr, nullptr, nullptr).filterEnergy() + it.inter() + it.clash;
+              });
+            if (stamSet.prot()) {
+              const od::EnergySystem& sys = stamSet.prot()->sysOf(cs);
+              sa = od::shakeAtoms(sys, stamSet.prot()->partsOf(cs), sys.coordinates(std::span<const float>(ss.angles)));
+            }
+            if (mob.prot() && (turn == 0 || flips > 0))
+              flips += mob.prot()->chooseTautomers(cm, [&](const od::EnergySystem& sys, const std::vector<od::EnergyPart>& parts) {
+                const auto x = od::dockWorld(sys.coordinates(std::span<const float>(r.s.angles)), r.s);
+                const od::InterTerms it = od::exactInter(sa, od::shakeAtoms(sys, parts, x), ep);
+                return sys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr).filterEnergy() + it.inter() + it.clash;
+              });
+            if (mob.prot()) {
+              const od::EnergySystem& sys = mob.prot()->sysOf(cm);
+              ma = od::shakeAtoms(sys, mob.prot()->partsOf(cm), od::dockWorld(sys.coordinates(std::span<const float>(r.s.angles)), r.s));
+            }
+            if (flips == 0) break;
+          }
+        }
+        ps = stateOf(stamSet, cs);
+        pm = stateOf(mob, cm);
       }
       w.stamVariant = ps.variant;
       w.mobVariant = pm.variant;

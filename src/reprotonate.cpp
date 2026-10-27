@@ -551,37 +551,115 @@ std::vector<PkaMolecule> ProtonationVariants::pkaMolecules(std::span<const Vec3f
   return out;
 }
 
-int ProtonationVariants::variantOf(const std::vector<std::vector<StateChange>>& changes) {
-  std::vector<std::vector<std::pair<int, std::string>>> key(parts_.size());
-  bool any = false;
+ProtonationVariants::Key ProtonationVariants::keyOf(const std::vector<std::vector<StateChange>>& changes) const {
+  Key key(parts_.size());
   for (std::size_t k = 0; k < changes.size() && k < parts_.size(); ++k)
-    for (const auto& c : changes[k]) {
-      key[k].push_back({c.site, c.state});
-      any = true;
-    }
-  if (!any) return 0;
+    for (const auto& c : changes[k]) key[k].push_back({c.site, c.state});
   for (auto& v : key) std::sort(v.begin(), v.end());
+  return key;
+}
+
+const ProtonationVariants::Variant& ProtonationVariants::entry(const Key& key) {
   std::lock_guard lock(mutex_);
-  if (auto it = index_.find(key); it != index_.end()) return it->second;
-  Variant var;
-  var.changes.resize(parts_.size());
+  if (auto it = cache_.find(key); it != cache_.end()) return *it->second;
+  auto var = std::make_unique<Variant>();
+  var->changes.resize(parts_.size());
   for (std::size_t k = 0; k < parts_.size(); ++k) {
-    for (const auto& [site, state] : key[k]) var.changes[k].push_back({site, state, 0.0});
-    if (var.changes[k].empty()) {
-      var.mols.push_back(nullptr);
-      var.parts.push_back(parts_[k]);
+    for (const auto& [site, state] : key[k]) var->changes[k].push_back({site, state, 0.0});
+    if (var->changes[k].empty()) {
+      var->mols.push_back(nullptr);
+      var->parts.push_back(parts_[k]);
       continue;
     }
-    var.mols.push_back(std::make_unique<MoleculeVariant>(makeVariant(*parts_[k].mol, *parts_[k].tree, sites_[k], var.changes[k])));
-    var.parts.push_back({&var.mols.back()->mol, &var.mols.back()->tree});
+    var->mols.push_back(std::make_unique<MoleculeVariant>(makeVariant(*parts_[k].mol, *parts_[k].tree, sites_[k], var->changes[k])));
+    var->parts.push_back({&var->mols.back()->mol, &var->mols.back()->tree});
   }
-  var.sys = std::make_unique<EnergySystem>(var.parts, ep_);
-  if (var.sys->torsionCount() != base_.torsionCount())
-    fail("protonation variant: {} torsions, base system {}", var.sys->torsionCount(), base_.torsionCount());
-  variants_.push_back(std::move(var));
+  var->sys = std::make_unique<EnergySystem>(var->parts, ep_);
+  if (var->sys->torsionCount() != base_.torsionCount())
+    fail("protonation variant: {} torsions, base system {}", var->sys->torsionCount(), base_.torsionCount());
+  return *cache_.emplace(key, std::move(var)).first->second;
+}
+
+int ProtonationVariants::variantOf(const std::vector<std::vector<StateChange>>& changes) {
+  const Key key = keyOf(changes);
+  if (std::all_of(key.begin(), key.end(), [](const auto& v) { return v.empty(); })) return 0;
+  const Variant& var = entry(key);
+  std::lock_guard lock(mutex_);
+  if (auto it = index_.find(key); it != index_.end()) return it->second;
+  variants_.push_back(&var);
   const int id = static_cast<int>(variants_.size());
   index_[key] = id;
   return id;
+}
+
+const EnergySystem& ProtonationVariants::sysOf(const std::vector<std::vector<StateChange>>& changes) {
+  const Key key = keyOf(changes);
+  if (std::all_of(key.begin(), key.end(), [](const auto& v) { return v.empty(); })) return base_;
+  return *entry(key).sys;
+}
+
+const std::vector<EnergyPart>& ProtonationVariants::partsOf(const std::vector<std::vector<StateChange>>& changes) {
+  const Key key = keyOf(changes);
+  if (std::all_of(key.begin(), key.end(), [](const auto& v) { return v.empty(); })) return parts_;
+  return entry(key).parts;
+}
+
+int ProtonationVariants::chooseTautomers(std::vector<std::vector<StateChange>>& changes,
+                                         const TautomerEnergy& energy) {
+  changes.resize(parts_.size());
+  // State of site k of part p in changes, and setting it (no entry when it is the state of the molecule;
+  // an entry keeps its pKa).
+  auto stateOf = [&](std::size_t p, int k) {
+    for (const auto& c : changes[p])
+      if (c.site == k) return c.state;
+    return sites_[p][k].state;
+  };
+  auto setState = [&](std::size_t p, int k, const std::string& st) {
+    auto& v = changes[p];
+    auto it = std::find_if(v.begin(), v.end(), [&](const StateChange& c) { return c.site == k; });
+    if (st == sites_[p][k].state) {
+      if (it != v.end()) v.erase(it);
+      return;
+    }
+    if (it != v.end()) {
+      it->state = st;
+      return;
+    }
+    v.insert(std::lower_bound(v.begin(), v.end(), k, [](const StateChange& c, int s) { return c.site < s; }), {k, st, 0.0});
+  };
+  std::vector<std::pair<std::size_t, int>> his;
+  for (std::size_t p = 0; p < parts_.size(); ++p)
+    for (std::size_t k = 0; k < sites_[p].size(); ++k) {
+      const TitratableSite& s = sites_[p][k];
+      const std::string st = stateOf(p, static_cast<int>(k));
+      if (s.type == SiteType::His && !s.locked && (st == "HID" || st == "HIE")) his.emplace_back(p, static_cast<int>(k));
+    }
+  if (his.empty()) return 0;
+  int flips = 0;
+  std::map<Key, double> seen;
+  auto eval = [&] {
+    const Key key = keyOf(changes);
+    if (auto it = seen.find(key); it != seen.end()) return it->second;
+    return seen[key] = energy(sysOf(changes), partsOf(changes));
+  };
+  double best = eval();
+  for (int pass = 0; pass < kTautomerPasses; ++pass) {
+    bool changed = false;
+    for (const auto& [p, k] : his) {
+      const std::string cur = stateOf(p, k), alt = cur == "HIE" ? "HID" : "HIE";
+      setState(p, k, alt);
+      const double e = eval();
+      if (e < best) {
+        best = e;
+        changed = true;
+        ++flips;
+      } else {
+        setState(p, k, cur);
+      }
+    }
+    if (!changed) break;
+  }
+  return flips;
 }
 
 std::size_t ProtonationVariants::count() const {
@@ -592,19 +670,19 @@ std::size_t ProtonationVariants::count() const {
 const EnergySystem& ProtonationVariants::sys(int id) const {
   if (id == 0) return base_;
   std::lock_guard lock(mutex_);
-  return *variants_[id - 1].sys;
+  return *variants_[id - 1]->sys;
 }
 
 std::vector<EnergyPart> ProtonationVariants::parts(int id) const {
   if (id == 0) return parts_;
   std::lock_guard lock(mutex_);
-  return variants_[id - 1].parts;
+  return variants_[id - 1]->parts;
 }
 
 std::vector<std::vector<StateChange>> ProtonationVariants::changes(int id) const {
   if (id == 0) return std::vector<std::vector<StateChange>>(parts_.size());
   std::lock_guard lock(mutex_);
-  return variants_[id - 1].changes;
+  return variants_[id - 1]->changes;
 }
 
 std::string ProtonationVariants::describe(int id) const {

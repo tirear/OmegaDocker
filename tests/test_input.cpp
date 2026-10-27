@@ -6607,3 +6607,60 @@ TEST_CASE("protonation: recomputed states and variants (1L2Y, 2KJJ)") {
     CHECK(std::isfinite(e.filterEnergy()));
   }
 }
+
+TEST_CASE("protonation: His tautomers of recomputed states by the lowest energy (2KJJ)") {
+  od::ProtonationOptions opt;
+  auto mols = od::loadMolecules(kData + "/2KJJ.cif", od::Role::MobM, ccd(), &opt);
+  const od::Molecule& m = mols.front();
+  od::Topology topo = od::analyzeTopology(m, {});
+  od::assignDssp({&m}, {&topo});
+  const std::vector<od::MolInput> in{{&m, &topo}};
+  std::vector<std::string> errors;
+  auto cfg = od::parseMolConfig(od::defaultMolConfigText(in), in, {}, errors);
+  REQUIRE(cfg);
+  const od::TorsionTree& tree = cfg->molecules[0].tree;
+  const od::EnergySystem base({{&m, &tree}}, {});
+  od::ProtonationVariants pv(base, {{&m, &tree}}, {}, {});
+  const auto& sites = pv.sites(0);
+  std::vector<int> his;
+  for (std::size_t k = 0; k < sites.size(); ++k)
+    if (sites[k].type == od::SiteType::His && !sites[k].locked && (sites[k].state == "HID" || sites[k].state == "HIE"))
+      his.push_back(static_cast<int>(k));
+  REQUIRE(his.size() >= 1);
+  const int h0 = his[0];
+  const int r0 = sites[h0].residue;
+  const std::string other = sites[h0].state == "HIE" ? "HID" : "HIE";
+  const char* otherH = other == "HID" ? "HD1" : "HE2";
+  // Synthetic energy: -1 when the first His has the other tautomer.
+  auto favorOther = [&](const od::EnergySystem&, const std::vector<od::EnergyPart>& parts) {
+    for (const auto& a : parts[0].mol->atoms)
+      if (a.residue == r0 && a.name == otherH) return -1.0;
+    return 0.0;
+  };
+  std::vector<std::vector<od::StateChange>> ch(1);
+  CHECK(pv.chooseTautomers(ch, favorOther) == 1);
+  REQUIRE(ch[0].size() == 1);
+  CHECK(ch[0][0].site == h0);
+  CHECK(ch[0][0].state == other);
+  CHECK(od::protonationFreeEnergy(sites, ch[0], 7.4, 298.15) == 0.0);  // tautomers: no proton change
+  const int id = pv.variantOf(ch);
+  CHECK(id == 1);
+  CHECK(pv.describe(id).find(sites[h0].label + " " + sites[h0].state + "->" + other) != std::string::npos);
+  // Equal energies: the states are kept.
+  std::vector<std::vector<od::StateChange>> same(1);
+  CHECK(pv.chooseTautomers(same, [](const od::EnergySystem&, const std::vector<od::EnergyPart>&) { return 0.0; }) == 0);
+  CHECK(same[0].empty());
+  od::ProtonationVariants pv2(base, {{&m, &tree}}, {}, {});
+  // AD4 energy alone at the input angles: the chosen tautomers are not higher than the starting ones.
+  const std::vector<double> in0 = base.inputAngles();
+  const std::vector<float> a0(in0.begin(), in0.end());
+  auto alone = [&](const od::EnergySystem& sys, const std::vector<od::EnergyPart>&) {
+    return sys.evaluate(std::span<const float>(a0), nullptr, nullptr, nullptr).filterEnergy();
+  };
+  std::vector<std::vector<od::StateChange>> real(1);
+  const double e0 = alone(base, {});
+  pv2.chooseTautomers(real, alone);
+  CHECK(alone(pv2.sysOf(real), pv2.partsOf(real)) <= e0);
+  for (const auto& c : real[0]) CHECK((c.state == "HID" || c.state == "HIE"));
+  CHECK(pv2.count() == 1);  // systems made for the choice get no id
+}
