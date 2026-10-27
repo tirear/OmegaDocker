@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <span>
 #include <vector>
 
 #include "molecule.hpp"
@@ -34,6 +35,9 @@ Quat normalized(const Quat& q);
 Vec3 rotate(const Quat& q, const Vec3& v);
 // Rotation by |v| radians about v / |v|.
 Quat fromRotationVector(const Vec3& v);
+// Proper rotation minimising sum |R (from_i - cf) - (to_i - ct)|^2 (Kabsch; cf, ct: centroids);
+// rmsd receives the superposition RMSD.
+Quat kabschQuat(std::span<const Vec3> from, std::span<const Vec3> to, double& rmsd);
 // Angle (radians, in [0, pi]) of the rotation taking a to b.
 double rotationAngle(const Quat& a, const Quat& b);
 

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.101 |
+| 文件版本 | 1.102 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -87,7 +87,8 @@
 
 - 一個 **分子** = 鍵結圖中的一個連通元件（connected component）。
 - `--stamFile=<file>`：檔案中的**所有分子**皆為 StaM，共同組成 StaM 群。不支援在檔案內細分角色。**只能指定一次**，指定多次時報錯並結束。
-- `--mobmFiles=<file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。
+- `--mobmFiles=<file>`：檔案中**必須只有一個分子**，否則報錯並結束。可指定多次，每個檔案一個 MobM。`run.mode = score`／`localMin`（6.1）時，檔案中每一筆紀錄（SDF／mol2 的 record、mmCIF 的 model）是同一個分子的一個姿態：每筆紀錄只能有一個分子，原子（元素、名稱、順序）與鍵必須與第一筆相同，否則報錯並結束；第一筆作為該 MobM 的輸入結構（拓撲分析、分子設定檔、自動盒子）。
+- `--refFiles=<file>`（選用）：MobM 的參考結構，依 `--mobmFiles` 的順序一個 MobM 一個（數目不同 → 報錯）。只讀第一筆紀錄，必須只有一個分子；氫原子可有可無（只用重原子與鍵結；mmCIF 不判定形式電荷與鍵級）。用途見 10.3 的 `rmsd_ref`。
 - 每個 MobM 視為獨立的對接任務（見第 11 節）。
 
 ### 3.3 對接範圍
@@ -459,6 +460,24 @@ flowchart TD
 - 所有 MobM 共用：StaM 的 L2 pool、StaM 構型的網格快取。
 - 每輪的 9a 依 MobM 順序補滿：先補第 i 個 MobM 的 StaM dcss（從共用的 StaM L2 pool 取），再補其 MobM dcss。樣本移入 dcss 時取得 ID（StaM 群一組、每個 MobM 一組，從 0 起依序編號）；無可動兩面角的分子只有 ID 0（輸入結構）。
 - 每輪的 9b：取所有 MobM 的 StaM dcss 的聯集，依 StaM 構型樣本 ID 由小到大，每個 StaM 構型建立一次網格與距離網格，供 StaM dcss 含有它的所有 MobM 使用；用完即釋放，下一輪若仍需要則重建，不跨輪快取。例外：StaM 群完全不可動（無可動兩面角，只有輸入結構）時，第一輪建立的網格與距離網格保留到所有輪次結束。每個 MobM 依 MobM dcss 的順序對接每個構型配對。
+
+### 6.1 執行模式（`run.mode`）
+
+| `run.mode` | 內容 |
+|---|---|
+| `dock`（預設） | 上圖的對接流程 |
+| `score` | 不做 9a–9c 的搜尋；`--mobmFiles` 每筆紀錄的姿態直接作為 topSampleSet，做 9d |
+| `localMin` | 同 `score`，但每個姿態先在 9b 網格上以 `dock9b.minMethod` 局部最小化（只動 MobM：平移、旋轉、兩面角，與 9b 相同；StaM 不動），再做 9d |
+
+- StaM 群使用輸入構型；以它建立一次 `full` 網格與距離網格（CPU）。
+- 姿態的建立：由紀錄座標量出 MobM 每個樹兩面角的值，以第一筆紀錄的鍵長、鍵角建出構型，再以所有原子的 Kabsch 疊合求出旋轉與平移（float）。疊合 RMSD 寫入 `summary.tsv` 的 `fit_rmsd`（鍵長、鍵角與第一筆不同時大於 0）。
+- 網格：姿態有探針原子在網格外時 `grid_status = outsideGrid`，`E_9b_grid` 為 nan，不做局部最小化；`localMin` 中途離開網格時 `grid_status = leftGrid`，保留未最小化的姿態。9d 的逐原子對重算不受網格範圍限制。
+- od_0100 的未結合狀態（`run.unbound`）：
+  - `conf9a`（預設）：StaM 群、每個 MobM 各以 csgm1 補滿一次 L2 pool（與 `dock` 第一輪 9a 相同，需要 `*.dockingConfSampleNum` 等樣本數參數），未結合狀態取自這些 9a 構型樣本（不含輸入構型）。StaM 項為「輸入構型的 9a 能量 − 這些 9a 樣本的最低值」。
+  - `input`：未結合狀態只用輸入構型（MobM 為第一筆紀錄）；不做 9a，不需要樣本數參數；StaM 項為 0。
+- 輸出：每個姿態都輸出（不受 `output.minPerRank` 限制）；pose 編號與 `summary.tsv` 依紀錄順序；`mobm_sample` 為紀錄編號（從 1 起），`stam_sample` 為輸入構型的樣本 ID。排序名次照常計算。
+- 不寫檢查點；不可與 `--resume` 並用。
+- 本版的姿態評分與局部最小化在 CPU 上執行（9a 與 9d 照常可用 GPU）。
 
 ---
 
@@ -1457,8 +1476,10 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 每個輸出樣本：MobM 座標（含所有氫原子），檔名 `pose_NNNN`，編號依 9b 排序在輸出樣本中的名次（從 1 起）。
   - 每個被輸出樣本使用的 StaM 構型：`stam_<StaM 構型樣本 ID>`。
   - 依下表啟用的格式各輸出一份。
-- `summary.tsv`：每個輸出樣本一列，依 pose 編號排序。欄位：
+- `summary.tsv`：每個輸出樣本一列，依 pose 編號排序。`output.allSummary = true` 時改為列出整個 topSampleSet（依 9b 排序；沒有輸出結構檔的樣本 `pose`、`mobm_files`、`stam_files` 為 `-`）。欄位：
   - `pose`、`mobm_files`、`stam_files`（以逗號分隔的檔名）、`stam_sample`、`mobm_sample`。
+  - `score`／`localMin`（6.1）：`fit_rmsd`、`grid_status`。
+  - 有 `--refFiles` 時：`rmsd_ref`，與參考結構的重原子對稱校正 RMSD（不疊合；與 9d 篩選相同的 `SymmetryRmsd`，C1／C2 依 `dock9d.symMaxPerm`）。參考結構與 MobM 的原子對應：原子順序相同且鍵結相同時直接對應，否則以元素標記的重原子鍵結圖（不含金屬配位鍵）找一個同構；找不到 → 報錯並結束。`rank_*.tsv` 也加上 `rmsd_ref`。
   - `rank_<方法>`：在整個 topSampleSet 中的名次（`rank_9b`、`rank_adgpu_16`、`rank_od_0100`）。
   - `E_9b`（重算）、`E_9b_grid`（9c 排序能量，網格）、`inter`、`inter_clash`、`mobm_intra`、`mobm_clash`、`stam_term`、`stam_intra`、`stam_clash`、`clash`（任一碰撞懲罰 > 0 時為 `yes`）。
   - `dG_adgpu_16`（啟用時）。
@@ -1626,6 +1647,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | 參數檔鍵 | 命令列選項 | 預設 | 節 |
 |---|---|---|---|
 | — | `--stamFile`、`--mobmFiles` | 必填 | 3.2 |
+| — | `--refFiles` | 無 | 3.2、10.3 |
 | — | `--molConfig` | 無 | 5 |
 | — | `--outPrefix` | 必填 | 10 |
 | — | `--paramFile` | 無 | 14.1 |
@@ -1657,6 +1679,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `output.pdb` | `--output_pdb` | true | 10 |
 | `output.cif`、`output.sdf`、`output.mol2` | `--output_cif`、`--output_sdf`、`--output_mol2` | false | 10 |
 | `output.minPerRank` | `--output_minPerRank` | 40 | 10.3 |
+| `output.allSummary` | `--output_allSummary` | false | 10.3 |
+| `run.mode` | `--run_mode` | `dock` | 6.1（`dock`、`score`、`localMin`） |
+| `run.unbound` | `--run_unbound` | `conf9a` | 6.1（`conf9a`、`input`） |
 | `topology.omegaTolerance` | `--topology_omegaTolerance` | 30° | 4.3 |
 | `topology.acceptNonPlanarOmega` | `--topology_acceptNonPlanarOmega` | false | 4.3 |
 | `topology.maxBreakDist` | `--topology_maxBreakDist` | 0.5 Å | 4.8 |
@@ -2840,14 +2865,14 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 ### 16.4 接續
 - `--resume=<outPrefix>`（只能在命令列）：從最後一個完整的檢查點的下一輪開始。
   - 「最後一個完整的檢查點」：`checkpoint/` 下有 `manifest.toml` 的 `round_<r>/` 中 r 最大者（不依賴 `last`，因此 rename 之後、更新 `last` 之前中斷也能取得最新一輪）；`.tmp` 目錄忽略。
-  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`、`gpu.*`、`cpu.threadNum` 與 `memory.hostLimit`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
+  - 參數：以該檢查點的 `params.toml` 為參數檔，再套用命令列的 `--<table>_<key>=<value>`；結果與檢查點比較時忽略 `dock9c.maxRound`、`gpu.*`、`cpu.threadNum`、`memory.hostLimit` 與 `output.allSummary`，其他參數只要值相同即可在命令列重複指定（例如 `--seed`），值不同 → 報錯並列出差異。
   - 不可同時使用 `--paramFile`、`--outPrefix`（報錯）；輸出寫回 `--resume` 指定的目錄。
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
   - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
   - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`、`gpu.dock9bDeviceMin`、`gpu.packedMaps`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
-- 參數只允許修改 `maxRound`、`gpu.*`、`cpu.threadNum`、`memory.hostLimit`；其他參數不同 → 報錯並結束。
+- 參數只允許修改 `maxRound`、`gpu.*`、`cpu.threadNum`、`memory.hostLimit`、`output.allSummary`；其他參數不同 → 報錯並結束。`--refFiles` 不屬於檢查點，接續時可重新指定或省略。
 - 程式版本不同 → 報錯並結束。
 
 ---
@@ -2933,14 +2958,15 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | — | od_0100 係數拆分為 c0、c_tors、a_t（分子間 4 項）、b_t（分子內 4 項）、s_StaM、s_MobM，以 TOML 參數檔 `--feParamFile` 設定，取代 `--enthalpyScaling`、`--entropyScaling`；預設值未校準，CUDA 與 OpenCL 版完成後以標準資料最佳化；方法名稱維持 `od_0100`（10.2） |
 | — | 執行參數放入參數檔 `--paramFile`（TOML，與分子設定檔分開），命令列 `--<表>_<鍵>=<值>` 覆寫；舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；搖動權重 w_k = exp(−ΔE_k × `rrtScaling`)，預設暫定 4，不依 `temperature`；擬合時 `temperature` 固定 298.15 K（14.1、10.2） |
 | — | 效能最佳化的方向：盡可能減少對 CPU 的依賴（工作移到 GPU、CPU 不忙等），避免 CPU 被其他程式佔用時大幅變慢（15.1.24）；CPU 等待改用阻塞的執行緒池（15.1.25）；9b 的 L-BFGS 整個在 GPU 上（`gpu.dock9bDeviceMin` 預設 true），取代 1.70 的決定；先做 `lbfgs`，其他方法之後（15.1.26）；先減少 GPU 最小化器自身的時間（15.1.27），再移其他四種方法（15.1.28） |
+| — | 校準前的工具：`run.mode = score`／`localMin`（`localMin` 只動 MobM）、`run.unbound` 預設 `conf9a`（可選 `input`）、`score` 模式一個 MobM 檔可有多筆紀錄（同一分子的不同姿態）、`--refFiles` 與 `rmsd_ref`、`output.allSummary`（6.1、10.3） |
 
 ### 17.2 待確認
 - 依環境 pH 決定質子化狀態與補氫（取代「氫原子由使用者提供」，3.1）：在參數校準前實作，排在只評分模式與參考結構 RMSD 之後。已決定的方法：
   - 蛋白質／肽段：移植 PROPKA 3（LGPL-2.1）的演算法與參數為 C++，決定可滴定殘基與末端的質子化狀態；氫的位置取自 CCD 理想幾何，參考 reduce（Apache-2.0）的方法最佳化 Asn／Gln／His 翻轉與 OH 等可轉動氫。
   - 小分子：移植 Dimorphite-DL（Apache-2.0）的 SMARTS 規則與 pKa 範圍（只依 2D 結構）。
-  - 核酸：使用標準狀態（磷酸 −1、鹼基中性），不預測 pKa；與 PDBFixer 對核酸的處理相同。例外由使用者在分子設定檔中指定。
-  - 保留「使用者提供氫」的模式；分子設定檔可個別覆寫殘基／原子的質子化狀態。細節待定。
-- 參數校準前先新增：(1) 只評分／局部最小化模式（對給定姿態輸出 `summary.tsv` 各分項）；(2) 與參考結構的對稱校正 RMSD 欄位。細節待定。
+  - 核酸：使用標準狀態（磷酸 −1、鹼基中性），不預測 pKa；與 PDBFixer 對核酸的處理相同。例外由使用者在分子設定檔中指定。（待確認：改用 Dimorphite-DL 規則處理核酸，見下。）
+  - 保留「使用者提供氫」的模式（已確認）；分子設定檔可個別覆寫殘基／原子的質子化狀態（已確認）。設定檔格式待定。
+- 核酸是否也套用 Dimorphite-DL 規則：Dimorphite-DL 已有核苷酸鹼基（A N1、G N7、G N1-H、C N3、U／T N3-H）、磷酸單酯／二酯的規則；分子不必轉成 SMILES，直接以 RDKit 分子比對 SMARTS。只依 2D 結構，不考慮鹼基配對、堆疊與金屬離子造成的 pKa 位移；pH 7 附近結果與標準狀態相同，差別在 5′／3′ 末端磷酸單酯（第二個 pKa 約 6.5）與酸性 pH 下的 A／C。
 - 校準資料存放於 `datasetForDockingParaOpti/`（git 儲存庫外）。
 
 ### 17.3 需要更多案例測試的參數
@@ -2999,6 +3025,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | F6 | 以 Tensor Core 加總 block 內的能量與梯度（AutoDock-GPU 的 `TENSOR=ON`） | 加總為 double 的 warp shuffle；上限估計每次評估只快 2–3%（15.1.32）。先在完整的標準測試（17.3）之後，測試以 float 加總對結果（排名、第 1 名能量、RMSD）的影響，再決定是否實作 |
 | F8 | 一個 MobM 含多個分子（例如雙股 DNA／RNA） | `--mobmFiles` 每個檔案只能有一個分子（3.1、Q3）；雙股核酸無法作為一個 MobM |
 | F9 | 以神經網路預測小分子 pKa（MolGpKa、Uni-pKa 等） | 小分子只用 Dimorphite-DL 規則（17.2），只看 2D 結構 |
+| F10 | `localMin` 同時最小化 StaM 可動的部分 | `localMin` 只最小化 MobM（6.1） |
 
 ---
 
@@ -3108,3 +3135,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.99 | 2026-10-27 | 自動決定盒子：`box.mode`（`manual`、`sidechainAuto`、`fixAuto`）、`box.autoRotate`、`box.stamMargin`、`box.mobmRadius`（`max` 拓撲上限、`sampled`、`input`）、`box.mobmSampleNum`；旋轉時內部在盒子座標系計算、輸出轉回輸入座標系；網格超過可用記憶體時報錯（3.3、4.4、14、15.1.38）；18 移除 F7 |
 | 1.100 | 2026-10-27 | 17.2：依 pH 補氫、只評分模式、參考結構 RMSD 列為校準前的工作；校準資料目錄；18 新增 F8（一個 MobM 含多個分子） |
 | 1.101 | 2026-10-27 | 17.2：質子化方法決定（蛋白質移植 PROPKA 3 並參考 reduce、小分子移植 Dimorphite-DL、核酸用標準狀態）；18 新增 F9（神經網路小分子 pKa） |
+| 1.102 | 2026-10-27 | 6.1 執行模式 `run.mode`（`dock`、`score`、`localMin`）與 `run.unbound`（`conf9a`、`input`）；`score`／`localMin` 的 MobM 檔每筆紀錄為一個姿態（3.2）；`--refFiles` 與 `rmsd_ref`（3.2、10.3）；`output.allSummary`（10.3），接續時可改；17.2 核酸是否套用 Dimorphite-DL 待確認；18 新增 F10 |

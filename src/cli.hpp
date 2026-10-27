@@ -57,11 +57,14 @@ struct Options {
   std::string paramFile;               // --paramFile
   std::string stamFile;                // --stamFile
   std::vector<std::string> mobmFiles;  // --mobmFiles
+  std::vector<std::string> refFiles;   // --refFiles: reference structure of each MobM (spec 10.3)
   std::string molConfig;
   std::string outPrefix;
   std::string resume;                  // --resume: output directory of the interrupted run (spec 16.4)
   // --paramFile and command line.
   std::vector<std::string> ccd;
+  std::string runMode = "dock";        // dock | score | localMin (spec 6.1)
+  std::string runUnbound = "conf9a";   // score / localMin unbound state of od_0100: conf9a | input
   std::optional<Vec3> boxCenter;
   std::optional<Vec3> boxSize;
   std::string boxMode = "manual";       // manual | sidechainAuto | fixAuto (spec 3.3)
@@ -140,6 +143,7 @@ struct Options {
   bool feAdgpu16 = false;  // dock9d.freeEnergy (spec 10.2)
   bool feOd0100 = true;
   int outMinPerRank = 40;
+  bool outAllSummary = false;  // summary.tsv: the whole topSampleSet (spec 10.3)
   FeParams fe;  // [od_0100]
   CsgmOpts stamCsgm;  // stam.csgmBuild, stam.growMaxRetry, ...
   CsgmOpts mobmCsgm;  // mobm.csgmBuild, mobm.growMaxRetry, ...

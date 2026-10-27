@@ -310,6 +310,26 @@ const std::vector<Param>& params() {
                  [](Options& o, const Tokens& v) { o.ccd = v; },
                  [](const Options& o) -> std::optional<Tokens> { return o.ccd; }});
 
+    t.push_back({"run.mode", Type::Str, "dock|score|localMin", "dock",
+                 "dock: docking (9a-9d); score: 9d of the input poses (every record of a MobM file); localMin: "
+                 "the input poses minimized on the 9b grid, then 9d (spec 6.1)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "dock" && s != "score" && s != "localMin")
+                     fail("expected dock, score or localMin but got '{}'", s);
+                   o.runMode = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.runMode}; }});
+    t.push_back({"run.unbound", Type::Str, "conf9a|input", "conf9a",
+                 "score and localMin: unbound state of od_0100 from the 9a conformation samples (conf9a) or the "
+                 "input conformation (input)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "conf9a" && s != "input") fail("expected conf9a or input but got '{}'", s);
+                   o.runUnbound = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.runUnbound}; }});
+
     t.push_back(vec3("box.center", "Docking box center (Å, input coordinates; automatic box: replaces the computed center)", OD_ACC(boxCenter)));
     t.push_back(vec3("box.size", "Docking box size (Å; automatic box: along the box axes, replaces the computed size)", OD_ACC(boxSize)));
     t.push_back({"box.mode", Type::Str, "manual|sidechainAuto|fixAuto", "manual",
@@ -423,6 +443,9 @@ const std::vector<Param>& params() {
     t.push_back(boolean("output.mol2", "false", "Write mol2 output", OD_ACC(outMol2)));
     t.push_back(integer("output.minPerRank", "<n>", "40", "9d: output at least the first n samples of every ranking",
                         OD_ACC(outMinPerRank)));
+    t.push_back(boolean("output.allSummary", "false",
+                        "9d: summary.tsv lists the whole topSampleSet (structures only of the output samples)",
+                        OD_ACC(outAllSummary)));
 
     t.push_back(real("topology.omegaTolerance", "<deg>", "30", "Allowed deviation of a fixed omega from 0 or 180 degrees",
                      OD_ACC(omegaTolerance)));
@@ -637,13 +660,17 @@ const std::vector<CliOption>& cliOptions() {
          if (!o.stamFile.empty()) fail("--stamFile may be given only once");
          o.stamFile = v;
        }},
-      {"mobmFiles", "<file>", "Mobile molecule (MobM), one molecule per file; required; repeatable", false,
+      {"mobmFiles", "<file>", "Mobile molecule (MobM), one molecule per file (score, localMin: every record is a pose of it); required; repeatable", false,
        [](Options& o, const std::string& v) { o.mobmFiles.push_back(v); }},
+      {"refFiles", "<file>",
+       "Reference structure of a MobM (one molecule; hydrogens optional), in --mobmFiles order; repeatable; "
+       "summary.tsv gets rmsd_ref",
+       false, [](Options& o, const std::string& v) { o.refFiles.push_back(v); }},
       {"molConfig", "<file>", "Molecule configuration file (TOML)", false,
        [](Options& o, const std::string& v) { o.molConfig = v; }},
       {"outPrefix", "<path>", "Output directory; required", false, [](Options& o, const std::string& v) { o.outPrefix = v; }},
       {"resume", "<path>",
-       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound, gpu.*, cpu.threadNum and memory.hostLimit may change", false,
+       "Continue the run in this output directory from its last checkpoint; only dock9c.maxRound, gpu.*, cpu.threadNum, memory.hostLimit and output.allSummary may change", false,
        [](Options& o, const std::string& v) {
          if (v.empty()) fail("--resume requires a directory");
          o.resume = v;
@@ -886,6 +913,9 @@ void requireConfSampleNums(const Options& o, SampleSet set) {
 void validateOptions(const Options& o) {
   if (o.stamFile.empty()) fail("--stamFile is required");
   if (o.mobmFiles.empty()) fail("At least one --mobmFiles is required");
+  if (!o.refFiles.empty() && o.refFiles.size() != o.mobmFiles.size())
+    fail("--refFiles: {} given, one per --mobmFiles ({}) is required", o.refFiles.size(), o.mobmFiles.size());
+  if (o.runMode != "dock" && !o.resume.empty()) fail("--resume requires {} = dock", nm("run.mode"));
   if (o.outPrefix.empty()) fail("--outPrefix is required");
   if (o.boxMode == "manual") {
     if (!o.boxCenter) fail("{} is required with {} = manual", nm("box.center"), nm("box.mode"));
@@ -894,7 +924,7 @@ void validateOptions(const Options& o) {
   if (o.boxSize)
     for (double v : *o.boxSize)
       if (!(v > 0)) fail("{}: all components must be > 0", nm("box.size"));
-  if (o.posm.empty()) fail("{} is required", nm("dock9b.posm"));
+  if (o.posm.empty() && o.runMode == "dock") fail("{} is required", nm("dock9b.posm"));
   auto check = [](bool ok, const std::string& key, const std::string& rule) {
     if (!ok) fail("{} must be {}", nm(key), rule);
   };

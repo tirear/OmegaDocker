@@ -44,9 +44,7 @@ struct ResidueRec {
   std::map<std::string, int> atomByName;  // atom name -> structure atom index
 };
 
-}  // namespace
-
-RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd) {
+gemmi::Structure readGemmi(const std::string& path) {
   gemmi::Structure st;
   try {
     gemmi::cif::Document doc = gemmi::cif::read_file(path);
@@ -58,8 +56,11 @@ RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd) {
     fail("Cannot read mmCIF file {}: {}", path, e.what());
   }
   if (st.models.empty()) fail("{}: no atoms", path);
-  if (st.models.size() > 1) logWarn(std::format("{}: {} models found; only the first is used", path, st.models.size()));
+  return st;
+}
 
+RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const std::string& path, const CcdLibrary& ccd,
+                       bool connectivityOnly) {
   RawStructure s;
   s.sourceFile = path;
   s.hasResidueInfo = true;
@@ -78,7 +79,7 @@ RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd) {
     aromaticCandidate.push_back(aromatic);
   };
 
-  const gemmi::Model& model = st.models[0];
+  const gemmi::Model& model = st.models[modelIndex];
   for (const gemmi::Chain& chain : model.chains) {
     const gemmi::Residue* prev = nullptr;
     for (const gemmi::Residue& res : chain.residues) {
@@ -193,7 +194,7 @@ RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd) {
     addBond(ia, ib, metal ? BondOrder::Metal : BondOrder::Single, false);
   }
 
-  if (errors.empty()) assignChargesAndKekule(s, aromaticCandidate, ccdCharge, errors);
+  if (errors.empty() && !connectivityOnly) assignChargesAndKekule(s, aromaticCandidate, ccdCharge, errors);
   if (!errors.empty()) {
     std::string msg = std::format("{}: {} problem(s) found:", path, errors.size());
     for (std::size_t i = 0; i < errors.size() && i < kMaxListedErrors; ++i) msg += "\n  " + errors[i];
@@ -202,7 +203,7 @@ RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd) {
   }
 
   // A thiolate close to another sulfur usually means a disulfide missing from _struct_conn.
-  for (std::size_t i = 0; i < s.atoms.size(); ++i) {
+  for (std::size_t i = 0; i < s.atoms.size() && !connectivityOnly; ++i) {
     if (s.atoms[i].atomicNum != 16 || s.atoms[i].formalCharge != -1) continue;
     for (std::size_t j = 0; j < s.atoms.size(); ++j)
       if (j != i && s.atoms[j].atomicNum == 16 && distance(s.atoms[i].xyz, s.atoms[j].xyz) < 2.5) {
@@ -217,6 +218,21 @@ RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd) {
   if (duplicateResidues > 0)
     logWarn(std::format("{}: {} residue(s) with a repeated sequence number skipped", path, duplicateResidues));
   return s;
+}
+
+}  // namespace
+
+RawStructure readMmcif(const std::string& path, const CcdLibrary& ccd, bool connectivityOnly) {
+  const gemmi::Structure st = readGemmi(path);
+  if (st.models.size() > 1) logWarn(std::format("{}: {} models found; only the first is used", path, st.models.size()));
+  return readModel(st, 0, path, ccd, connectivityOnly);
+}
+
+std::vector<RawStructure> readMmcifModels(const std::string& path, const CcdLibrary& ccd) {
+  const gemmi::Structure st = readGemmi(path);
+  std::vector<RawStructure> v;
+  for (std::size_t k = 0; k < st.models.size(); ++k) v.push_back(readModel(st, k, path, ccd, false));
+  return v;
 }
 
 }  // namespace od

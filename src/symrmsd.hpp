@@ -22,6 +22,15 @@ double fixedRmsd(std::span<const Vec3f> a, std::span<const Vec3f> b);
 std::vector<std::vector<int>> graphAutomorphisms(const std::vector<std::vector<int>>& adj, std::span<const int> label,
                                                  std::size_t limit);
 
+// One isomorphism from graph A onto graph B (labels must match); empty when there is none.
+std::vector<int> graphIsomorphism(const std::vector<std::vector<int>>& adjA, std::span<const int> labelA,
+                                  const std::vector<std::vector<int>>& adjB, std::span<const int> labelB);
+
+// Reference structure (spec 10.3): for each of atoms (heavy atoms of mol), the index of the
+// corresponding ref atom, by the heavy-atom bond graph labelled with the element (metal
+// coordination bonds excluded); the same atom order when it fits. Throws od::Error when none.
+std::vector<int> referenceAtomMap(const Molecule& mol, std::span<const int> atoms, const Molecule& ref);
+
 // Smallest sum of squared distances over one-to-one pairings of a and b within
 // each group (Hungarian method); groups: index lists covering all atoms.
 double hungarianSquaredSum(std::span<const Vec3f> a, std::span<const Vec3f> b,

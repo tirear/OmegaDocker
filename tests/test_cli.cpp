@@ -573,3 +573,35 @@ TEST_CASE("cli: integer or auto (gpu.dock9bStamNum, cpu.threadNum, memory.hostLi
   }
   std::filesystem::remove(path);
 }
+
+TEST_CASE("cli: run.mode, run.unbound, --refFiles, output.allSummary") {
+  const std::vector<const char*> base{"--stamFile=r.cif", "--mobmFiles=a.sdf", "--mobmFiles=b.sdf", "--box_center=0,0,0",
+                                      "--box_size=20,20,20", "--outPrefix=out"};
+  auto with = [&](std::vector<const char*> extra) {
+    std::vector<const char*> a = base;
+    a.insert(a.end(), extra.begin(), extra.end());
+    return parse(a);
+  };
+  const auto d = with({"--dock9b_posm=posm1"});
+  CHECK(d.runMode == "dock");
+  CHECK(d.runUnbound == "conf9a");
+  CHECK(d.refFiles.empty());
+  CHECK_FALSE(d.outAllSummary);
+  CHECK_THROWS_AS(od::validateOptions(with({})), od::Error);  // dock: dock9b.posm required
+  for (const char* m : {"--run_mode=score", "--run_mode=localMin"}) CHECK_NOTHROW(od::validateOptions(with({m})));
+  const auto s = with({"--run_mode=localMin", "--run_unbound=input", "--refFiles=a_ref.cif", "--refFiles=b_ref.sdf",
+                       "--output_allSummary=true"});
+  CHECK(s.runMode == "localMin");
+  CHECK(s.runUnbound == "input");
+  REQUIRE(s.refFiles.size() == 2);
+  CHECK(s.refFiles[1] == "b_ref.sdf");
+  CHECK(s.outAllSummary);
+  CHECK_NOTHROW(od::validateOptions(s));
+  CHECK(od::paramsText(s).find("mode = \"localMin\"") != std::string::npos);
+  CHECK_THROWS_AS(od::validateOptions(with({"--run_mode=score", "--refFiles=a_ref.cif"})), od::Error);  // one per MobM
+  CHECK_THROWS_AS(parse({"--run_mode=Score"}), od::Error);
+  CHECK_THROWS_AS(parse({"--run_unbound=9a"}), od::Error);
+  auto r = with({"--run_mode=score"});
+  r.resume = "/tmp/run1";
+  CHECK_THROWS_AS(od::validateOptions(r), od::Error);
+}

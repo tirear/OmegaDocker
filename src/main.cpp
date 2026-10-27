@@ -45,6 +45,8 @@
 #include "grid.hpp"
 #include "grow.hpp"
 #include "orient.hpp"
+#include "pool.hpp"
+#include "symrmsd.hpp"
 #include "feparams.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
@@ -336,7 +338,8 @@ class ConfSet {
   // Lowest 9a energy of the conformation samples made so far (L2 pool and dcss samples).
   float minEnergy() const {
     float e = std::numeric_limits<float>::infinity();
-    for (const auto& s : samples_) e = std::min(e, s.energy);
+    if (!poolOnly_)
+      for (const auto& s : samples_) e = std::min(e, s.energy);
     for (const auto& s : pool_) e = std::min(e, s.energy);
     return e;
   }
@@ -344,7 +347,8 @@ class ConfSet {
   std::vector<std::vector<float>> lowestAngles(int n) const {
     if (!movable()) return {{}};
     std::vector<const od::ConfSample*> v;
-    for (const auto& s : samples_) v.push_back(&s);
+    if (!poolOnly_)
+      for (const auto& s : samples_) v.push_back(&s);
     for (const auto& s : pool_) v.push_back(&s);
     std::stable_sort(v.begin(), v.end(), [](auto a, auto b) { return a->energy < b->energy; });
     std::vector<std::vector<float>> out;
@@ -383,6 +387,22 @@ class ConfSet {
     if (samples_.empty() && !movable()) od::fail("checkpoint: {}: input conformation sample missing", name_);
   }
   std::size_t sampleCount() const { return samples_.size(); }
+
+  // score / localMin (spec 6.1): the input conformation as a sample; returns its id. fill9a: the L2
+  // pool filled by csgm1, and minEnergy / lowestAngles from the pool only (run.unbound = conf9a).
+  int addInput(bool fill9a) {
+    if (!movable()) return 0;
+    od::ConfSample s;
+    const auto in = sys_.inputAngles();
+    s.angles.assign(in.begin(), in.end());
+    s.energy = static_cast<float>(sys_.evaluate(std::span<const float>(s.angles), nullptr, nullptr, nullptr).filterEnergy());
+    samples_.push_back(std::move(s));
+    if (fill9a) {
+      refill({});
+      poolOnly_ = true;
+    }
+    return static_cast<int>(samples_.size()) - 1;
+  }
   int dockingNum() const { return movable() ? n_.docking : 1; }
   int eliteNum() const { return movable() ? n_.elite : 1; }
 
@@ -488,6 +508,7 @@ class ConfSet {
   long long nextL1_ = 0;
   std::vector<od::ConfSample> pool_;     // L2 pool, first in first out
   std::vector<od::ConfSample> samples_;  // samples moved to a dcss; the input conformation when not movable
+  bool poolOnly_ = false;                // addInput(true)
 };
 
 od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
@@ -547,6 +568,14 @@ struct MobState {
   std::size_t bufferNum = 0;  // sampleBufferNum
   std::unique_ptr<od::MobmHeavyAtoms> heavy;
   std::unique_ptr<od::SymmetryRmsd> sym;
+  std::vector<od::Vec3f> ref;  // reference heavy atoms (box frame) in MobmHeavyAtoms order; empty without --refFiles
+  // score / localMin (spec 6.1), per entry of top: record (from 1), fit RMSD of the record, grid status.
+  struct Input {
+    int record = 0;
+    float fitRmsd = 0;
+    std::string gridStatus;
+  };
+  std::vector<Input> inputs;
 };
 
 std::uint64_t pairKey(int stam, int mobm) {
@@ -774,7 +803,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     struct Row {
       double e9b = 0, e9bGrid = 0, inter = 0, interClash = 0, mobIntra = 0, mobClash = 0, stamTerm = 0, stamIntra = 0,
              stamClash = 0;
-      double dgAd = 0, dgOd = 0, gComplex = 0, mtsStam = 0, mtsMobm = 0;
+      double dgAd = 0, dgOd = 0, gComplex = 0, mtsStam = 0, mtsMobm = 0, rmsdRef = 0;
       Terms4 inter4{}, dIntra4{};
       std::vector<od::Vec3f> world;
     };
@@ -785,6 +814,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       Row& w = rows[k];
       const auto y = mob.sys().coordinates(std::span<const float>(r.s.angles));
       w.world = od::dockWorld(y, r.s);
+      if (!ms[i].ref.empty()) w.rmsdRef = ms[i].sym->rmsd(ms[i].heavy->world(r.s), ms[i].ref);
       const od::ShakeAtoms mobAtoms = od::shakeAtoms(mob.sys(), mob.parts(), w.world);
       const od::EnergyTerms mt = mob.sys().evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
       const od::InterTerms it = od::exactInter(st.atoms, mobAtoms, ep);
@@ -837,9 +867,16 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         if (z < static_cast<std::size_t>(opt.outMinPerRank)) out[o[z]] = 1;
       }
     }
+    // score / localMin: every pose output, numbered and listed in record order (spec 6.1).
+    const bool inputPoses = !ms[i].inputs.empty();
+    std::vector<std::size_t> listOrder = order[0];
+    if (inputPoses) {
+      std::fill(out.begin(), out.end(), 1);
+      std::iota(listOrder.begin(), listOrder.end(), 0);
+    }
     std::vector<int> pose(top.size(), 0);  // pose number, by the 9b ranking
     int poseNum = 0;
-    for (std::size_t k : order[0])
+    for (std::size_t k : listOrder)
       if (out[k]) pose[k] = ++poseNum;
 
     const std::string dir = opt.outPrefix + "/" + safeName(mob.name());
@@ -853,7 +890,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     int fallback = 0;
     std::map<int, std::vector<std::string>> stamFiles;
     std::vector<std::vector<std::string>> poseFiles(top.size());
-    for (std::size_t k : order[0]) {
+    for (std::size_t k : listOrder) {
       if (!out[k]) continue;
       const auto& r = top[k];
       if (!stamFiles.count(r.stam)) {
@@ -883,6 +920,8 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     {
       std::ofstream f = openTsv("summary.tsv");
       f << "pose\tmobm_files\tstam_files\tstam_sample\tmobm_sample";
+      if (inputPoses) f << "\tfit_rmsd\tgrid_status";
+      if (!ms[i].ref.empty()) f << "\trmsd_ref";
       for (const auto& m : methods) f << "\trank_" << m.name;
       f << "\tE_9b\tE_9b_grid\tinter\tinter_clash\tmobm_intra\tmobm_clash\tstam_term\tstam_intra\tstam_clash\tclash";
       if (opt.feAdgpu16) f << "\tdG_adgpu_16";
@@ -893,11 +932,15 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         f << "\tmTS_complex_stam\tmTS_complex_mobm\tmTS_unbound_stam\tmTS_unbound_mobm\tn_tors";
       }
       f << "\n";
-      for (std::size_t k : order[0]) {
-        if (!out[k]) continue;
+      for (std::size_t k : listOrder) {
+        if (!out[k] && !opt.outAllSummary) continue;
         const Row& w = rows[k];
-        f << std::format("{}\t{}\t{}\t{}\t{}", pose[k], joinNames(poseFiles[k]), joinNames(stamFiles[top[k].stam]),
+        const bool written = out[k] != 0;
+        f << std::format("{}\t{}\t{}\t{}\t{}", written ? std::to_string(pose[k]) : "-",
+                         written ? joinNames(poseFiles[k]) : "-", written ? joinNames(stamFiles[top[k].stam]) : "-",
                          top[k].stam, top[k].mobm);
+        if (inputPoses) f << std::format("\t{:.4f}\t{}", ms[i].inputs[k].fitRmsd, ms[i].inputs[k].gridStatus);
+        if (!ms[i].ref.empty()) f << std::format("\t{:.4f}", w.rmsdRef);
         for (std::size_t m = 0; m < methods.size(); ++m) f << '\t' << rankOf[m][k];
         f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{}", w.e9b, w.e9bGrid,
                          w.inter, w.interClash, w.mobIntra, w.mobClash, w.stamTerm, w.stamIntra, w.stamClash,
@@ -914,13 +957,15 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     }
     for (std::size_t m = 0; m < methods.size(); ++m) {
       std::ofstream f = openTsv("rank_" + methods[m].name + ".tsv");
-      f << "rank\tpose\tmobm_files\tstam_files\tenergy\tclash\n";
+      f << "rank\tpose\tmobm_files\tstam_files\tenergy\tclash" << (ms[i].ref.empty() ? "" : "\trmsd_ref") << "\n";
       for (std::size_t k : order[m]) {
         if (!out[k]) continue;
         const Row& w = rows[k];
-        f << std::format("{}\t{}\t{}\t{}\t{:.4f}\t{}\n", rankOf[m][k], pose[k], joinNames(poseFiles[k]),
+        f << std::format("{}\t{}\t{}\t{}\t{:.4f}\t{}", rankOf[m][k], pose[k], joinNames(poseFiles[k]),
                          joinNames(stamFiles[top[k].stam]), w.*methods[m].energy,
                          w.interClash + w.mobClash + w.stamClash > 0 ? "yes" : "no");
+        if (!ms[i].ref.empty()) f << std::format("\t{:.4f}", w.rmsdRef);
+        f << "\n";
       }
     }
 
@@ -937,6 +982,16 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       od::logInfo(std::format("    lowest {:<9}{}", methods[m].name + ":", s));
     }
   }
+}
+
+// Reference heavy atoms (spec 10.3) in MobmHeavyAtoms order (ref in the box frame).
+std::vector<od::Vec3f> refHeavy(const ConfSet& mob, const od::MobmHeavyAtoms& heavy, const od::Molecule& ref) {
+  std::vector<od::Vec3f> v;
+  for (int a : od::referenceAtomMap(*mob.parts()[0].mol, heavy.atoms(), ref)) {
+    const od::Vec3& p = ref.atoms[a].xyz;
+    v.push_back({static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2])});
+  }
+  return v;
 }
 
 // Checkpoints (spec 16).
@@ -1036,8 +1091,8 @@ constexpr long long kWindowPosesPerResident = 48;
 constexpr std::size_t kFftStamMax = 16;
 
 // Rounds of 9a refill, 9b docking and 9c selection (spec 6, 7.3, 8, 9).
-void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const od::Options& opt,
-               const od::FeParams& fp, std::uint64_t seed, const Checkpointing& ck, bool gpu) {
+void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, const std::vector<od::Molecule>& refs,
+               const od::Options& opt, const od::FeParams& fp, std::uint64_t seed, const Checkpointing& ck, bool gpu) {
   std::vector<od::Ad4Type> probe;
   for (const auto& m : mobSets)
     for (od::Ad4Type t : m->sys().typing(0).type)
@@ -1219,6 +1274,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     ms[i].sym = std::make_unique<od::SymmetryRmsd>(*mobSets[i]->parts()[0].mol, ms[i].heavy->atoms(), ms[i].heavy->types(),
                                                    static_cast<std::size_t>(opt.symMaxPerm));
     const double symSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
+    if (!refs.empty()) ms[i].ref = refHeavy(*mobSets[i], *ms[i].heavy, refs[i]);
     od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
                             mobSets[i]->name(), ms[i].topNum, ms[i].bufferNum,
                             ms[i].sym->usesPermutations()
@@ -1978,7 +2034,7 @@ std::vector<od::InputHash> inputHashes(const od::Options& opt) {
 }
 
 // --resume (spec 16.4): parameters of the last checkpoint, then the command line
-// (input files may be given again, e.g. when moved); only dock9c.maxRound, gpu.*, cpu.threadNum and memory.hostLimit may differ.
+// (input files may be given again, e.g. when moved); only dock9c.maxRound, gpu.*, cpu.threadNum, memory.hostLimit and output.allSummary may differ.
 od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpointing& ck) {
   if (!cli.paramFile.empty()) od::fail("--paramFile cannot be used with --resume (the checkpoint parameters are used)");
   if (!cli.outPrefix.empty()) od::fail("--outPrefix cannot be used with --resume (the run continues in the --resume directory)");
@@ -2019,6 +2075,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
   cmp.gpuPackedMaps = stored.gpuPackedMaps;
   cmp.memHostLimit = stored.memHostLimit;
   cmp.cpuThreadNum = stored.cpuThreadNum;
+  cmp.outAllSummary = stored.outAllSummary;
   const std::string a = od::paramsText(stored), b = od::paramsText(cmp);
   if (a != b) {
     auto lines = [](const std::string& s) {
@@ -2038,7 +2095,7 @@ od::Options resumeOptions(int argc, char** argv, const od::Options& cli, Checkpo
       const std::string x = k < la.size() ? la[k] : "", y = k < lb.size() ? lb[k] : "";
       if (x != y) diff += std::format("\n  checkpoint: {}\n  now:        {}", x, y);
     }
-    od::fail("--resume: only dock9c.maxRound, gpu.*, cpu.threadNum and memory.hostLimit may differ from the checkpoint parameters:{}", diff);
+    od::fail("--resume: only dock9c.maxRound, gpu.*, cpu.threadNum, memory.hostLimit and output.allSummary may differ from the checkpoint parameters:{}", diff);
   }
   ck.resumeDir = dir;
   ck.resumeRound = round;
@@ -2159,6 +2216,135 @@ od::BoxFrame resolveBox(const od::Options& opt, const std::vector<od::Molecule>&
   return b;
 }
 
+// score / localMin (spec 6.1): the poses of every MobM file (box frame) on the 9b grid of the
+// input StaM conformation, minimized on it (localMin), then 9d.
+void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
+              const std::vector<std::vector<std::vector<od::Vec3>>>& poses, const std::vector<od::Molecule>& refs,
+              const od::Options& opt, std::uint64_t seed, bool gpu) {
+  const bool localMin = opt.runMode == "localMin";
+  const bool fill9a = opt.runUnbound == "conf9a";
+  const int stamId = stamSet.addInput(fill9a);
+  for (auto& m : mobSets) m->addInput(fill9a);
+  float stamRel = stamSet.movable() ? stamSet.sample(stamId).energy - stamSet.minEnergy() : 0.0f;
+  if (!std::isfinite(stamRel)) {
+    od::logWarn("StaM group: no 9a conformation sample; the StaM term is 0");
+    stamRel = 0;
+  }
+
+  std::vector<od::Ad4Type> probe;
+  for (const auto& m : mobSets)
+    for (od::Ad4Type t : m->sys().typing(0).type)
+      if (t != od::Ad4Type::Merged && std::find(probe.begin(), probe.end(), t) == probe.end()) probe.push_back(t);
+  const od::GridGeometry geom = od::boxGrid(opt.box.center, opt.box.size, opt.gridSpacing);
+  if (opt.boxMode != "manual") checkGridMemory(geom, probe.size(), opt, false);
+  const auto t0 = std::chrono::steady_clock::now();
+  std::vector<od::Vec3> x;
+  stamSet.sys().evaluate(stamSet.sys().inputAngles(), nullptr, &x);
+  const od::GridAtoms ga = od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
+  const double distCap = std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing;
+  const od::StamField field =
+      od::StamField::full(std::make_shared<od::EnergyGrids>(od::buildEnergyGrids(geom, ga, probe, energyParams(opt))),
+                          std::make_shared<od::DistanceGrid>(od::buildDistanceGrid(geom, ga, distCap)));
+  od::logInfo(std::format("{}: 9b grid of the input StaM conformation, {} x {} x {} points, spacing {} Å ({:.2f} s)",
+                          opt.runMode, geom.n[0], geom.n[1], geom.n[2], geom.spacing,
+                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+  od::Dock9bParams dp = dockParams(opt, seed);
+  dp.posm = od::Posm::Posm1;
+
+  std::vector<MobState> ms(mobSets.size());
+  for (std::size_t i = 0; i < mobSets.size(); ++i) {
+    const ConfSet& mob = *mobSets[i];
+    MobState& m = ms[i];
+    m.heavy = std::make_unique<od::MobmHeavyAtoms>(mob.sys());
+    if (!refs.empty()) {
+      m.sym = std::make_unique<od::SymmetryRmsd>(*mob.parts()[0].mol, m.heavy->atoms(), m.heavy->types(),
+                                                 static_cast<std::size_t>(opt.symMaxPerm));
+      m.ref = refHeavy(mob, *m.heavy, refs[i]);
+    }
+    const od::MobmDocker dk(mob.sys(), field, dp);
+    const od::TorsionTree& tree = *mob.parts()[0].tree;
+    const od::Topology& topo = mob.settings()[0]->topology;
+    const std::size_t nAtoms = mob.parts()[0].mol->atoms.size();
+    const std::size_t n = poses[i].size();
+    m.top.resize(n);
+    m.inputs.resize(n);
+    std::vector<int> steps(n, 0);
+    const auto t1 = std::chrono::steady_clock::now();
+    od::parallelEach(static_cast<long long>(n), [&](long long r) {
+      const std::vector<od::Vec3>& X = poses[i][r];
+      std::vector<double> ang;
+      for (const auto& tt : tree.torsions) {
+        const auto& a = topo.torsions[tt.torsion].atoms;
+        ang.push_back(od::dihedralDeg(X[a[0]], X[a[1]], X[a[2]], X[a[3]]));
+      }
+      const od::MobmDocker::Conf c = dk.conformation(ang);
+      // Pose: the record superposed by the conformation at its torsion angles (bond lengths and angles of record 1).
+      std::vector<od::Vec3> from(nAtoms);
+      for (std::size_t k = 0; k < nAtoms; ++k) from[k] = {c.coords[k][0], c.coords[k][1], c.coords[k][2]};
+      const std::span<const od::Vec3> to(X.data(), nAtoms);
+      double fit = 0;
+      const od::Quat q = od::kabschQuat(from, to, fit);
+      od::Vec3 cf{}, ct{};
+      for (std::size_t k = 0; k < nAtoms; ++k)
+        for (int d = 0; d < 3; ++d) {
+          cf[d] += from[k][d] / static_cast<double>(nAtoms);
+          ct[d] += to[k][d] / static_cast<double>(nAtoms);
+        }
+      const od::Vec3 rc = od::rotate(q, {c.center[0] - cf[0], c.center[1] - cf[1], c.center[2] - cf[2]});
+      od::Pose pose;
+      for (int d = 0; d < 3; ++d) pose.t[d] = static_cast<float>(ct[d] + rc[d]);
+      pose.q = {static_cast<float>(q.w), static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z)};
+      const od::MobmDocker::PoseEnergy pe = dk.evaluate(c, pose, ang);
+      od::DockSample s;
+      s.pose = pose;
+      s.center = c.center;
+      s.angles.assign(ang.begin(), ang.end());
+      s.energy = static_cast<float>(pe.ranking());
+      s.inter = static_cast<float>(pe.inter);
+      s.interClash = static_cast<float>(pe.interClash);
+      s.intra = static_cast<float>(pe.intra.filterEnergy());
+      s.closureMaxDeviation = static_cast<float>(pe.intra.closureMaxDeviation);
+      std::string status = "ok";
+      if (pe.outside > 0) {
+        status = "outsideGrid";
+        s.energy = s.inter = std::numeric_limits<float>::quiet_NaN();
+      } else if (localMin) {
+        od::Dock9bStats st;
+        od::DockSample out;
+        if (dk.minimize(c, pose, out, st)) {
+          s = std::move(out);
+          steps[r] = s.steps;
+        } else {
+          status = "leftGrid";
+        }
+      }
+      od::RoundSample& rs = m.top[r];
+      rs.stam = stamId;
+      rs.mobm = static_cast<int>(r) + 1;
+      rs.s = std::move(s);
+      rs.stamRel = stamRel;
+      m.inputs[r] = {static_cast<int>(r) + 1, static_cast<float>(fit), status};
+    });
+    float fitMax = 0;
+    long long outside = 0, left = 0, stepSum = 0;
+    for (std::size_t r = 0; r < n; ++r) {
+      fitMax = std::max(fitMax, m.inputs[r].fitRmsd);
+      outside += m.inputs[r].gridStatus == "outsideGrid";
+      left += m.inputs[r].gridStatus == "leftGrid";
+      stepSum += steps[r];
+    }
+    od::logInfo(std::format("{} {:<38} {} pose(s): largest fit RMSD {:.4f} Å, outside the grid {}{} ({:.2f} s)", opt.runMode,
+                            mob.name(), n, fitMax, outside,
+                            localMin ? std::format(", left the grid during minimization {}, steps/pose {:.1f}", left,
+                                                   n > static_cast<std::size_t>(outside + left)
+                                                       ? static_cast<double>(stepSum) / static_cast<double>(n - outside - left)
+                                                       : 0.0)
+                                     : "",
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count()));
+  }
+  run9d(stamSet, mobSets, ms, opt, opt.fe, 0.0f, gpu);
+}
+
 int run(int argc, char** argv) {
   od::Options opt = od::parseCommandLine(argc, argv);
   if (opt.showHelp) {
@@ -2183,11 +2369,21 @@ int run(int argc, char** argv) {
 
   auto sta = od::loadMolecules(opt.stamFile, od::Role::StaM, ccd);
   std::vector<od::Molecule> mobs;
+  std::vector<std::vector<std::vector<od::Vec3>>> poses;  // score / localMin: coordinates of every record (spec 6.1)
   for (const auto& f : opt.mobmFiles) {
+    if (opt.runMode != "dock") {
+      od::PoseRecords p = od::loadPoseRecords(f, od::Role::MobM, ccd);
+      od::logInfo(std::format("{}: {} pose record(s)", f, p.xyz.size()));
+      mobs.push_back(std::move(p.mol));
+      poses.push_back(std::move(p.xyz));
+      continue;
+    }
     auto mob = od::loadMolecules(f, od::Role::MobM, ccd);
     if (mob.size() != 1) od::fail("{}: --mobmFiles file must contain exactly one molecule, found {}", f, mob.size());
     mobs.push_back(std::move(mob.front()));
   }
+  std::vector<od::Molecule> refs;
+  for (const auto& f : opt.refFiles) refs.push_back(od::loadReference(f, ccd));
   // Random seeds fit in a TOML integer (63 bits).
   const std::uint64_t seed =
       opt.seed ? *opt.seed
@@ -2195,10 +2391,14 @@ int run(int argc, char** argv) {
   od::logInfo(std::format("seed {}", seed));
   opt.seed = seed;
   opt.box = resolveBox(opt, sta, mobs, seed);
-  if (opt.box.rotated)
-    for (auto* v : {&sta, &mobs})
+  if (opt.box.rotated) {
+    for (auto* v : {&sta, &mobs, &refs})
       for (auto& m : *v)
         for (auto& a : m.atoms) a.xyz = opt.box.toBox(a.xyz);
+    for (auto& p : poses)
+      for (auto& rec : p)
+        for (auto& xyz : rec) xyz = opt.box.toBox(xyz);
+  }
   od::logInfo(std::format("StaM group from {}: {} molecule(s)", opt.stamFile, sta.size()));
   std::vector<od::Topology> staTopo;
   for (const auto& m : sta) {
@@ -2271,8 +2471,10 @@ int run(int argc, char** argv) {
     std::size_t staTorsions = 0, mobTorsions = 0;
     for (std::size_t i = 0; i < inputs.size(); ++i)
       (i < sta.size() ? staTorsions : mobTorsions) += cfg->molecules[i].tree.torsions.size();
-    if (staTorsions > 0) od::requireConfSampleNums(opt, od::SampleSet::StaM);
-    if (mobTorsions > 0) od::requireConfSampleNums(opt, od::SampleSet::MobM);
+    // score / localMin with run.unbound = input: no 9a (spec 6.1).
+    const bool conf9a = opt.runMode == "dock" || opt.runUnbound == "conf9a";
+    if (staTorsions > 0 && conf9a) od::requireConfSampleNums(opt, od::SampleSet::StaM);
+    if (mobTorsions > 0 && conf9a) od::requireConfSampleNums(opt, od::SampleSet::MobM);
   }
 
   od::logInfo("9a energy:");
@@ -2316,7 +2518,8 @@ int run(int argc, char** argv) {
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
   for (const auto& c : mobSets)
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));
-  runRounds(*stamSet, mobSets, opt, opt.fe, seed, ck, gpu);
+  if (opt.runMode == "dock") runRounds(*stamSet, mobSets, refs, opt, opt.fe, seed, ck, gpu);
+  else runScore(*stamSet, mobSets, poses, refs, opt, seed, gpu);
   return 0;
 }
 

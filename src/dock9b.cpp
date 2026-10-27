@@ -405,29 +405,8 @@ double triangleHeight(const Vec3& a, const Vec3& b, const Vec3& c) {
   return longest > 0 ? area2 / longest : 0.0;
 }
 
-// Proper rotation minimising sum |R (from_i - cf) - (to_i - ct)|^2 (Kabsch), as a quaternion; rmsd receives the
-// superposition RMSD.
 Quat kabschQuat(const std::array<Vec3, 3>& from, const std::array<Vec3, 3>& to, double& rmsd) {
-  Eigen::Vector3d cf = Eigen::Vector3d::Zero(), ct = Eigen::Vector3d::Zero();
-  for (int i = 0; i < 3; ++i) {
-    cf += Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) / 3.0;
-    ct += Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) / 3.0;
-  }
-  Eigen::Matrix3d h = Eigen::Matrix3d::Zero();
-  for (int i = 0; i < 3; ++i)
-    h += (Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) - cf) *
-         (Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) - ct).transpose();
-  const Eigen::JacobiSVD<Eigen::Matrix3d> svd(h, Eigen::ComputeFullU | Eigen::ComputeFullV);
-  Eigen::Matrix3d d = Eigen::Matrix3d::Identity();
-  d(2, 2) = (svd.matrixV() * svd.matrixU().transpose()).determinant() < 0 ? -1.0 : 1.0;
-  const Eigen::Matrix3d r = svd.matrixV() * d * svd.matrixU().transpose();
-  double sq = 0;
-  for (int i = 0; i < 3; ++i)
-    sq += (r * (Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) - cf) -
-           (Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) - ct)).squaredNorm();
-  rmsd = std::sqrt(sq / 3.0);
-  const Eigen::Quaterniond q(r);
-  return normalized(Quat{q.w(), q.x(), q.y(), q.z()});
+  return od::kabschQuat(std::span<const Vec3>(from), std::span<const Vec3>(to), rmsd);
 }
 
 }  // namespace

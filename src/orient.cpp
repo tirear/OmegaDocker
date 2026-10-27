@@ -8,7 +8,34 @@
 #include <cmath>
 #include <numbers>
 
+#include <Eigen/Dense>
+
 namespace od {
+
+Quat kabschQuat(std::span<const Vec3> from, std::span<const Vec3> to, double& rmsd) {
+  const std::size_t n = from.size();
+  const double w = static_cast<double>(n);
+  Eigen::Vector3d cf = Eigen::Vector3d::Zero(), ct = Eigen::Vector3d::Zero();
+  for (std::size_t i = 0; i < n; ++i) {
+    cf += Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) / w;
+    ct += Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) / w;
+  }
+  Eigen::Matrix3d h = Eigen::Matrix3d::Zero();
+  for (std::size_t i = 0; i < n; ++i)
+    h += (Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) - cf) *
+         (Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) - ct).transpose();
+  const Eigen::JacobiSVD<Eigen::Matrix3d> svd(h, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  Eigen::Matrix3d d = Eigen::Matrix3d::Identity();
+  d(2, 2) = (svd.matrixV() * svd.matrixU().transpose()).determinant() < 0 ? -1.0 : 1.0;
+  const Eigen::Matrix3d r = svd.matrixV() * d * svd.matrixU().transpose();
+  double sq = 0;
+  for (std::size_t i = 0; i < n; ++i)
+    sq += (r * (Eigen::Vector3d(from[i][0], from[i][1], from[i][2]) - cf) -
+           (Eigen::Vector3d(to[i][0], to[i][1], to[i][2]) - ct)).squaredNorm();
+  rmsd = std::sqrt(sq / w);
+  const Eigen::Quaterniond q(r);
+  return normalized(Quat{q.w(), q.x(), q.y(), q.z()});
+}
 
 namespace {
 

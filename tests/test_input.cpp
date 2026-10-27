@@ -6240,3 +6240,105 @@ TEST_CASE("zbench: latency" * doctest::skip()) {
   if (!std::getenv("ZB_FLOAT")) zbenchAll<double>("double");
 }
 #endif
+
+TEST_CASE("score: pose records, reference atom map, Kabsch superposition") {
+  const std::string sdf = kData + "/BTN_ideal.sdf";
+  std::ifstream in(sdf);
+  const std::string rec((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto tmp = std::filesystem::temp_directory_path();
+  // Three records: the input, the same atoms moved by +1 Å along x, and a record with one atom less.
+  std::string moved;
+  {
+    std::istringstream ss(rec);
+    std::string line;
+    int n = 0, k = 0;
+    while (std::getline(ss, line)) {
+      ++k;
+      if (k == 4) n = std::stoi(line.substr(0, 3));
+      if (k > 4 && k <= 4 + n) {
+        const double x = std::stod(line.substr(0, 10)) + 1.0;
+        line = std::format("{:10.4f}", x) + line.substr(10);
+      }
+      moved += line + "\n";
+    }
+  }
+  const std::string two = (tmp / std::format("od_test_poses_{}.sdf", ::getpid())).string();
+  std::ofstream(two) << rec << moved;
+  const od::PoseRecords p = od::loadPoseRecords(two, od::Role::MobM, ccd());
+  REQUIRE(p.xyz.size() == 2);
+  REQUIRE(p.xyz[1].size() == p.mol.atoms.size());
+  for (std::size_t i = 0; i < p.mol.atoms.size(); ++i) {
+    CHECK(p.xyz[0][i][0] == doctest::Approx(p.mol.atoms[i].xyz[0]));
+    CHECK(p.xyz[1][i][0] == doctest::Approx(p.mol.atoms[i].xyz[0] + 1.0));
+  }
+  // A second record with another element for atom 1.
+  const std::string bad = (tmp / std::format("od_test_poses_bad_{}.sdf", ::getpid())).string();
+  {
+    std::istringstream ss(rec);
+    std::string line, out;
+    int k = 0;
+    while (std::getline(ss, line)) {
+      ++k;
+      if (k == 5) line.replace(31, 3, line.substr(31, 1) == "O" ? "C  " : "O  ");
+      out += line + "\n";
+    }
+    std::ofstream(bad) << rec << out;
+  }
+  CHECK_THROWS_AS(od::loadPoseRecords(bad, od::Role::MobM, ccd()), od::Error);
+
+  // Reference in another atom order: the map recovers the correspondence.
+  const od::Molecule mol = od::loadMolecules(sdf, od::Role::MobM, ccd()).front();
+  std::vector<int> heavy;
+  for (std::size_t i = 0; i < mol.atoms.size(); ++i)
+    if (mol.atoms[i].atomicNum != 1) heavy.push_back(static_cast<int>(i));
+  od::Molecule ref = od::loadReference(sdf, ccd());
+  {
+    const auto same = od::referenceAtomMap(mol, heavy, ref);
+    CHECK(same == heavy);
+  }
+  const int n = static_cast<int>(ref.atoms.size());
+  std::vector<int> perm(n);  // new index of old atom i
+  for (int i = 0; i < n; ++i) perm[i] = (i * 7 + 3) % n;
+  REQUIRE(std::gcd(7, n) == 1);
+  od::Molecule shuffled = ref;
+  for (int i = 0; i < n; ++i) shuffled.atoms[perm[i]] = ref.atoms[i];
+  for (auto& b : shuffled.bonds) {
+    b.a = perm[b.a];
+    b.b = perm[b.b];
+  }
+  const auto map = od::referenceAtomMap(mol, heavy, shuffled);
+  REQUIRE(map.size() == heavy.size());
+  for (std::size_t k = 0; k < heavy.size(); ++k) CHECK(shuffled.atoms[map[k]].atomicNum == mol.atoms[heavy[k]].atomicNum);
+  const auto rmsdOf = [&](const std::vector<int>& m) {
+    std::vector<od::Vec3f> a, b;
+    for (std::size_t k = 0; k < heavy.size(); ++k) {
+      const auto& p1 = mol.atoms[heavy[k]].xyz;
+      const auto& p2 = shuffled.atoms[m[k]].xyz;
+      a.push_back({float(p1[0]), float(p1[1]), float(p1[2])});
+      b.push_back({float(p2[0]), float(p2[1]), float(p2[2])});
+    }
+    std::vector<int> types;
+    for (int h : heavy) types.push_back(mol.atoms[h].atomicNum);
+    return od::SymmetryRmsd(mol, heavy, types, 256).rmsd(a, b);
+  };
+  CHECK(rmsdOf(map) < 1e-6);
+  // Different molecule: no map.
+  od::Molecule fewer = ref;
+  fewer.atoms[heavy[0]].atomicNum = 9;
+  CHECK_THROWS_AS(od::referenceAtomMap(mol, heavy, fewer), od::Error);
+
+  // Kabsch: a rotated and translated copy is recovered exactly.
+  std::vector<od::Vec3> from, to;
+  const od::Quat q = od::normalized({0.8, 0.1, -0.5, 0.3});
+  for (const auto& a : mol.atoms) {
+    from.push_back(a.xyz);
+    const od::Vec3 r = od::rotate(q, a.xyz);
+    to.push_back({r[0] + 3, r[1] - 2, r[2] + 1});
+  }
+  double fit = 1;
+  const od::Quat k = od::kabschQuat(from, to, fit);
+  CHECK(fit < 1e-9);
+  CHECK(od::rotationAngle(k, q) < 1e-6);
+  std::filesystem::remove(two);
+  std::filesystem::remove(bad);
+}

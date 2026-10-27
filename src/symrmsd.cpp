@@ -8,7 +8,10 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <unordered_map>
+
+#include "log.hpp"
 
 namespace od {
 
@@ -52,13 +55,33 @@ double fixedRmsd(std::span<const Vec3f> a, std::span<const Vec3f> b) {
   return std::sqrt(s / static_cast<double>(a.size()));
 }
 
-std::vector<std::vector<int>> graphAutomorphisms(const std::vector<std::vector<int>>& adj, std::span<const int> label,
-                                                 std::size_t limit) {
-  const int n = static_cast<int>(adj.size());
+namespace {
+
+// Isomorphisms from graph A onto graph B (at most limit + 1); map[i]: image in B of vertex i of A.
+std::vector<std::vector<int>> isomorphisms(const std::vector<std::vector<int>>& adjA, std::span<const int> labelA,
+                                           const std::vector<std::vector<int>>& adjB, std::span<const int> labelB,
+                                           std::size_t limit) {
+  const int n = static_cast<int>(adjA.size());
   std::vector<std::vector<int>> out;
+  if (static_cast<int>(adjB.size()) != n) return out;
   if (n == 0) return {{}};
-  const std::vector<int> colour = refineColours(adj, label);
-  // Breadth-first order; parent[k]: an earlier neighbour of order[k], -1 for component roots.
+  // Colours refined on the disjoint union, so that they are comparable between A and B.
+  std::vector<std::vector<int>> adjU(adjA);
+  std::vector<int> labelU(labelA.begin(), labelA.end());
+  for (const auto& nb : adjB) {
+    adjU.emplace_back();
+    for (int w : nb) adjU.back().push_back(w + n);
+  }
+  labelU.insert(labelU.end(), labelB.begin(), labelB.end());
+  const std::vector<int> colourU = refineColours(adjU, labelU);
+  const std::vector<int> colourA(colourU.begin(), colourU.begin() + n), colourB(colourU.begin() + n, colourU.end());
+  {
+    std::vector<int> a = colourA, b = colourB;
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    if (a != b) return out;
+  }
+  // Breadth-first order of A; parent[k]: an earlier neighbour of order[k], -1 for component roots.
   std::vector<int> order, parent;
   std::vector<char> seen(n, 0);
   for (int r = 0; r < n; ++r) {
@@ -67,22 +90,24 @@ std::vector<std::vector<int>> graphAutomorphisms(const std::vector<std::vector<i
     order.push_back(r);
     parent.push_back(-1);
     for (std::size_t h = order.size() - 1; h < order.size(); ++h)
-      for (int w : adj[order[h]])
+      for (int w : adjA[order[h]])
         if (!seen[w]) {
           seen[w] = 1;
           order.push_back(w);
           parent.push_back(order[h]);
         }
   }
-  std::vector<std::vector<char>> isAdj(n, std::vector<char>(n, 0));
-  for (int v = 0; v < n; ++v)
-    for (int w : adj[v]) isAdj[v][w] = 1;
+  std::vector<std::vector<char>> isAdjA(n, std::vector<char>(n, 0)), isAdjB(n, std::vector<char>(n, 0));
+  for (int v = 0; v < n; ++v) {
+    for (int w : adjA[v]) isAdjA[v][w] = 1;
+    for (int w : adjB[v]) isAdjB[v][w] = 1;
+  }
   std::vector<int> map(n, -1);
   std::vector<char> used(n, 0);
   auto fits = [&](int k, int u, int v) {
-    if (used[v] || colour[v] != colour[u]) return false;
+    if (used[v] || colourB[v] != colourA[u]) return false;
     for (int j = 0; j < k; ++j)
-      if (isAdj[u][order[j]] != isAdj[v][map[order[j]]]) return false;
+      if (isAdjA[u][order[j]] != isAdjB[v][map[order[j]]]) return false;
     return true;
   };
   auto rec = [&](auto&& self, int k) -> void {
@@ -101,12 +126,70 @@ std::vector<std::vector<int>> graphAutomorphisms(const std::vector<std::vector<i
       map[u] = -1;
     };
     if (parent[k] >= 0)
-      for (int v : adj[map[parent[k]]]) tryV(v);
+      for (int v : adjB[map[parent[k]]]) tryV(v);
     else
       for (int v = 0; v < n; ++v) tryV(v);
   };
   rec(rec, 0);
   return out;
+}
+
+// Adjacency of the atoms (positions in atoms), metal coordination bonds excluded.
+std::vector<std::vector<int>> atomGraph(const Molecule& mol, std::span<const int> atoms) {
+  std::unordered_map<int, int> pos;
+  for (std::size_t k = 0; k < atoms.size(); ++k) pos[atoms[k]] = static_cast<int>(k);
+  std::vector<std::vector<int>> adj(atoms.size());
+  for (const Bond& b : mol.bonds) {
+    if (isMetalBond(mol, b)) continue;
+    const auto ia = pos.find(b.a), ib = pos.find(b.b);
+    if (ia == pos.end() || ib == pos.end()) continue;
+    adj[ia->second].push_back(ib->second);
+    adj[ib->second].push_back(ia->second);
+  }
+  return adj;
+}
+
+}  // namespace
+
+std::vector<std::vector<int>> graphAutomorphisms(const std::vector<std::vector<int>>& adj, std::span<const int> label,
+                                                 std::size_t limit) {
+  return isomorphisms(adj, label, adj, label, limit);
+}
+
+std::vector<int> graphIsomorphism(const std::vector<std::vector<int>>& adjA, std::span<const int> labelA,
+                                  const std::vector<std::vector<int>>& adjB, std::span<const int> labelB) {
+  auto v = isomorphisms(adjA, labelA, adjB, labelB, 0);
+  return v.empty() ? std::vector<int>{} : std::move(v.front());
+}
+
+std::vector<int> referenceAtomMap(const Molecule& mol, std::span<const int> atoms, const Molecule& ref) {
+  std::vector<int> refAtoms;
+  for (std::size_t i = 0; i < ref.atoms.size(); ++i)
+    if (ref.atoms[i].atomicNum != 1) refAtoms.push_back(static_cast<int>(i));
+  if (refAtoms.size() != atoms.size())
+    fail("{}: {} heavy atoms, {} has {}", ref.id, refAtoms.size(), mol.id, atoms.size());
+  std::vector<int> la, lb;
+  for (int a : atoms) la.push_back(mol.atoms[a].atomicNum);
+  for (int a : refAtoms) lb.push_back(ref.atoms[a].atomicNum);
+  const auto adjA = atomGraph(mol, atoms), adjB = atomGraph(ref, refAtoms);
+  // The same atom order first (the usual case), then a search.
+  bool same = la == lb;
+  for (std::size_t k = 0; same && k < adjA.size(); ++k) {
+    auto x = adjA[k], y = adjB[k];
+    std::sort(x.begin(), x.end());
+    std::sort(y.begin(), y.end());
+    same = x == y;
+  }
+  std::vector<int> map;
+  if (same) {
+    map.resize(atoms.size());
+    std::iota(map.begin(), map.end(), 0);
+  } else {
+    map = graphIsomorphism(adjA, la, adjB, lb);
+    if (map.empty()) fail("{}: the heavy-atom bond graph differs from {}", ref.id, mol.id);
+  }
+  for (int& m : map) m = refAtoms[m];
+  return map;
 }
 
 double hungarianSquaredSum(std::span<const Vec3f> a, std::span<const Vec3f> b,
@@ -171,16 +254,7 @@ double hungarianSquaredSum(std::span<const Vec3f> a, std::span<const Vec3f> b,
 SymmetryRmsd::SymmetryRmsd(const Molecule& mol, std::span<const int> atoms, std::span<const int> type,
                            std::size_t maxPerm) {
   const std::size_t n = atoms.size();
-  std::unordered_map<int, int> pos;
-  for (std::size_t k = 0; k < n; ++k) pos[atoms[k]] = static_cast<int>(k);
-  std::vector<std::vector<int>> adj(n);
-  for (const Bond& b : mol.bonds) {
-    if (isMetalBond(mol, b)) continue;
-    const auto ia = pos.find(b.a), ib = pos.find(b.b);
-    if (ia == pos.end() || ib == pos.end()) continue;
-    adj[ia->second].push_back(ib->second);
-    adj[ib->second].push_back(ia->second);
-  }
+  const std::vector<std::vector<int>> adj = atomGraph(mol, atoms);
   if (maxPerm >= 1) {
     auto perms = graphAutomorphisms(adj, type, maxPerm);
     if (perms.size() <= maxPerm) perms_ = std::move(perms);
