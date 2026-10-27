@@ -65,8 +65,8 @@ struct Options {
   std::vector<std::string> ccd;
   std::string runMode = "dock";        // dock | score | localMin (spec 6.1)
   std::string runUnbound = "conf9a";   // score / localMin unbound state of od_0100: conf9a | input
-  std::string stamProtonation = "input";  // input | pH (spec 3.4)
-  std::string mobmProtonation = "input";
+  std::string stamProtonation = "pH";  // input | pH (spec 3.4)
+  std::string mobmProtonation = "pH";
   double protonationPH = 7.4;
   std::optional<Vec3> boxCenter;
   std::optional<Vec3> boxSize;

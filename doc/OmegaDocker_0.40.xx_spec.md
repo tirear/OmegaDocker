@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.103 |
+| 文件版本 | 1.104 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -59,7 +59,7 @@
 規則：
 - **不自行推斷鍵級**。mmCIF 中查不到 CCD 定義的殘基 → 報錯並結束。
 - 內附標準胺基酸、核苷酸的 CCD 子集；使用者可用 `ccd <file>` 提供額外的 CCD 檔。
-- 氫原子：`stam.protonation`／`mobm.protonation = input`（預設）時由使用者提供（質子化狀態由使用者負責），程式不新增、不刪除氫原子；`= pH` 時程式移除檔案中的氫，依 `protonation.pH` 決定質子化狀態並補氫（3.4）。
+- 氫原子：`stam.protonation`／`mobm.protonation = pH`（預設）時程式移除檔案中的氫，依 `protonation.pH` 決定質子化狀態並補氫（3.4）；`= input` 時由使用者提供（質子化狀態由使用者負責），程式不新增、不刪除氫原子。
 - 鍵長、鍵角必須合理；程式不修正。
 
 **mmCIF 讀取細則：**
@@ -116,11 +116,72 @@
 
 ### 3.4 質子化狀態與補氫（`protonation`）
 
-- `stam.protonation`、`mobm.protonation`：`input`（預設，氫原子照檔案）或 `pH`（移除檔案中的氫與氘，以 `protonation.pH`（預設 7.4）下的主要質子化狀態補氫）。StaM 檔整個記錄一起處理（例如蛋白質＋配體＋金屬離子）；每個 MobM 檔各自處理（未結合狀態）。在讀檔時、分子劃分與化學判斷之前進行。
+- `stam.protonation`、`mobm.protonation`：`pH`（預設，移除檔案中的氫與氘，以 `protonation.pH`（預設 7.4）下的主要質子化狀態補氫）或 `input`（氫原子照檔案）。StaM 檔整個記錄一起處理（例如蛋白質＋配體＋金屬離子）；每個 MobM 檔各自處理（未結合狀態）。在讀檔時、分子劃分與化學判斷之前進行。
 - 主要狀態：pKa ≥ pH 時為質子化型，否則為去質子化型。
 - 方法：
   - 標準 20 種胺基酸殘基（mmCIF）的可滴定基團（Asp、Glu、His、Cys、Tyr、Lys、Arg、N 端、C 端）：PROPKA 3 的 C++ 移植（`src/propka.cpp`，LGPL-2.1，參數檔 `propka.cfg` 不修改內嵌）。輸入為整個記錄的重原子（PROPKA 略過 HOH 等 `ignore_residues`；配體依 PROPKA 的 `groups` 分型參與計算；ATOM／HETATM 依檔案）。與 Python 版 PROPKA（commit 58ceb7b）在 15 個結構（含配體、金屬離子、DNA）上的 pKa 到小數第 6 位相同。PROPKA 沒有對應基團時（例如缺原子、鏈中斷處的 N 端）用 `propka.cfg` 的模型 pKa。
-  - 其他原子（小分子、核酸、非標準殘基；SDF／mol2 全部）：Dimorphite-DL 2.1.0 規則的 C++ 移植（`src/dimorphite.cpp`，Apache-2.0，`site_substructures.smarts` 不修改內嵌）：中和反應、依檔案順序比對位點並保護已用原子、逐位點設定電荷與氫數。與 Python 版在 280 個分子、3 種 pH 下的結果相同，差別只在鹽類片段（Dimorphite 只留最大片段）與同位素氫。與原版的差別：只算一個 pH（不列舉）；每個子結構不限 50 個位點；標準胺基酸殘基與被覆寫的原子不參與中和與位點比對。
+  - 其他原子（小分子、核酸、非標準殘基；SDF／mol2 全部）：OmegaDocker 自己的官能基規則（`src/pka_rules.cpp`，1.104，不使用其他程式的檔案或程式碼）：
+    - 中性起點：N、O、S、P 上可藉增減氫消去的電荷先消去；帶正電且無氫的芳香 N 取同環中性 N 上的氫；與相反電荷相鄰的電荷（硝基、N-氧化物）與無法消去的電荷（四級銨）保留。
+    - 位點：依下表順序以 SMARTS 比對（以 RDKit 判斷芳香性後），一個原子只取第一個符合的規則；pKa 為代表化合物的文獻值（水溶液、25 °C）。多質子基團（磷酸、膦酸、焦磷酸）依序使用各級 pKa。
+    - 脂肪族胺的 β 修正：每條路徑 N–C–C–X（中間為 sp3 碳）或 N–C–X 的雜原子 X 降低 pKa：O 1.1、N 0.9、S 1.0（亞碸／碸 2.5）、P 2.5、鹵素 1.6；N–C–Y 的不飽和碳 Y：芳香 1.2、C≡N 5.3、C=O／C=S／C=N 2.6、C=C 1.0。多個修正由大到小，每個乘上前一個的 0.75 倍（tris 8.1、三乙醇胺 7.8）。
+    - 位點之間：一次決定一個位點，|pKa − pH| 最大者先（多質子基團依級數順序）；已帶電的位點使之後位點帶同號電荷較不利：依兩位點原子間的鍵數 d，同號 ΔpKa = 4.0、3.0、2.3、1.4、1.0、0.8、0.6（d = 2…8，更遠為 0），異號為一半、方向相反（乙二胺 9.9／6.9、丙二酸 2.8／5.7、胺甲基膦酸 5.4）；兩個都在 P 上的位點之間不計（磷酸類的 pKa 已含）。
+    - 未涵蓋（維持中性）：醇、醯胺、脲、芳香雜環上的其他 N（例如嘧啶、三唑、吡唑）、硼酸、非環狀烯醇、只能在其他互變異構物上滴定的基團。
+    | 規則 | 種類 | pKa | 代表化合物 |
+    |---|---|---|---|
+    | sulfonic acid | 酸 | -1.9 | methanesulfonic acid -1.9 |
+    | sulfinic acid | 酸 | 1.8 | benzenesulfinic acid 1.8 |
+    | diphosphoric acid | 酸 | 0.9、2、6.6、9.4 | diphosphoric acid 0.9, 2.0, 6.6, 9.4 |
+    | phosphoric acid | 酸 | 2.15、7.2、12.35 | phosphoric acid 2.15, 7.20, 12.35 |
+    | phosphate monoester | 酸 | 1.5、6.3 | methyl phosphate 1.5, 6.3 |
+    | phosphonic acid | 酸 | 2.4、7.7 | methylphosphonic acid 2.4, 7.7 |
+    | phosphate diester | 酸 | 1.3 | dimethyl phosphate 1.3 |
+    | phosphonate monoester | 酸 | 2.3 | methyl methylphosphonate 2.3 |
+    | phosphinic acid | 酸 | 3.1 | dimethylphosphinic acid 3.1 |
+    | thiocarboxylic acid | 酸 | 3.4 | thioacetic acid 3.4 |
+    | acyl sulfonamide | 酸 | 4.5 | N-acetylbenzenesulfonamide 4.5 |
+    | tetrazole | 酸 | 4.9 | tetrazole 4.9 |
+    | alpha-amino acid carboxyl | 酸 | 2.3 | glycine 2.3 |
+    | aromatic carboxylic acid | 酸 | 4.2 | benzoic acid 4.2 |
+    | carboxylic acid | 酸 | 4.8 | acetic acid 4.8 |
+    | cyclic 1,3-dione enol | 酸 | 5 | 1,3-cyclohexanedione 5.3, ascorbic acid 4.1 |
+    | 2,4-dinitrophenol | 酸 | 4.1 | 2,4-dinitrophenol 4.1 |
+    | 2,6-dinitrophenol | 酸 | 3.7 | 2,6-dinitrophenol 3.7 |
+    | 4-nitrophenol | 酸 | 7.2 | 4-nitrophenol 7.2 |
+    | 2-nitrophenol | 酸 | 7.2 | 2-nitrophenol 7.2 |
+    | phenol | 酸 | 10 | phenol 10.0 |
+    | thiophenol | 酸 | 6.6 | thiophenol 6.6 |
+    | thiol | 酸 | 10.5 | ethanethiol 10.6 |
+    | N-heteroaryl sulfonamide | 酸 | 6.5 | sulfadiazine 6.5 |
+    | N-aryl sulfonamide | 酸 | 8.5 | N-phenylmethanesulfonamide 8.9 |
+    | sulfonamide | 酸 | 10.1 | benzenesulfonamide 10.1 |
+    | hydroxamic acid | 酸 | 9 | acetohydroxamic acid 9.0 |
+    | thiazolidinedione | 酸 | 6.5 | rosiglitazone 6.8 |
+    | acyl carbamate | 酸 | 6.1 | dimethadione 6.1 |
+    | barbiturate | 酸 | 7.8 | barbital 7.9 |
+    | guanine N1 | 酸 | 9.2 | guanosine 9.2 |
+    | thymine N3 | 酸 | 9.7 | thymidine 9.7 |
+    | uracil N3 | 酸 | 9.3 | uridine 9.3 |
+    | imide | 酸 | 9.6 | succinimide 9.6 |
+    | acylguanidine | 鹼 | 8.3 | acetylguanidine 8.3 |
+    | guanidine | 鹼 | 13.6 | guanidine 13.6 |
+    | isourea | 鹼 | 9.7 | O-methylisourea 9.7, S-methylisothiourea 9.8 |
+    | amidine | 鹼 | 12.4 | acetamidine 12.4 |
+    | 4-aminopyridine | 鹼 | 9.2 | 4-aminopyridine 9.2 |
+    | 2-aminopyridine | 鹼 | 6.9 | 2-aminopyridine 6.9 |
+    | cytosine N3 | 鹼 | 4.2 | cytidine 4.2 |
+    | adenine N1 | 鹼 | 3.5 | adenosine 3.5 |
+    | guanine N7 | 鹼 | 2.2 | guanosine 2.2 |
+    | benzimidazole | 鹼 | 5.5 | benzimidazole 5.5 |
+    | imidazole | 鹼 | 7 | imidazole 7.0 |
+    | pyridine | 鹼 | 5.2 | pyridine 5.2 |
+    | alpha-amino acid amine | 鹼 | 9.6 | glycine 9.6 |
+    | primary amine | 鹼 | 10.6（β 修正） | methylamine 10.6 |
+    | secondary amine | 鹼 | 11（β 修正） | dimethylamine 10.7, piperidine 11.1 |
+    | tertiary amine | 鹼 | 10（β 修正） | trimethylamine 9.8, triethylamine 10.7 |
+    | hydrazine | 鹼 | 7.9 | methylhydrazine 7.9 |
+    | aniline | 鹼 | 4.6 | aniline 4.6 |
+    | N-alkylaniline | 鹼 | 4.9 | N-methylaniline 4.9 |
+    | N,N-dialkylaniline | 鹼 | 5.1 | N,N-dimethylaniline 5.1 |
   - 起點：mmCIF 殘基用 CCD 定義的電荷與 Kekulé 鍵級（標準胺基酸為 CCD 的形式，例如 His 為 HIP、Lys 為 NH3+），隱含氫數由價數決定；SDF／mol2 用檔案的形式電荷與鍵級。
   - 金屬配位鍵（3.1）不計入價數；與金屬鍵結的可滴定原子一律為去質子化型（例如 Cys–Zn 為 CYM、His 的配位 N 不帶氫；兩個 N 都配位時兩者都不帶氫），水等非可滴定原子不受影響。
   - 雙硫鍵 Cys 不滴定。
@@ -128,7 +189,7 @@
   - 鏈末端或鏈中斷處（C 與下一殘基的 N 沒有鍵）的胺基酸若缺 OXT，在 C 的平面上補 OXT（C–O 1.25 Å），視為 C 端；N 沒有與其他殘基鍵結時視為 N 端。
   - 標準胺基酸缺重原子時給警告並列出殘基；開放的價數以氫補滿（例如截斷的側鏈末端變成 CH3）。
 - 氫的位置：依重原子的混成（RDKit）與鍵結的重原子放置：sp3 以四面體幾何、sp2 在平面上、sp 在直線上；鍵長 C–H 1.09、N–H 1.01、O–H 0.96、S–H 1.34 Å；只有一個重原子鄰居的基團以鄰居的另一個重原子為參考，交錯構型（反式起始）。
-- 可轉動氫與翻轉的最佳化（參考 reduce 的做法：離散狀態、相互作用的基團成組、組內窮舉）：
+- 可轉動氫與翻轉的最佳化（參考 reduce（rlabduke/reduce，C++ 版）的做法：離散狀態、相互作用的基團成組、組內窮舉；分數為 OmegaDocker 自己的簡化形式，不使用 reduce 的程式碼或資料）：
   - 狀態：OH、SH、sp3 NH2（每 30°，12 個）、NH3+（每 30°，4 個）、共軛 OH（0°／180°）、自由水（36 個方向）；Asn／Gln 醯胺翻轉（交換 O 與 N 的座標，2 個）；His 翻轉（交換 ND1↔CD2、CE1↔NE2，2 個；中性 His 再乘以 HID／HIE，共 4 個）；質子化羧基（Asp、Glu、C 端）中帶氫的 O（交換兩個 O 的座標）× syn／anti（4 個）。
   - 分數（愈低愈好）：氫鍵 −f(d)·g(θ)（極性氫到受體 d ≤ 2.2 Å 為 1，2.8 Å 為 0；g = −cos θ，θ 為 D–H…A 角）；兩個極性氫距離 < 2.2 Å 每 Å 罰 2；極性氫靠近不能接受氫鍵的帶氫 N／O（< 2.6 Å）每 Å 罰 1；兩個只能當受體的原子 < 3.2 Å 每 Å 罰 1；凡得瓦重疊 0–0.4 Å 每 Å 罰 2，超過 0.4 Å 另加 10 × (重疊 − 0.4)²；相隔 3 個鍵以內的原子不計。翻轉狀態另加 1（翻轉需勝過 1 才採用）；羧基 anti 加 0.05。
   - 搜尋：相互作用（4.5 Å 內有非零分數）的基團連成一組；先以 Goldstein dead-end elimination 刪除必定較差的狀態，組內狀態組合 ≤ 10⁶ 時以分枝界限法窮舉，否則逐一改善（最多 50 輪）；之後自由轉子各以 5° 步長在 ±15° 內微調。
@@ -1710,7 +1771,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `output.minPerRank` | `--output_minPerRank` | 40 | 10.3 |
 | `output.allSummary` | `--output_allSummary` | false | 10.3 |
 | `run.mode` | `--run_mode` | `dock` | 6.1（`dock`、`score`、`localMin`） |
-| `stam.protonation`、`mobm.protonation` | `--stam_protonation`、`--mobm_protonation` | `input` | 3.4（`input`、`pH`） |
+| `stam.protonation`、`mobm.protonation` | `--stam_protonation`、`--mobm_protonation` | `pH` | 3.4（`pH`、`input`） |
 | `protonation.pH` | `--protonation_pH` | 7.4 | 3.4（0–14） |
 | `run.unbound` | `--run_unbound` | `conf9a` | 6.1（`conf9a`、`input`） |
 | `topology.omegaTolerance` | `--topology_omegaTolerance` | 30° | 4.3 |
@@ -2990,11 +3051,12 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | — | 執行參數放入參數檔 `--paramFile`（TOML，與分子設定檔分開），命令列 `--<表>_<鍵>=<值>` 覆寫；舊選項名稱不保留；所有選項只接受 `--x=值`，布林值接受 true/false、1/0、yes/no；搖動權重 w_k = exp(−ΔE_k × `rrtScaling`)，預設暫定 4，不依 `temperature`；擬合時 `temperature` 固定 298.15 K（14.1、10.2） |
 | — | 效能最佳化的方向：盡可能減少對 CPU 的依賴（工作移到 GPU、CPU 不忙等），避免 CPU 被其他程式佔用時大幅變慢（15.1.24）；CPU 等待改用阻塞的執行緒池（15.1.25）；9b 的 L-BFGS 整個在 GPU 上（`gpu.dock9bDeviceMin` 預設 true），取代 1.70 的決定；先做 `lbfgs`，其他方法之後（15.1.26）；先減少 GPU 最小化器自身的時間（15.1.27），再移其他四種方法（15.1.28） |
 | — | 校準前的工具：`run.mode = score`／`localMin`（`localMin` 只動 MobM）、`run.unbound` 預設 `conf9a`（可選 `input`）、`score` 模式一個 MobM 檔可有多筆紀錄（同一分子的不同姿態）、`--refFiles` 與 `rmsd_ref`、`output.allSummary`（6.1、10.3） |
-| — | 依 pH 補氫（3.4）：蛋白質用 PROPKA 3 的 C++ 移植；小分子、核酸、非標準殘基用 Dimorphite-DL 規則的 C++ 移植（核酸改用 Dimorphite-DL，取代標準狀態）；可轉動氫與 Asn／Gln／His 翻轉參考 reduce 的做法；保留使用者提供氫的模式；覆寫寫在分子設定檔的 `[[protonation]]` |
+| — | 依 pH 補氫（3.4）：蛋白質用 PROPKA 3 的 C++ 移植；小分子、核酸、非標準殘基用官能基規則（核酸也用規則，取代標準狀態）；可轉動氫與 Asn／Gln／His 翻轉參考 reduce 的做法；保留使用者提供氫的模式；覆寫寫在分子設定檔的 `[[protonation]]` |
+| — | 小分子規則改為不使用 Dimorphite-DL（Apache-2.0，與 LGPL-2.1 不相容）檔案與程式碼的獨立實作；`stam.protonation`／`mobm.protonation` 預設改為 `pH`（3.4） |
 
 ### 17.2 待確認
-- 授權：Dimorphite-DL 為 Apache-2.0，與 (L)GPL 第 3 版相容、與 2.1 版不相容；OmegaDocker 為 LGPL-2.1-or-later，含 Dimorphite-DL 的執行檔如何授權（例如以 LGPL-3.0-or-later 散布，或改為不含其檔案與程式碼的獨立實作）待決定。
-- 預設值：`stam.protonation`／`mobm.protonation` 預設 `input`（與之前相同）、`protonation.pH` 預設 7.4；是否改預設待決定。
+- 可轉動氫與翻轉的最佳化是否改為移植 reduce2（cctbx `mmtbx/reduce`，BSD-3-Clause-LBNL，與 LGPL-2.1 相容）的計分與搜尋。
+- 3.4 小分子規則的 pKa 與修正值未以 pKa 資料集系統性驗證。
 - 3.4 的氫最佳化分數係數是以 8 個晶體結構對照 reduce 調整的經驗值，未以實驗（例如中子繞射）結構驗證。
 - 校準資料存放於 `datasetForDockingParaOpti/`（git 儲存庫外）。
 
@@ -3053,7 +3115,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | F5 | 同時調整多個兩面角的閉合方法 | RCD 是座標輪流下降，一次只調一個兩面角；耦合的組（例如 2KJJ loop A:8–15 + 雙硫鍵 A:6–A:11，20 個兩面角）多數會收斂，但需數千至數萬次更新，不是停滯（`rcdStallTolerance` 無法加速，7.11.1 嘗試 5）。方向：以閉合偏差對兩面角的 Jacobian 做最小平方法（Gauss–Newton／Levenberg–Marquardt，或 damped least squares），每步同時更新組內所有兩面角；可保留 RCD 作為起始或後備 |
 | F6 | 以 Tensor Core 加總 block 內的能量與梯度（AutoDock-GPU 的 `TENSOR=ON`） | 加總為 double 的 warp shuffle；上限估計每次評估只快 2–3%（15.1.32）。先在完整的標準測試（17.3）之後，測試以 float 加總對結果（排名、第 1 名能量、RMSD）的影響，再決定是否實作 |
 | F8 | 一個 MobM 含多個分子（例如雙股 DNA／RNA） | `--mobmFiles` 每個檔案只能有一個分子（3.1、Q3）；雙股核酸無法作為一個 MobM |
-| F9 | 以神經網路預測小分子 pKa（MolGpKa、Uni-pKa 等） | 小分子只用 Dimorphite-DL 規則（17.2），只看 2D 結構 |
+| F9 | 以神經網路預測小分子 pKa（MolGpKa、Uni-pKa 等） | 小分子只用官能基規則（3.4），只看 2D 結構 |
 | F10 | `localMin` 同時最小化 StaM 可動的部分 | `localMin` 只最小化 MobM（6.1） |
 
 ---
@@ -3166,3 +3228,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.101 | 2026-10-27 | 17.2：質子化方法決定（蛋白質移植 PROPKA 3 並參考 reduce、小分子移植 Dimorphite-DL、核酸用標準狀態）；18 新增 F9（神經網路小分子 pKa） |
 | 1.102 | 2026-10-27 | 6.1 執行模式 `run.mode`（`dock`、`score`、`localMin`）與 `run.unbound`（`conf9a`、`input`）；`score`／`localMin` 的 MobM 檔每筆紀錄為一個姿態（3.2）；`--refFiles` 與 `rmsd_ref`（3.2、10.3）；`output.allSummary`（10.3），接續時可改；17.2 核酸是否套用 Dimorphite-DL 待確認；18 新增 F10 |
 | 1.103 | 2026-10-27 | 3.4 質子化狀態與補氫：`stam.protonation`／`mobm.protonation`（`input`、`pH`）、`protonation.pH`；PROPKA 3 與 Dimorphite-DL 的 C++ 移植、金屬與雙硫鍵規則、OXT 補全、氫的放置與命名、可轉動氫與翻轉的最佳化、`[[protonation]]` 覆寫、多筆紀錄的處理；3.1 氫原子規則；14.2 參數；17.1 決定；17.2 授權與預設值待決定 |
+| 1.104 | 2026-10-27 | 3.4：小分子、核酸、非標準殘基改用 OmegaDocker 自己的官能基規則（`src/pka_rules.cpp`），移除 Dimorphite-DL 的移植與檔案；`stam.protonation`／`mobm.protonation` 預設改為 `pH`（3.1、3.4、14.2）；reduce 的參考範圍說明；17.2 改列 reduce2 與規則驗證 |

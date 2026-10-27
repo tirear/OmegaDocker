@@ -1,6 +1,5 @@
 // Generated from cmake/protonation_embedded.cpp.in. Do not edit.
-// Embeds the PROPKA 3 parameters (third_party/propka, LGPL-2.1) and the Dimorphite-DL
-// substructure file (third_party/dimorphite_dl, Apache-2.0); NUL-terminated.
+// Embeds the PROPKA 3 parameters (third_party/propka, LGPL-2.1); NUL-terminated.
 
 __asm__(".section .rodata\n"
         ".global od_propka_cfg_begin\n"
@@ -8,11 +7,5 @@ __asm__(".section .rodata\n"
         ".incbin \"@OD_PROT_DIR@/propka/propka.cfg\"\n"
         ".global od_propka_cfg_end\n"
         "od_propka_cfg_end:\n"
-        ".byte 0\n"
-        ".global od_dimorphite_smarts_begin\n"
-        "od_dimorphite_smarts_begin:\n"
-        ".incbin \"@OD_PROT_DIR@/dimorphite_dl/site_substructures.smarts\"\n"
-        ".global od_dimorphite_smarts_end\n"
-        "od_dimorphite_smarts_end:\n"
         ".byte 0\n"
         ".previous\n");

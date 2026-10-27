@@ -196,7 +196,7 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
   const std::string who = stam ? "StaM group: " : "Every MobM: ";
   auto acc = [stam](auto& o) -> auto& { return stam ? o.stam : o.mobm; };
   auto csgm = [stam](auto& o) -> auto& { return stam ? o.stamCsgm : o.mobmCsgm; };
-  t.push_back({set + ".protonation", Type::Str, "input|pH", "input",
+  t.push_back({set + ".protonation", Type::Str, "input|pH", "pH",
                who + "hydrogens as in the input file (input), or removed and replaced by those of the dominant "
                      "protonation state at protonation.pH (pH; spec 3.4)",
                [stam](Options& o, const Tokens& v) {

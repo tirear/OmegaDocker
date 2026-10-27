@@ -29,7 +29,7 @@ struct ProtonationOptions {
 
 struct ProtonationSite {
   std::string atom;    // describeAtom
-  std::string method;  // "PROPKA", "Dimorphite-DL <substructure>", "override", "metal"
+  std::string method;  // "PROPKA", "rule <functional group>", "override", "metal"
   double pka = std::numeric_limits<double>::quiet_NaN();
   std::string state;   // residue state (ASP, ASH, HIE, ...) or protonated / deprotonated
 };

@@ -2,10 +2,10 @@
 // Copyright (C) 2026 Gao Quan-Ze.
 // SPDX-License-Identifier: LGPL-2.1-or-later
 //
-// C++ port of the protonation-state rules of Dimorphite-DL 2.1.0 (Apache-2.0,
-// https://github.com/durrantlab/dimorphite_dl, commit 69ec38e) for one pH (spec 3.4):
-// neutralization reactions, site detection with atom protection, and the charge / hydrogen
-// assignment of each site. The substructure file is embedded unchanged.
+// Rule-based protonation states of small molecules, nucleic acids and non-standard residues
+// (spec 3.4): functional groups are found with SMARTS and given literature pKa values of
+// representative compounds; amines get beta-substituent corrections, sites that are charged
+// earlier shift the pKa of later sites with the same charge sign.
 
 #pragma once
 #include <memory>
@@ -16,12 +16,12 @@ namespace RDKit {
 class RWMol;
 }
 
-namespace od::dimorphite {
+namespace od::pkarules {
 
 struct Site {
-  std::string name;  // substructure name (without the leading '*')
+  std::string name;  // rule name
   int atom = -1;     // heavy-atom index
-  double pka = 0;
+  double pka = 0;    // pKa used for the decision (after corrections)
   bool protonated = false;
   bool forced = false;  // metal-bonded site atom: deprotonated regardless of the pKa
 };
@@ -37,4 +37,4 @@ struct Result {
 Result protonate(const RDKit::RWMol& heavy, double pH, const std::vector<bool>& fixed,
                  const std::vector<bool>& metalBonded);
 
-}  // namespace od::dimorphite
+}  // namespace od::pkarules

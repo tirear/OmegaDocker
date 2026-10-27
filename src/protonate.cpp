@@ -18,7 +18,7 @@
 #include <GraphMol/MolOps.h>
 
 #include "bond_orders.hpp"
-#include "dimorphite.hpp"
+#include "pka_rules.hpp"
 #include "log.hpp"
 #include "propka.hpp"
 
@@ -542,15 +542,15 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
     std::vector<int> baseH(n);
     for (int i = 0; i < n; ++i) baseH[i] = static_cast<int>(mol->getAtomWithIdx(static_cast<unsigned>(i))->getTotalNumHs());
 
-    // 5. Dimorphite-DL for all atoms outside standard amino-acid residues.
-    dimorphite::Result dm = dimorphite::protonate(*mol, opt.pH, fixed, metalBonded);
+    // 5. pKa rules for all atoms outside standard amino-acid residues.
+    pkarules::Result dm = pkarules::protonate(*mol, opt.pH, fixed, metalBonded);
     for (int i = 0; i < n; ++i) {
       const RDKit::Atom* a = dm.mol->getAtomWithIdx(static_cast<unsigned>(i));
       hCount[i] = fixed[i] ? baseH[i] : static_cast<int>(a->getTotalNumHs());
       if (!fixed[i]) charge[i] = a->getFormalCharge();
     }
     for (const auto& st : dm.sites)
-      rep.sites.push_back({describeAtom(s, st.atom), st.forced ? "metal" : "Dimorphite-DL " + st.name, st.pka,
+      rep.sites.push_back({describeAtom(s, st.atom), st.forced ? "metal" : "rule " + st.name, st.pka,
                            st.protonated ? "protonated" : "deprotonated"});
     for (std::size_t b = 0; b < s.bonds.size(); ++b) {
       const Bond& bd = s.bonds[b];

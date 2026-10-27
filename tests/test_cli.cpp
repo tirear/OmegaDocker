@@ -609,11 +609,11 @@ TEST_CASE("cli: run.mode, run.unbound, --refFiles, output.allSummary") {
 TEST_CASE("cli: stam.protonation, mobm.protonation, protonation.pH") {
   const auto d = parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20", "--outPrefix=out",
                         "--dock9b_posm=posm1"});
-  CHECK(d.stamProtonation == "input");
-  CHECK(d.mobmProtonation == "input");
+  CHECK(d.stamProtonation == "pH");
+  CHECK(d.mobmProtonation == "pH");
   CHECK(d.protonationPH == doctest::Approx(7.4));
   const auto p = parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20", "--outPrefix=out",
-                        "--dock9b_posm=posm1", "--stam_protonation=pH", "--protonation_pH=6.5"});
+                        "--dock9b_posm=posm1", "--mobm_protonation=input", "--protonation_pH=6.5"});
   CHECK(p.stamProtonation == "pH");
   CHECK(p.mobmProtonation == "input");
   CHECK(p.protonationPH == doctest::Approx(6.5));

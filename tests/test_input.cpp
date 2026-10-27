@@ -66,7 +66,7 @@
 #include "closure.hpp"
 #include "orient.hpp"
 #include "propka.hpp"
-#include "dimorphite.hpp"
+#include "pka_rules.hpp"
 #include "protonate.hpp"
 #include "read_mmcif.hpp"
 #include "score9d.hpp"
@@ -6353,7 +6353,7 @@ TEST_CASE("score: pose records, reference atom map, Kabsch superposition") {
 }
 
 
-TEST_CASE("protonation: PROPKA 3 port, Dimorphite-DL port") {
+TEST_CASE("protonation: PROPKA 3 port, pKa rules") {
   // PROPKA 3 (Python, commit 58ceb7b) pKa values of 1L2Y.
   const od::RawStructure s = od::readMmcif(kData + "/1L2Y.cif", ccd(), true);
   std::vector<od::propka::InputAtom> in;
@@ -6371,11 +6371,11 @@ TEST_CASE("protonation: PROPKA 3 port, Dimorphite-DL port") {
     CHECK(g[k].pka == doctest::Approx(ref[k].second).epsilon(1e-6));
   }
 
-  // Dimorphite-DL 2.1.0 (Python) at one pH.
-  auto dimo = [](const std::string& smi, double pH) {
+  // pKa rules: dominant state at one pH; formal charge of the result.
+  auto prot = [](const std::string& smi, double pH) {
     std::unique_ptr<RDKit::RWMol> m(RDKit::SmilesToMol(smi));
     std::vector<bool> none(m->getNumAtoms(), false);
-    auto r = od::dimorphite::protonate(*m, pH, none, none);
+    auto r = od::pkarules::protonate(*m, pH, none, none);
     RDKit::MolOps::sanitizeMol(*r.mol);
     return RDKit::MolToSmiles(*r.mol);
   };
@@ -6384,18 +6384,42 @@ TEST_CASE("protonation: PROPKA 3 port, Dimorphite-DL port") {
     return RDKit::MolToSmiles(*m);
   };
   const std::vector<std::tuple<std::string, std::string, std::string>> cases{
-      {"CC(=O)O", "CC(=O)[O-]", "CC(=O)[O-]"},
-      {"CN", "C[NH3+]", "C[NH3+]"},
-      {"c1c[nH]cn1", "c1c[nH]cn1", "c1c[nH+]c[nH]1"},
-      {"Oc1ccccc1", "Oc1ccccc1", "Oc1ccccc1"},
-      {"NC(=N)N", "NC(N)=[NH2+]", "NC(N)=[NH2+]"},
+      {"CC(=O)O", "CC(=O)[O-]", "CC(=O)O"},                         // acetic acid 4.8
+      {"CC(=O)[O-]", "CC(=O)[O-]", "CC(=O)O"},                      // input charges are removed first
+      {"CN", "C[NH3+]", "C[NH3+]"},                                 // methylamine 10.6
+      {"c1c[nH]cn1", "c1c[nH]cn1", "c1c[nH+]c[nH]1"},               // imidazole 7.0
+      {"Oc1ccccc1", "Oc1ccccc1", "Oc1ccccc1"},                      // phenol 10.0
+      {"Oc1ccc([N+](=O)[O-])cc1", "[O-]c1ccc([N+](=O)[O-])cc1", "Oc1ccc([N+](=O)[O-])cc1"},  // 4-nitrophenol 7.2; nitro kept
+      {"NC(=N)N", "NC(N)=[NH2+]", "NC(N)=[NH2+]"},                  // guanidine 13.6
+      {"Nc1ccccc1", "Nc1ccccc1", "[NH3+]c1ccccc1"},                 // aniline 4.6
+      {"c1ccncc1", "c1ccncc1", "c1cc[nH+]cc1"},                     // pyridine 5.2
+      {"c1nn[nH]n1", "c1nn[n-]n1", "c1nn[nH]n1"},                   // tetrazole 4.9
+      {"CC(=O)NC", "CNC(C)=O", "CNC(C)=O"},                         // amide: no site
+      {"C1CNCCN1", "C1C[NH2+]CCN1", "C1C[NH2+]CC[NH2+]1"},          // piperazine: 11.0 - 2 x 0.9 = 9.2; second 9.2 - 3.0 = 6.2
+      {"C1COCCN1", "C1COCC[NH2+]1", "C1COCC[NH2+]1"},               // morpholine 11.0 - 2 x 1.2 = 8.6
       {"OP(=O)(O)OCC1OC(n2cnc3c(N)ncnc32)C(O)C1O", "Nc1ncnc2c1ncn2C1OC(COP(=O)([O-])[O-])C(O)C1O",
-       "Nc1ncnc2c1ncn2C1OC(COP(=O)([O-])O)C(O)C1O"},
-      {"c1nn[nH]n1", "c1nn[n-]n1", "c1nn[nH]n1"},
-      {"CC(=O)NC", "CNC(C)=O", "CNC(C)=O"}};
-  for (const auto& [in7, at74, at4] : cases) {
-    CHECK(dimo(in7, 7.4) == canon(at74));
-    CHECK(dimo(in7, 4.0) == canon(at4));
+       "Nc1ncnc2c1ncn2C1OC(COP(=O)([O-])O)C(O)C1O"},               // AMP: phosphate 1.5 / 6.3, adenine N1 3.5
+      {"Nc1ccn(C2CCCO2)c(=O)n1", "Nc1ccn(C2CCCO2)c(=O)n1", "Nc1ccn(C2CCCO2)c(=O)[nH+]1"},  // cytosine N3 4.2
+      {"CC(C)NCC(O)COc1cccc2ccccc12", "CC(C)[NH2+]CC(O)COc1cccc2ccccc12", "CC(C)[NH2+]CC(O)COc1cccc2ccccc12"},  // propranolol
+      {"NCC(=O)O", "[NH3+]CC(=O)[O-]", "[NH3+]CC(=O)[O-]"},         // glycine 2.3 / 9.6
+      {"C[N+](C)(C)CC(=O)[O-]", "C[N+](C)(C)CC(=O)[O-]", "C[N+](C)(C)CC(=O)[O-]"}};  // betaine: quaternary N kept
+  for (const auto& [in, at74, at4] : cases) {
+    CHECK(prot(in, 7.4) == canon(at74));
+    CHECK(prot(in, 4.0) == canon(at4));
+  }
+
+  // Site report and metal-bonded sites.
+  {
+    std::unique_ptr<RDKit::RWMol> m(RDKit::SmilesToMol("OC(=O)CCS"));
+    std::vector<bool> none(m->getNumAtoms(), false), metal(m->getNumAtoms(), false);
+    metal[5] = true;
+    auto r = od::pkarules::protonate(*m, 7.4, none, metal);
+    REQUIRE(r.sites.size() == 2);
+    CHECK(r.sites[0].name == "carboxylic acid");
+    CHECK(r.sites[0].pka == doctest::Approx(4.8 + 2.3));  // thiolate 4 bonds away
+    CHECK(!r.sites[0].protonated);
+    CHECK(r.sites[1].forced);
+    CHECK(r.mol->getAtomWithIdx(5)->getFormalCharge() == -1);
   }
 }
 
