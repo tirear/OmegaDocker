@@ -1199,8 +1199,12 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       const int mv = rows[k].mobVariant;
       poseFiles[k] = od::writeStructure(dir + std::format("/pose_{:04}", pose[k]),
                                         structParts(mob.sysOf(mv), mob.partsOf(mv), rows[k].world, opt.box), fmt,
-                                        std::format("{} pose {} (StaM sample {}, MobM sample {}) E_9b {:.3f}", mob.name(),
-                                                    pose[k], r.stam, r.mobm, rows[k].e9b),
+                                        inputPoses
+                                            ? std::format("{} pose {} (StaM sample {}, MobM record {}) E_9b {:.3f}",
+                                                          mob.name(), pose[k], r.stam, ms[i].inputs[k].record,
+                                                          rows[k].e9b)
+                                            : std::format("{} pose {} (StaM sample {}, MobM sample {}) E_9b {:.3f}",
+                                                          mob.name(), pose[k], r.stam, r.mobm, rows[k].e9b),
                                         fb);
       fallback += fb;
     }
@@ -1234,7 +1238,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         const bool written = out[k] != 0;
         f << std::format("{}\t{}\t{}\t{}\t{}", written ? std::to_string(pose[k]) : "-",
                          written ? joinNames(poseFiles[k]) : "-", written ? joinNames(stamFiles[stamKey(k)]) : "-",
-                         top[k].stam, top[k].mobm);
+                         top[k].stam, inputPoses ? ms[i].inputs[k].record : top[k].mobm);
         if (inputPoses) f << std::format("\t{:.4f}\t{}", ms[i].inputs[k].fitRmsd, ms[i].inputs[k].gridStatus);
         if (!ms[i].ref.empty()) f << std::format("\t{:.4f}", w.rmsdRef);
         for (std::size_t m = 0; m < methods.size(); ++m) f << '\t' << rankOf[m][k];
@@ -2588,7 +2592,8 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const bool localMin = opt.runMode == "localMin";
   const bool fill9a = opt.runUnbound == "conf9a";
   const int stamId = stamSet.addInput(fill9a);
-  for (auto& m : mobSets) m->addInput(fill9a);
+  std::vector<int> mobIds;
+  for (auto& m : mobSets) mobIds.push_back(m->addInput(fill9a));
   float stamRel = stamSet.movable() ? stamSet.sample(stamId).energy - stamSet.minEnergy() : 0.0f;
   if (!std::isfinite(stamRel)) {
     od::logWarn("StaM group: no 9a conformation sample; the StaM term is 0");
@@ -2684,7 +2689,7 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       }
       od::RoundSample& rs = m.top[r];
       rs.stam = stamId;
-      rs.mobm = static_cast<int>(r) + 1;
+      rs.mobm = mobIds[i];
       rs.s = std::move(s);
       rs.stamRel = stamRel;
       m.inputs[r] = {static_cast<int>(r) + 1, static_cast<float>(fit), status};
