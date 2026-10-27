@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.106 |
+| 文件版本 | 1.107 |
 | 日期 | 2026-10-20 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -203,6 +203,18 @@
   - 對應的 `protonation` 不是 `pH`、檔案或位點不存在、狀態不合殘基 → 報錯。改變狀態後若扭轉的原子不同，需重新寫出預設分子設定檔。
 - `score`／`localMin` 的多筆紀錄（6.1）：第一筆紀錄決定的氫（名稱、母原子、電荷、鍵級，含 His 互變異構）套用到所有紀錄；各紀錄只重新最佳化轉子與翻轉。
 - 輸出：執行紀錄寫出每個檔案移除與新增的氫數、各狀態的位點數、非標準狀態（例如 ASH、HIP、CYM、中性 N 端）與覆寫、金屬決定的位點、補上的 OXT、翻轉的基團；預設分子設定檔列出每個位點的狀態、方法與 pKa，並保留已有的 `[[protonation]]`。
+
+#### 3.4.1 在其他構型重新計算質子化狀態（`protonation.recompute`）
+- 值：`none`（預設，質子化狀態只在讀檔時決定）、`l2`（9a 進入 L2 pool 的構型樣本）、`final`（9d 的結構：每個複合物姿態，以及每個未結合候選構型單獨）。只對 `protonation = pH` 的組（StaM 群、每個 MobM）作用；兩組都是 `input` 時警告且無作用。不可在 `--resume` 時改變。
+- 範圍：標準胺基酸的可滴定位點（ASP、GLU、C 端、N 端、CYS（非雙硫鍵）、TYR、LYS、ARG、HIS），StaM 群與胜肽 MobM 都適用。小分子、核酸、非標準殘基的官能基規則只看 2D 結構，不重算。與金屬鍵結的位點、`[[protonation]]` 指定的殘基（含其原子）固定不變。
+- 方法：以構型的重原子座標執行 PROPKA 3（`final` 的複合物：StaM 群與 MobM 一起；無殘基資訊的分子以配體身分加入），pKa ≥ `protonation.pH` 為質子化。狀態與讀檔時（基準）不同的位點構成一個質子化變體；His 由 HIP 變中性時取 HIE，其他 His 保持原互變異構。PROPKA 沒有給值的位點保持原狀態。
+- 質子化變體：每種變化組合一個分子變體與自己的能量系統（`ProtonationVariants`，第一次需要時建立）。變體只改變位點的氫、形式電荷（His 另依狀態設定環的鍵級），重新計算 Gasteiger 電荷；新增的氫以幾何放置（兩個以上鄰原子：反向和方向；一個鄰原子：sp2 鄰原子同側 0°、否則 180°；N–H 1.01、O–H 0.96、S–H 1.34 Å），名稱依 CCD 慣例（HD2、HE2、HXT、HG、HH、HD1、HE2、HZ1–3、HH21／HH22、N 端 H1–H3 或 H、H2），排在所屬殘基最後一個原子之後。扭轉樹沿用基準分子的扭轉（數量與順序相同，新增的氫隨母原子移動），因此樣本的兩面角向量不變，重原子座標與基準相同。
+- 質子化自由能（kcal/mol，相對於基準狀態）：每個改變的位點，得到質子 ln(10)·RT·(pH − pKa)，失去質子 ln(10)·RT·(pKa − pH)，pKa 為這次重算的值，T = `od_0100.temperature`。因只在主要狀態改變時才改變，每項 ≤ 0。PROPKA 的 pKa 已含環境的靜電效應，變體的 AD4 能量也含部分相同效應（重複計入，未校正）。
+- `l2`：每次 9a 補充 L2 pool 後，對新加入的樣本平行計算 PROPKA（變體編號依樣本順序指定，結果可重現）；有變化的樣本改用變體的能量（不重新最小化）＋質子化自由能作為 9a 能量（因此 StaM 項含 StaM 樣本的質子化自由能）；變體能量 ≥ `energy.Emax` 的樣本移除。9b：StaM 樣本的格點以其變體的原子建立（`flexres` 時變體樣本改建 `full`；`delta` 時變體樣本以兩組原子的全部位置作為可能改變的位置）；MobM 樣本依變體分組，每組以變體的能量系統對接（GPU：每個（MobM、變體、裝置）一個評估器，第一次需要時建立，不參與 15.1.35 的接手）；MobM 樣本的質子化自由能加到對接樣本能量（9c 排序）。檢查點記錄變體（每部分的位點與狀態）及每個樣本的變體與質子化自由能。9d 使用樣本的變體。
+- `final`：9a–9c 不變。9d 對每個複合物姿態重算（StaM 構型與 MobM 姿態一起），未結合候選構型各自單獨重算；能量以變體計算，StaM 項加上 StaM 變體與基準的 9a 能量差。
+- 9d 能量：`E_9b`、`dG_adgpu_16`、`G_complex` 加上複合物的質子化自由能（`l2` 的 `E_9b` 中 StaM 部分已在 StaM 項內）；od_0100 的未結合候選構型 G 加上其質子化自由能。`summary.tsv` 增加 `dG_prot`（複合物）、`prot_stam`、`prot_mobm`（改變的位點，例如 `A:1:GLY NH2->NH3+`；無變化為 `-`）。StaM 結構檔：基準為 `stam_<樣本>`，變體為 `stam_<樣本>_p<變體>`；姿態檔以 MobM 變體的原子寫出。
+- 實測（資料集 A：2KJJ／1L2Y，posm1，1 輪，GPU）：pH 7.4，`l2` StaM 275 個樣本中 203 個改變（1 個變體：A:1:GLY N 端 NH2→NH3+），9a 重算 0.04 s；9b 54.6 s（`none` 54.5 s）；`final` 50 個複合物中 36 個改變，9d 重算 8.67 s（`none` 8.10 s）。pH 10.3：StaM 30 個變體、MobM 2 個，9b 77.6 s（MobM 依變體分組，每組的批次較小）。
+- GPU 上重新計算（每個 L1 樣本）為未來版本支援項目 F11（18）。
 
 ---
 
@@ -1774,6 +1786,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `run.mode` | `--run_mode` | `dock` | 6.1（`dock`、`score`、`localMin`） |
 | `stam.protonation`、`mobm.protonation` | `--stam_protonation`、`--mobm_protonation` | `pH` | 3.4（`pH`、`input`） |
 | `protonation.pH` | `--protonation_pH` | 7.4 | 3.4（0–14） |
+| `protonation.recompute` | `--protonation_recompute` | `none` | 3.4.1（`none`、`l2`、`final`） |
 | `run.unbound` | `--run_unbound` | `conf9a` | 6.1（`conf9a`、`input`） |
 | `topology.omegaTolerance` | `--topology_omegaTolerance` | 30° | 4.3 |
 | `topology.acceptNonPlanarOmega` | `--topology_acceptNonPlanarOmega` | false | 4.3 |
@@ -3059,9 +3072,11 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 - 非標準殘基在鏈尾的羧基（1.106）：新增規則 N-acyl alpha-amino acid carboxyl（pKa 3.6，N-acetylglycine）。
 - pKa 重新計算的 GPU 實作列為未來版本支援項目 F11（1.106）。
 
+- 兩面角改變後重新計算質子化狀態（1.107，3.4.1）：`protonation.recompute = none | l2 | final`（預設 `none`）；每種狀態一個分子變體與能量系統；質子化自由能以重算的 pKa 計算；StaM 群與胜肽 MobM 都支援；GPU 實作列為 F11。
+
 ### 17.2 待確認
-- 兩面角改變後重新計算 pKa（`protonation.recompute`，1.105 評估）：目前質子化在讀檔時決定一次，之後所有構型的原子集合、電荷固定。小分子規則只看 2D 結構，不受兩面角影響；受影響的只有 PROPKA 處理的標準胺基酸。實測（16 執行緒機器的單執行緒）：PROPKA 每次 0.21 ms（1L2Y，154 個重原子）、0.59 ms（2KJJ）、1.6 ms（1STP）、3.3 ms（1HSG）、6.7 ms（4DFR）、49 ms（1QMZ，9122 個重原子）；完整質子化（PROPKA、補氫、翻轉最佳化）2.0、5.8、12.5、19.6、33.9、198 ms。待決定：時機（9a 後只對進入 L2 pool 的構型；9d 的複合物姿態；9a 最小化中每個 L1 樣本）、不同質子化狀態間比較能量所需的質子化自由能項、原子集合改變的處理方式（每種狀態一個分子變體與能量系統，或固定的超集合加上每個構型的遮罩與電荷）。CUDA：L2 pool 與 9d 的次數（每輪數十到數百）在 CPU 上並行即可（例如 300 個構型 × 198 ms ÷ 16 執行緒 ≈ 3.7 s）；只有對每個 L1 樣本重新計算才需要 GPU，且需要能量 kernel 支援每個樣本不同的原子集合與電荷。
 - 3.4 小分子規則的 pKa 與修正值未以 pKa 資料集系統性驗證。
+- 3.4.1 的質子化自由能與 AD4 能量的重複計入（PROPKA 的環境效應）未校正；是否改用模型化合物 pKa（環境效應只由 AD4 能量計入）待以案例比較。
 - 3.4 的接觸點分數未以實驗（例如中子繞射）結構驗證；翻轉偏差 1.5 是以 17 個晶體結構對照 reduce 4.17 選的值。
 - 校準資料存放於 `datasetForDockingParaOpti/`（git 儲存庫外）。
 
@@ -3237,3 +3252,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.104 | 2026-10-27 | 3.4：小分子、核酸、非標準殘基改用 OmegaDocker 自己的官能基規則（`src/pka_rules.cpp`），移除 Dimorphite-DL 的移植與檔案；`stam.protonation`／`mobm.protonation` 預設改為 `pH`（3.1、3.4、14.2）；reduce 的參考範圍說明；17.2 改列 reduce2 與規則驗證 |
 | 1.105 | 2026-10-27 | 17.2：更正 reduce2／probe2 的授權（Apache-2.0）並列出做法選項；新增兩面角改變後重新計算 pKa 的評估（PROPKA 與完整質子化的耗時、待決定事項、CUDA 評估） |
 | 1.106 | 2026-10-27 | 3.4：可轉動氫與翻轉改為依 Word et al. 1999 獨立實作的接觸點計分（點密度、間隙、氫鍵與重疊權重、半徑、成對分解、翻轉偏差 1.5），與 reduce 4.17 的翻轉比較；新增規則 N-acyl alpha-amino acid carboxyl；17.1 決定；17.2 移除 reduce2 待確認；18 新增 F11 |
+| 1.107 | 2026-10-27 | 3.4.1 新增 `protonation.recompute`（`none`、`l2`、`final`）：PROPKA 重算、質子化變體（分子、扭轉樹、能量系統）、質子化自由能、9a／9b／9d 與檢查點的處理、輸出欄位；14.2 參數；17.1 決定；17.2 移除評估項目、新增重複計入的待確認 |

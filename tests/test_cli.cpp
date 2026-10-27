@@ -623,4 +623,13 @@ TEST_CASE("cli: stam.protonation, mobm.protonation, protonation.pH") {
   auto bad = p;
   bad.protonationPH = 15;
   CHECK_THROWS_AS(od::validateOptions(bad), od::Error);
+  // protonation.recompute (spec 3.4.1).
+  CHECK(d.protonationRecompute == "none");
+  for (const std::string v : {"l2", "final"}) {
+    const auto q = parse({"--stamFile=r.cif", "--mobmFiles=a.sdf", "--box_center=0,0,0", "--box_size=20,20,20", "--outPrefix=out",
+                          "--dock9b_posm=posm1", ("--protonation_recompute=" + v).c_str()});
+    CHECK(q.protonationRecompute == v);
+    CHECK(od::paramsText(q).find("recompute = \"" + v + "\"") != std::string::npos);
+  }
+  CHECK_THROWS_AS(parse({"--protonation_recompute=L2"}), od::Error);
 }

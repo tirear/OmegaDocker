@@ -341,6 +341,15 @@ const std::vector<Param>& params() {
     t.push_back(real("protonation.pH", "<pH>", "7.4",
                      "pH of stam.protonation / mobm.protonation = pH: the dominant protonation state (spec 3.4)",
                      OD_ACC(protonationPH)));
+    t.push_back({"protonation.recompute", Type::Str, "none|l2|final", "none",
+                 "Recalculate the protonation states of standard amino acids (PROPKA) at other conformations: "
+                 "none, the 9a samples entering the L2 pool (l2), or the 9d structures (final) (spec 3.4.1)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "none" && s != "l2" && s != "final") fail("expected none, l2 or final but got '{}'", s);
+                   o.protonationRecompute = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.protonationRecompute}; }});
 
     t.push_back(vec3("box.center", "Docking box center (Å, input coordinates; automatic box: replaces the computed center)", OD_ACC(boxCenter)));
     t.push_back(vec3("box.size", "Docking box size (Å; automatic box: along the box axes, replaces the computed size)", OD_ACC(boxSize)));

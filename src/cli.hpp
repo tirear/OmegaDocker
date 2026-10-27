@@ -68,6 +68,7 @@ struct Options {
   std::string stamProtonation = "pH";  // input | pH (spec 3.4)
   std::string mobmProtonation = "pH";
   double protonationPH = 7.4;
+  std::string protonationRecompute = "none";  // none | l2 | final (spec 3.4.1)
   std::optional<Vec3> boxCenter;
   std::optional<Vec3> boxSize;
   std::string boxMode = "manual";       // manual | sidechainAuto | fixAuto (spec 3.3)

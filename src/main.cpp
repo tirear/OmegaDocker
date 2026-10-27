@@ -46,6 +46,7 @@
 #include "grow.hpp"
 #include "orient.hpp"
 #include "pool.hpp"
+#include "reprotonate.hpp"
 #include "symrmsd.hpp"
 #include "feparams.hpp"
 #include "score9d.hpp"
@@ -285,11 +286,26 @@ bool selectGpu(const od::Options& opt) {
 // refills and the samples moved to a dcss (spec 7.3). Sample ids index samples().
 class ConfSet {
  public:
+  // prot: the [[protonation]] entries of each part for protonation.recompute (spec 3.4.1); nullopt
+  // when the hydrogens are those of the input file.
   ConfSet(std::string name, std::vector<od::EnergyPart> parts, std::vector<const od::MolSettings*> settings,
           const od::MolConfig& cfg, const od::Options& opt, od::SampleSet set, std::uint64_t seed, std::uint64_t stream,
-          bool gpu)
+          bool gpu, const std::optional<std::vector<std::vector<od::ProtonationOverride>>>& prot = std::nullopt)
       : name_(std::move(name)), parts_(std::move(parts)), settings_(std::move(settings)), opt_(opt),
         csgm_(set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm), sys_(parts_, energyParams(opt)) {
+    if (opt.protonationRecompute != "none" && prot) {
+      prot_ = std::make_unique<od::ProtonationVariants>(sys_, parts_, *prot, energyParams(opt));
+      int n = 0, locked = 0;
+      for (std::size_t k = 0; k < prot_->partCount(); ++k)
+        for (const auto& s : prot_->sites(static_cast<int>(k))) {
+          ++n;
+          locked += s.locked;
+        }
+      od::logInfo(std::format("  {:<40} protonation.recompute {}: {} titratable site(s) of standard amino acids, {} fixed "
+                              "(metal-bonded or [[protonation]])",
+                              name_, opt.protonationRecompute, n, locked));
+      if (!prot_->active()) prot_.reset();
+    }
     if (sys_.torsionCount() == 0) {
       samples_.push_back({});
       return;
@@ -392,6 +408,10 @@ class ConfSet {
   bool movable() const { return sys_.torsionCount() > 0; }
   const od::EnergySystem& sys() const { return sys_; }
   const std::vector<od::EnergyPart>& parts() const { return parts_; }
+  // Protonation variants (spec 3.4.1); null without protonation.recompute or titratable sites.
+  od::ProtonationVariants* prot() const { return prot_.get(); }
+  const od::EnergySystem& sysOf(int variant) const { return variant == 0 || !prot_ ? sys_ : prot_->sys(variant); }
+  std::vector<od::EnergyPart> partsOf(int variant) const { return variant == 0 || !prot_ ? parts_ : prot_->parts(variant); }
   const std::vector<const od::MolSettings*>& settings() const { return settings_; }
   const od::ConfSample& sample(int id) const { return samples_[id]; }
   // Lowest 9a energy of the conformation samples made so far (L2 pool and dcss samples).
@@ -402,16 +422,16 @@ class ConfSet {
     for (const auto& s : pool_) e = std::min(e, s.energy);
     return e;
   }
-  // Angles of the n samples with the lowest 9a energy (L2 pool and dcss samples); the input conformation when not movable.
-  std::vector<std::vector<float>> lowestAngles(int n) const {
-    if (!movable()) return {{}};
+  // The n samples with the lowest 9a energy (L2 pool and dcss samples); the input conformation when not movable.
+  std::vector<od::ConfSample> lowestSamples(int n) const {
+    if (!movable()) return {od::ConfSample{}};
     std::vector<const od::ConfSample*> v;
     if (!poolOnly_)
       for (const auto& s : samples_) v.push_back(&s);
     for (const auto& s : pool_) v.push_back(&s);
     std::stable_sort(v.begin(), v.end(), [](auto a, auto b) { return a->energy < b->energy; });
-    std::vector<std::vector<float>> out;
-    for (std::size_t k = 0; k < v.size() && k < static_cast<std::size_t>(n); ++k) out.push_back(v[k]->angles);
+    std::vector<od::ConfSample> out;
+    for (std::size_t k = 0; k < v.size() && k < static_cast<std::size_t>(n); ++k) out.push_back(*v[k]);
     return out;
   }
   // Checkpoint state (spec 16.3): random stream counter, L1 batch state, L2 pool and dcss samples.
@@ -419,11 +439,29 @@ class ConfSet {
     w.put(counter_);
     w.put<std::uint8_t>(first_);
     w.put(nextL1_);
+    const bool l2 = recomputeL2();
+    if (l2) {
+      // Protonation variants in creation order: per part, (site, state) of the changes.
+      const auto n = static_cast<std::uint32_t>(prot_->count());
+      w.put(n);
+      for (std::uint32_t id = 1; id < n; ++id)
+        for (const auto& part : prot_->changes(static_cast<int>(id))) {
+          w.put<std::uint32_t>(static_cast<std::uint32_t>(part.size()));
+          for (const auto& c : part) {
+            w.put<std::int32_t>(c.site);
+            w.putVec(std::vector<char>(c.state.begin(), c.state.end()));
+          }
+        }
+    }
     for (const auto* v : {&pool_, &samples_}) {
       w.put<std::uint64_t>(v->size());
       for (const auto& s : *v) {
         w.putVec(s.angles);
         w.put(s.energy);
+        if (l2) {
+          w.put<std::int32_t>(s.variant);
+          w.put(s.protG);
+        }
       }
     }
   }
@@ -431,6 +469,26 @@ class ConfSet {
     counter_ = r.get<std::uint64_t>();
     first_ = r.get<std::uint8_t>() != 0;
     nextL1_ = r.get<long long>();
+    const bool l2 = recomputeL2();
+    if (l2) {
+      const auto n = r.get<std::uint32_t>();
+      for (std::uint32_t id = 1; id < n; ++id) {
+        std::vector<std::vector<od::StateChange>> ch(prot_->partCount());
+        for (auto& part : ch) {
+          const auto m = r.get<std::uint32_t>();
+          for (std::uint32_t k = 0; k < m; ++k) {
+            od::StateChange c;
+            c.site = r.get<std::int32_t>();
+            const auto st = r.getVec<char>();
+            c.state.assign(st.begin(), st.end());
+            if (c.site < 0 || c.site >= static_cast<int>(prot_->sites(static_cast<int>(&part - ch.data())).size()))
+              od::fail("checkpoint: {}: protonation variant with an unknown site", name_);
+            part.push_back(std::move(c));
+          }
+        }
+        if (prot_->variantOf(ch) != static_cast<int>(id)) od::fail("checkpoint: {}: protonation variants differ", name_);
+      }
+    }
     for (auto* v : {&pool_, &samples_}) {
       const auto n = r.get<std::uint64_t>();
       v->clear();
@@ -438,6 +496,12 @@ class ConfSet {
         od::ConfSample s;
         s.angles = r.getVec<float>();
         s.energy = r.get<float>();
+        if (l2) {
+          s.variant = r.get<std::int32_t>();
+          s.protG = r.get<float>();
+          if (s.variant < 0 || s.variant >= static_cast<int>(prot_->count()))
+            od::fail("checkpoint: {}: unknown protonation variant {}", name_, s.variant);
+        }
         if (s.angles.size() != static_cast<std::size_t>(sys_.torsionCount()))
           od::fail("checkpoint: {}: {} torsions in a sample, {} expected", name_, s.angles.size(), sys_.torsionCount());
         v->push_back(std::move(s));
@@ -524,8 +588,10 @@ class ConfSet {
     first_ = false;
     p_.fixedL1 = pe ? od::csgm3SampleNum(ends.size(), pe_) : 0;
     const auto t0 = std::chrono::steady_clock::now();
+    const std::size_t before = pool_.size();
     const auto st = od::fillL2Pool(sys_, gen, l1, p_, counter_, pool_);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (recomputeL2()) recomputePool(before);
     nextL1_ = st.nextL1;
     std::string rcdInfo;
 #ifdef OD_HAVE_CUDA
@@ -543,12 +609,58 @@ class ConfSet {
                             p_.evaluator ? std::format(" (generate {:.2f} s{}, GPU minimize {:.2f} s)", st.genSec, rcdInfo, st.minSec) : ""));
   }
 
+  bool recomputeL2() const { return prot_ && opt_.protonationRecompute == "l2" && movable(); }
+  // protonation.recompute = l2 (spec 3.4.1): states of the samples pool_[begin..] from PROPKA at their
+  // conformation; a sample with changes takes the energy of its variant plus the protonation free energy.
+  void recomputePool(std::size_t begin) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::size_t n = pool_.size() - begin;
+    std::vector<char> drop(n, 0);
+    std::vector<std::vector<std::vector<od::StateChange>>> ch(n);
+    std::vector<double> g(n, 0.0);
+    od::parallelEach(static_cast<long long>(n), [&](long long k) {
+      const od::ConfSample& s = pool_[begin + static_cast<std::size_t>(k)];
+      const auto x = sys_.coordinates(std::span<const float>(s.angles));
+      const auto pka = od::calculatePka(prot_->pkaMolecules(x));
+      ch[k].resize(prot_->partCount());
+      for (std::size_t p = 0; p < ch[k].size(); ++p) {
+        const auto& sites = prot_->sites(static_cast<int>(p));
+        ch[k][p] = od::stateChanges(sites, pka[p], opt_.protonationPH);
+        g[k] += od::protonationFreeEnergy(sites, ch[k][p], opt_.protonationPH, opt_.fe.temperature);
+      }
+    });
+    // Variant ids in sample order (reproducible).
+    for (std::size_t k = 0; k < n; ++k) pool_[begin + k].variant = prot_->variantOf(ch[k]);
+    od::parallelEach(static_cast<long long>(n), [&](long long k) {
+      od::ConfSample& s = pool_[begin + static_cast<std::size_t>(k)];
+      if (s.variant == 0) return;
+      const double e = prot_->sys(s.variant).evaluate(std::span<const float>(s.angles), nullptr, nullptr, nullptr).filterEnergy();
+      s.protG = static_cast<float>(g[k]);
+      s.energy = static_cast<float>(e + g[k]);
+      if (!(e < opt_.Emax)) drop[k] = 1;
+    });
+    std::size_t changed = 0, dropped = 0;
+    std::vector<od::ConfSample> kept(pool_.begin(), pool_.begin() + static_cast<long>(begin));
+    for (std::size_t k = 0; k < n; ++k) {
+      od::ConfSample& s = pool_[begin + k];
+      changed += s.variant != 0;
+      if (drop[k]) ++dropped;
+      else kept.push_back(std::move(s));
+    }
+    pool_ = std::move(kept);
+    od::logInfo(std::format("  9a {:<37} protonation.recompute: {} of {} sample(s) changed (E >= Emax with the variant: {} "
+                            "removed); {} variant(s)  {:.2f} s",
+                            name_, changed, n, dropped, prot_->count() - 1,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+  }
+
   std::string name_;
   std::vector<od::EnergyPart> parts_;
   std::vector<const od::MolSettings*> settings_;
   const od::Options& opt_;
   const od::CsgmOpts& csgm_;
   od::EnergySystem sys_;
+  std::unique_ptr<od::ProtonationVariants> prot_;
   od::Csgm1GroupSampler sampler_;
   std::vector<bool> cisTrans_;
   od::Csgm2Params ga_;
@@ -797,6 +909,48 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
   const auto lnF = [&](const od::ShakeAtoms& a) { return shakeFn ? shakeFn(a, {}) : od::shakeLnF(a, ep, sp); };
   const od::OutFormats fmt{opt.outPdb, opt.outCif, opt.outSdf, opt.outMol2};
 
+  // Protonation states (protonation.recompute, spec 3.4.1): l2, the variants of the samples; final,
+  // recalculated for each structure of 9d (complex, and each unbound candidate alone).
+  const bool recompute = opt.protonationRecompute != "none";
+  const bool recFinal = opt.protonationRecompute == "final";
+  // PROPKA molecules of a set at coordinates x of its base system.
+  const auto pkaMols = [](const ConfSet& set, std::span<const od::Vec3f> x) {
+    if (set.prot()) return set.prot()->pkaMolecules(x);
+    std::vector<od::PkaMolecule> v;
+    for (std::size_t k = 0; k < set.parts().size(); ++k) {
+      od::PkaMolecule p;
+      p.mol = set.parts()[k].mol;
+      const int off = set.sys().coordOffset(static_cast<int>(k));
+      for (std::size_t i = 0; i < p.mol->atoms.size(); ++i) p.xyz.push_back({x[off + i][0], x[off + i][1], x[off + i][2]});
+      v.push_back(std::move(p));
+    }
+    return v;
+  };
+  // Variant and protonation free energy of a set from the pKa values of its parts.
+  struct ProtState {
+    int variant = 0;
+    double g = 0;
+  };
+  const auto variantFrom = [&](const ConfSet& set, std::span<const od::PkaMap> pka) {
+    ProtState s;
+    if (!set.prot()) return s;
+    std::vector<std::vector<od::StateChange>> ch(set.prot()->partCount());
+    for (std::size_t p = 0; p < ch.size(); ++p) {
+      const auto& sites = set.prot()->sites(static_cast<int>(p));
+      ch[p] = od::stateChanges(sites, pka[p], opt.protonationPH);
+      s.g += od::protonationFreeEnergy(sites, ch[p], opt.protonationPH, fp.temperature);
+    }
+    s.variant = set.prot()->variantOf(ch);
+    return s;
+  };
+  // A sample alone: l2, its variant; final, from PROPKA of the set alone.
+  const auto aloneState = [&](const ConfSet& set, const od::ConfSample& s) {
+    if (!recFinal || !set.prot()) return ProtState{s.variant, s.protG};
+    const auto x = set.sys().coordinates(std::span<const float>(s.angles));
+    const auto pka = od::calculatePka(pkaMols(set, x));
+    return variantFrom(set, pka);
+  };
+
   // A conformation evaluated alone: atoms, 9a terms (single precision) and, when needed, ln f of its atoms.
   struct Alone {
     std::vector<od::Vec3f> x;
@@ -804,40 +958,44 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     od::EnergyTerms terms;
     std::vector<double> lnF;
     double sumLnF = 0;
+    ProtState prot;
   };
-  auto evalAlone = [&](const ConfSet& set, const std::vector<float>& angles, bool shake) {
+  auto evalAlone = [&](const ConfSet& set, const std::vector<float>& angles, ProtState ps, bool shake) {
     Alone a;
-    a.x = set.sys().coordinates(angles);
-    a.atoms = od::shakeAtoms(set.sys(), set.parts(), a.x);
-    a.terms = set.sys().evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr);
+    a.prot = ps;
+    const od::EnergySystem& sys = set.sysOf(ps.variant);
+    a.x = sys.coordinates(angles);
+    a.atoms = od::shakeAtoms(sys, set.partsOf(ps.variant), a.x);
+    a.terms = sys.evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr);
     if (shake) {
       a.lnF = lnF(a.atoms);
       a.sumLnF = std::accumulate(a.lnF.begin(), a.lnF.end(), 0.0);
     }
     return a;
   };
-  std::map<std::vector<float>, Alone> stamAlone;  // by angles
-  auto stamOf = [&](const std::vector<float>& angles) -> const Alone& {
-    auto it = stamAlone.find(angles);
-    if (it == stamAlone.end()) it = stamAlone.emplace(angles, evalAlone(stamSet, angles, opt.feOd0100)).first;
+  std::map<std::pair<int, std::vector<float>>, Alone> stamAlone;  // by variant and angles
+  auto stamOf = [&](const std::vector<float>& angles, ProtState ps) -> const Alone& {
+    auto it = stamAlone.find({ps.variant, angles});
+    if (it == stamAlone.end()) it = stamAlone.emplace(std::pair{ps.variant, angles}, evalAlone(stamSet, angles, ps, opt.feOd0100)).first;
     return it->second;
   };
-  // Unbound state: the candidate with the lowest G = sum_t intra[t] E_intra,t + entropy (-TS).
+  // Unbound state: the candidate with the lowest G = sum_t intra[t] E_intra,t + entropy (-TS) + protonation free energy.
   struct Unbound {
-    double g = 0, mts = 0;
+    double g = 0, mts = 0, protG = 0;
     Terms4 intra{};
   };
   auto unbound = [&](const ConfSet& set, bool stam) {
     Unbound u;
     u.g = std::numeric_limits<double>::infinity();
     const double cS = stam ? fp.entropyStam : fp.entropyMobm;
-    for (const auto& ang : set.lowestAngles(fp.unboundCandidateNum)) {
-      const Alone tmp = stam ? Alone{} : evalAlone(set, ang, true);
-      const Alone& a = stam ? stamOf(ang) : tmp;
+    for (const auto& smp : set.lowestSamples(fp.unboundCandidateNum)) {
+      const ProtState ps = aloneState(set, smp);
+      const Alone tmp = stam ? Alone{} : evalAlone(set, smp.angles, ps, true);
+      const Alone& a = stam ? stamOf(smp.angles, ps) : tmp;
       const Terms4 e = terms4(a.terms);
       const double mts = od::minusTS(a.sumLnF, sp);
-      const double g = dot4(fp.intra, e) + cS * mts;
-      if (g < u.g) u = {g, mts, e};
+      const double g = dot4(fp.intra, e) + cS * mts + ps.g;
+      if (g < u.g) u = {g, mts, ps.g, e};
     }
     return u;
   };
@@ -846,7 +1004,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     const auto t0 = std::chrono::steady_clock::now();
     ubStam = unbound(stamSet, true);
     od::logInfo(std::format("9d od_0100: G_unbound StaM group {:.3f}  ({} candidate(s), {:.2f} s)", ubStam.g,
-                            stamSet.lowestAngles(fp.unboundCandidateNum).size(),
+                            stamSet.lowestSamples(fp.unboundCandidateNum).size(),
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
   }
 
@@ -865,28 +1023,51 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       double dgAd = 0, dgOd = 0, gComplex = 0, mtsStam = 0, mtsMobm = 0, rmsdRef = 0;
       Terms4 inter4{}, dIntra4{};
       std::vector<od::Vec3f> world;
+      int stamVariant = 0, mobVariant = 0;
+      double protG = 0;  // protonation free energy of the complex (relative to the input protonation)
     };
     std::vector<Row> rows(top.size());
     for (std::size_t k = 0; k < top.size(); ++k) {
       const auto& r = top[k];
-      const Alone& st = stamOf(stamSet.sample(r.stam).angles);
       Row& w = rows[k];
-      const auto y = mob.sys().coordinates(std::span<const float>(r.s.angles));
+      const od::ConfSample& ss = stamSet.sample(r.stam);
+      const od::ConfSample& msmp = mob.sample(r.mobm);
+      ProtState ps{ss.variant, ss.protG}, pm{msmp.variant, msmp.protG};
+      if (recFinal && (stamSet.prot() || mob.prot())) {
+        // The complex: StaM conformation and MobM pose with the input protonation.
+        const auto xs = stamSet.sys().coordinates(std::span<const float>(ss.angles));
+        const auto xm = od::dockWorld(mob.sys().coordinates(std::span<const float>(r.s.angles)), r.s);
+        auto mols = pkaMols(stamSet, xs);
+        const std::size_t ns = mols.size();
+        for (auto& m : pkaMols(mob, xm)) mols.push_back(std::move(m));
+        const auto pka = od::calculatePka(mols);
+        ps = variantFrom(stamSet, std::span<const od::PkaMap>(pka).first(ns));
+        pm = variantFrom(mob, std::span<const od::PkaMap>(pka).subspan(ns));
+      }
+      w.stamVariant = ps.variant;
+      w.mobVariant = pm.variant;
+      w.protG = ps.g + pm.g;
+      const Alone& st = stamOf(ss.angles, ps);
+      const od::EnergySystem& msys = mob.sysOf(pm.variant);
+      const auto y = msys.coordinates(std::span<const float>(r.s.angles));
       w.world = od::dockWorld(y, r.s);
       if (!ms[i].ref.empty()) w.rmsdRef = ms[i].sym->rmsd(ms[i].heavy->world(r.s), ms[i].ref);
-      const od::ShakeAtoms mobAtoms = od::shakeAtoms(mob.sys(), mob.parts(), w.world);
-      const od::EnergyTerms mt = mob.sys().evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
+      const od::ShakeAtoms mobAtoms = od::shakeAtoms(msys, mob.partsOf(pm.variant), w.world);
+      const od::EnergyTerms mt = msys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
       const od::InterTerms it = od::exactInter(st.atoms, mobAtoms, ep);
       w.inter = it.inter();
       w.interClash = it.clash;
       w.mobIntra = mt.intra();
       w.mobClash = mt.clash;
+      // final: the StaM term of 9b with the energy change of the StaM variant; l2: the StaM sample
+      // energy (9b) includes its protonation free energy.
       w.stamTerm = r.stamRel + shift;
+      if (recFinal && ps.variant != 0) w.stamTerm += st.terms.filterEnergy() - stamOf(ss.angles, {}).terms.filterEnergy();
       w.stamIntra = st.terms.intra();
       w.stamClash = st.terms.clash;
-      w.e9b = w.inter + w.interClash + w.mobIntra + w.mobClash + w.stamTerm;
+      w.e9b = w.inter + w.interClash + w.mobIntra + w.mobClash + w.stamTerm + (recFinal ? w.protG : pm.g);
       w.e9bGrid = r.rank() + shift;
-      w.dgAd = w.inter + od::kAdgpuTorsionCoeff * nTors;
+      w.dgAd = w.inter + od::kAdgpuTorsionCoeff * nTors + w.protG;
       if (opt.feOd0100) {
         const od::ComplexLnF l = od::complexSumLnF(st.atoms, st.lnF, mobAtoms, ep, sp, shakeFn);
         w.mtsStam = od::minusTS(l.stam, sp);
@@ -899,7 +1080,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
           w.dIntra4[t] = intra4[t] - ubStam.intra[t] - ubMob.intra[t];
         }
         w.gComplex = dot4(fp.inter, w.inter4) + dot4(fp.intra, intra4) + fp.entropyStam * w.mtsStam +
-                     fp.entropyMobm * w.mtsMobm;
+                     fp.entropyMobm * w.mtsMobm + w.protG;
         w.dgOd = fp.c0 + fp.tors * nTors + w.gComplex - ubStam.g - ubMob.g;
       }
     }
@@ -947,22 +1128,29 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         std::filesystem::remove(e.path());
     }
     int fallback = 0;
-    std::map<int, std::vector<std::string>> stamFiles;
+    // StaM structures by sample and protonation variant (stam_<sample> or stam_<sample>_p<variant>).
+    std::map<std::pair<int, int>, std::vector<std::string>> stamFiles;
+    const auto stamKey = [&](std::size_t k) { return std::pair{top[k].stam, rows[k].stamVariant}; };
     std::vector<std::vector<std::string>> poseFiles(top.size());
     for (std::size_t k : listOrder) {
       if (!out[k]) continue;
       const auto& r = top[k];
-      if (!stamFiles.count(r.stam)) {
-        const Alone& st = stamOf(stamSet.sample(r.stam).angles);
+      const int sv = rows[k].stamVariant;
+      if (!stamFiles.count(stamKey(k))) {
+        const Alone& st = stamOf(stamSet.sample(r.stam).angles, {sv, 0.0});
         bool fb = false;
-        stamFiles[r.stam] = od::writeStructure(dir + std::format("/stam_{}", r.stam),
-                                               structParts(stamSet.sys(), stamSet.parts(), st.x, opt.box), fmt,
-                                               std::format("StaM conformation sample {}", r.stam), fb);
+        stamFiles[stamKey(k)] = od::writeStructure(
+            dir + (sv == 0 ? std::format("/stam_{}", r.stam) : std::format("/stam_{}_p{}", r.stam, sv)),
+            structParts(stamSet.sysOf(sv), stamSet.partsOf(sv), st.x, opt.box), fmt,
+            sv == 0 ? std::format("StaM conformation sample {}", r.stam)
+                    : std::format("StaM conformation sample {}, protonation {}", r.stam, stamSet.prot()->describe(sv)),
+            fb);
         fallback += fb;
       }
       bool fb = false;
+      const int mv = rows[k].mobVariant;
       poseFiles[k] = od::writeStructure(dir + std::format("/pose_{:04}", pose[k]),
-                                        structParts(mob.sys(), mob.parts(), rows[k].world, opt.box), fmt,
+                                        structParts(mob.sysOf(mv), mob.partsOf(mv), rows[k].world, opt.box), fmt,
                                         std::format("{} pose {} (StaM sample {}, MobM sample {}) E_9b {:.3f}", mob.name(),
                                                     pose[k], r.stam, r.mobm, rows[k].e9b),
                                         fb);
@@ -983,6 +1171,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       if (!ms[i].ref.empty()) f << "\trmsd_ref";
       for (const auto& m : methods) f << "\trank_" << m.name;
       f << "\tE_9b\tE_9b_grid\tinter\tinter_clash\tmobm_intra\tmobm_clash\tstam_term\tstam_intra\tstam_clash\tclash";
+      if (recompute) f << "\tdG_prot\tprot_stam\tprot_mobm";
       if (opt.feAdgpu16) f << "\tdG_adgpu_16";
       if (opt.feOd0100) {
         f << "\tdG_od_0100\tG_complex\tG_unbound_stam\tG_unbound_mobm";
@@ -996,7 +1185,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         const Row& w = rows[k];
         const bool written = out[k] != 0;
         f << std::format("{}\t{}\t{}\t{}\t{}", written ? std::to_string(pose[k]) : "-",
-                         written ? joinNames(poseFiles[k]) : "-", written ? joinNames(stamFiles[top[k].stam]) : "-",
+                         written ? joinNames(poseFiles[k]) : "-", written ? joinNames(stamFiles[stamKey(k)]) : "-",
                          top[k].stam, top[k].mobm);
         if (inputPoses) f << std::format("\t{:.4f}\t{}", ms[i].inputs[k].fitRmsd, ms[i].inputs[k].gridStatus);
         if (!ms[i].ref.empty()) f << std::format("\t{:.4f}", w.rmsdRef);
@@ -1004,6 +1193,11 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{}", w.e9b, w.e9bGrid,
                          w.inter, w.interClash, w.mobIntra, w.mobClash, w.stamTerm, w.stamIntra, w.stamClash,
                          w.interClash + w.mobClash + w.stamClash > 0 ? "yes" : "no");
+        if (recompute) {
+          const std::string a = w.stamVariant ? stamSet.prot()->describe(w.stamVariant) : "-";
+          const std::string b = w.mobVariant ? mob.prot()->describe(w.mobVariant) : "-";
+          f << std::format("\t{:.4f}\t{}\t{}", w.protG, a, b);
+        }
         if (opt.feAdgpu16) f << std::format("\t{:.4f}", w.dgAd);
         if (opt.feOd0100) {
           f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}", w.dgOd, w.gComplex, ubStam.g, ubMob.g);
@@ -1021,7 +1215,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         if (!out[k]) continue;
         const Row& w = rows[k];
         f << std::format("{}\t{}\t{}\t{}\t{:.4f}\t{}", rankOf[m][k], pose[k], joinNames(poseFiles[k]),
-                         joinNames(stamFiles[top[k].stam]), w.*methods[m].energy,
+                         joinNames(stamFiles[stamKey(k)]), w.*methods[m].energy,
                          w.interClash + w.mobClash + w.stamClash > 0 ? "yes" : "no");
         if (!ms[i].ref.empty()) f << std::format("\t{:.4f}", w.rmsdRef);
         f << "\n";
@@ -1032,6 +1226,11 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
                             mob.name(), top.size(), evalSec,
                             opt.feOd0100 ? std::format(", G_unbound MobM {:.3f} ({:.2f} s)", ubMob.g, unboundSec) : "",
                             poseNum, stamFiles.size(), dir));
+    if (recompute) {
+      const auto changed = std::count_if(rows.begin(), rows.end(), [](const Row& w) { return w.stamVariant || w.mobVariant; });
+      od::logInfo(std::format("    protonation.recompute {}: {} of {} sample(s) with changed states", opt.protonationRecompute,
+                              changed, rows.size()));
+    }
     for (std::size_t m = 0; m < methods.size(); ++m) {
       std::string s;
       for (std::size_t z = 0; z < order[m].size() && z < 5; ++z) {
@@ -1081,14 +1280,16 @@ void writeTopSnapshot(const std::string& dir, const ConfSet& stamSet, const std:
         bool fb = false;
         if (!stamDone[r.stam]) {
           stamDone[r.stam] = true;
-          const auto& sa = stamSet.sample(r.stam).angles;
+          const od::ConfSample& ss = stamSet.sample(r.stam);
+          const od::EnergySystem& sys = stamSet.sysOf(ss.variant);
           od::writeStructure(d + std::format("/stam_{}", r.stam),
-                             structParts(stamSet.sys(), stamSet.parts(), stamSet.sys().coordinates(std::span<const float>(sa)), opt.box),
+                             structParts(sys, stamSet.partsOf(ss.variant), sys.coordinates(std::span<const float>(ss.angles)), opt.box),
                              fmt, std::format("StaM conformation sample {}", r.stam), fb);
         }
-        const auto y = mob.sys().coordinates(std::span<const float>(r.s.angles));
+        const int mv = mob.sample(r.mobm).variant;
+        const auto y = mob.sysOf(mv).coordinates(std::span<const float>(r.s.angles));
         files = joinNames(od::writeStructure(d + std::format("/top_{:04}", k + 1),
-                                             structParts(mob.sys(), mob.parts(), od::dockWorld(y, r.s), opt.box), fmt,
+                                             structParts(mob.sysOf(mv), mob.partsOf(mv), od::dockWorld(y, r.s), opt.box), fmt,
                                              std::format("{} topSampleSet {} (StaM sample {}, MobM sample {}) E {:.3f}",
                                                          mob.name(), k + 1, r.stam, r.mobm, r.rank() + shift),
                                              fb));
@@ -1197,6 +1398,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   std::shared_ptr<od::DockStealHub> stealHub;
   std::vector<std::vector<od::GpuPoseEvaluator*>> gpuEvals;
   od::DockStealHub::Stats stealBase;  // statistics at the start of the round
+  std::vector<std::shared_ptr<od::GpuDockPrep>> gpuPreps;
   if (gpu) {
     gpuGrid = std::make_shared<od::GpuGridBuilder>(opt.gpuDevices[0]);
     for (std::size_t k = 1; k < opt.gpuDevices.size(); ++k)
@@ -1244,7 +1446,6 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     // posm2_fft (spectra of several StaM conformations shared, spec 15.1.24): the translations and
     // the minimizations of every window divided among the devices (MultiGpuPoseEvaluator).
     const bool splitWindows = gpuFields.size() > 1 && dp.posm != od::Posm::Posm2Fft;
-    std::vector<std::shared_ptr<od::GpuDockPrep>> gpuPreps;
     for (std::size_t k = 0; k < gpuFields.size(); ++k)
       gpuPreps.push_back(std::make_shared<od::GpuDockPrep>(opt.gpuDevices[k]));
     if (splitWindows) {
@@ -1272,6 +1473,35 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
 #else
   (void)gpu;
 #endif
+  // Evaluators of the protonation variants of MobM samples (protonation.recompute = l2, spec 3.4.1),
+  // made when first needed; they do not take over minimizations of other devices.
+  struct VariantKey {
+    int dev = 0;
+    std::size_t i = 0;
+    int v = 0;
+    auto operator<=>(const VariantKey&) const = default;
+  };
+  std::map<VariantKey, std::unique_ptr<od::PoseEvaluator>> variantEval;
+  const auto evalFor = [&](int d, std::size_t i, int v) -> od::PoseEvaluator* {
+    if (v == 0 || !evalOf(d, i)) return evalOf(d, i);
+    auto& e = variantEval[{d, i, v}];
+#ifdef OD_HAVE_CUDA
+    if (!e) {
+      const od::EnergyModel model = mobSets[i]->sysOf(v).model();
+      if (windowDevices > 1 || gpuFields.size() == 1) {
+        e = std::make_unique<od::GpuPoseEvaluator>(model, gpuFields[d], opt.gpuDevices[d], opt.gpuDock9bBatchNum, gpuPreps[d],
+                                                   opt.gpuDock9bDeviceMin);
+      } else {
+        std::vector<std::unique_ptr<od::GpuPoseEvaluator>> ev;
+        for (std::size_t k = 0; k < gpuFields.size(); ++k)
+          ev.push_back(std::make_unique<od::GpuPoseEvaluator>(model, gpuFields[k], opt.gpuDevices[k], opt.gpuDock9bBatchNum,
+                                                              gpuPreps[k], opt.gpuDock9bDeviceMin));
+        e = std::make_unique<od::MultiGpuPoseEvaluator>(std::move(ev));
+      }
+    }
+#endif
+    return e.get();
+  };
   // Host memory for the fields of a window (memory.hostLimit, spec 13, 15.1.16): 90% of the limit.
   const od::HostMemLimit hostLimit = od::hostMemLimit(opt.memHostLimit);
   const std::size_t hostBudget = hostLimit.bytes / 10 * 9;
@@ -1432,11 +1662,13 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     // joins the window.
     struct Group {
       int sid = 0;
+      int variant = 0;  // protonation variant of the MobM samples (spec 3.4.1)
       float stamRel = 0;
       std::unique_ptr<od::MobmDocker> dk;
       std::vector<int> mids;
       std::vector<std::vector<double>> mobAngles;
       std::vector<char> posm1Only;
+      std::vector<float> protG;  // protonation free energy of each MobM sample
       std::vector<float> lowest;
       std::vector<od::MobmDocker::PairJob> jobs;
       // Window docked on another thread (windowDevices > 1): the chunks of each job, delivered to
@@ -1450,7 +1682,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       std::unique_ptr<od::StamField> field;
       std::unique_ptr<std::vector<od::StamSepa>> sepas;
       std::shared_ptr<const od::FftStam> fft;
-      std::vector<std::unique_ptr<Group>> groups;  // per MobM; null: no pair; empty: not made yet
+      std::vector<std::vector<std::unique_ptr<Group>>> groups;  // per MobM, one per protonation variant; empty: not made yet
     };
     std::vector<WindowItem> window;
     int curDev = 0;  // device (index in gpu.device) of the window being built
@@ -1465,61 +1697,70 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       const int sid = w.sid;
       for (std::size_t i = 0; i < ms.size(); ++i) {
         const ConfSet& mob = *mobSets[i];
-        od::Dock9bParams dpi = dp;
-        dpi.evaluator = evalOf(curDev, i);
         if (std::find(ms[i].stamDcss.begin(), ms[i].stamDcss.end(), sid) == ms[i].stamDcss.end()) continue;
-        auto gp = std::make_unique<Group>();
-        Group& g = *gp;
-        g.sid = sid;
+        std::map<int, std::unique_ptr<Group>> byVariant;
         for (int mid : ms[i].mobDcss) {
           const std::uint64_t key = pairKey(sid, mid);
           if (deterministic && ms[i].pairLowest.contains(key)) {
             ++skipped[i];
             continue;
           }
+          const od::ConfSample& smp = mob.sample(mid);
+          auto& gp = byVariant[smp.variant];
+          if (!gp) {
+            gp = std::make_unique<Group>();
+            gp->sid = sid;
+            gp->variant = smp.variant;
+          }
+          Group& g = *gp;
           // posm4: the posm3 part of a pair docked before is not redone (spec 9).
           g.posm1Only.push_back(dp.posm == od::Posm::Posm4 && ms[i].pairLowest.contains(key));
-          const auto& ma = mob.sample(mid).angles;
-          g.mobAngles.push_back(mob.movable() ? std::vector<double>(ma.begin(), ma.end()) : mob.sys().inputAngles());
+          g.mobAngles.push_back(mob.movable() ? std::vector<double>(smp.angles.begin(), smp.angles.end()) : mob.sys().inputAngles());
+          g.protG.push_back(smp.protG);
           g.mids.push_back(mid);
         }
-        if (g.mids.empty()) continue;
-        g.dk = std::make_unique<od::MobmDocker>(mob.sys(), *w.field, dpi, w.sepas.get(), w.fft.get());
-        g.stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
-        g.lowest.assign(g.mids.size(), std::numeric_limits<float>::infinity());
-        g.jobs.resize(g.mids.size());
-        for (std::size_t j = 0; j < g.mids.size(); ++j) {
-          g.jobs[j].mobAnglesDeg = g.mobAngles[j];
-          g.jobs[j].stream = od::dockStream(round, i, sid, g.mids[j]);
-          g.jobs[j].posm1Only = g.posm1Only[j];
-          g.jobs[j].sink = [&, i, j, gr = &g](std::vector<od::DockSample>& chunk) {
-            sampleNum[i] += static_cast<long long>(chunk.size());
-            for (auto& s : chunk) {
-              od::RoundSample r{gr->sid, gr->mids[j], std::move(s), gr->stamRel};
-              gr->lowest[j] = std::min(gr->lowest[j], r.rank());
-              buffer[i].push_back(std::move(r));
-            }
-            if (buffer[i].size() >= ms[i].bufferNum) {
-              select(i, false);
-              ++partial[i];
-            }
-          };
+        for (auto& [variant, gp] : byVariant) {
+          Group& g = *gp;
+          od::Dock9bParams dpi = dp;
+          dpi.evaluator = evalFor(curDev, i, variant);
+          g.dk = std::make_unique<od::MobmDocker>(mob.sysOf(variant), *w.field, dpi, w.sepas.get(), w.fft.get());
+          g.stamRel = stamSet.movable() ? stamSet.sample(sid).energy - stamRef : 0.0f;
+          g.lowest.assign(g.mids.size(), std::numeric_limits<float>::infinity());
+          g.jobs.resize(g.mids.size());
+          for (std::size_t j = 0; j < g.mids.size(); ++j) {
+            g.jobs[j].mobAnglesDeg = g.mobAngles[j];
+            g.jobs[j].stream = od::dockStream(round, i, sid, g.mids[j]);
+            g.jobs[j].posm1Only = g.posm1Only[j];
+            g.jobs[j].sink = [&, i, j, gr = &g](std::vector<od::DockSample>& chunk) {
+              sampleNum[i] += static_cast<long long>(chunk.size());
+              for (auto& s : chunk) {
+                s.energy += gr->protG[j];  // l2: protonation free energy of the MobM sample
+                od::RoundSample r{gr->sid, gr->mids[j], std::move(s), gr->stamRel};
+                gr->lowest[j] = std::min(gr->lowest[j], r.rank());
+                buffer[i].push_back(std::move(r));
+              }
+              if (buffer[i].size() >= ms[i].bufferNum) {
+                select(i, false);
+                ++partial[i];
+              }
+            };
+          }
+          w.groups[i].push_back(std::move(gp));
         }
-        w.groups[i] = std::move(gp);
       }
     };
     const auto prepareItem = [&] {
       WindowItem& w = window.back();
       gpuFieldSlots(curDev, static_cast<int>(window.size()));
       if (w.groups.empty()) makeGroups(w);
-      for (std::size_t i = 0; i < ms.size(); ++i) {
-        if (!w.groups[i]) continue;
-        Group& g = *w.groups[i];
-        g.dk->prepareJobs(g.jobs);
-        for (const auto& j : g.jobs) windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
-        if (poseTarget[i] < 0)
-          poseTarget[i] = evalOf(curDev, i) ? kWindowPosesPerResident * static_cast<long long>(evalOf(curDev, i)->residentPoses(*g.dk)) : 0;
-      }
+      for (std::size_t i = 0; i < ms.size(); ++i)
+        for (const auto& gp : w.groups[i]) {
+          Group& g = *gp;
+          g.dk->prepareJobs(g.jobs);
+          for (const auto& j : g.jobs) windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
+          od::PoseEvaluator* ev = evalFor(curDev, i, g.variant);
+          if (poseTarget[i] < 0) poseTarget[i] = ev ? kWindowPosesPerResident * static_cast<long long>(ev->residentPoses(*g.dk)) : 0;
+        }
     };
 
     std::size_t windowBytes = 0, windows = 0, largestWindow = 0;
@@ -1539,15 +1780,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     const auto groupsOf = [&](std::vector<WindowItem>& win, std::size_t i) {
       std::vector<Group*> groups;
       for (WindowItem& w : win)
-        if (w.groups[i]) groups.push_back(w.groups[i].get());
+        for (const auto& g : w.groups[i]) groups.push_back(g.get());
       return groups;
     };
     // The pairs of MobM i in the window; keep: the chunks kept for the sinks (finishWindow).
     const auto dockGroups = [&](std::vector<WindowItem>& win, std::size_t i, bool keep) {
       const std::vector<Group*> groups = groupsOf(win, i);
-      std::vector<od::MobmDocker::PairGroup> pg;
+      std::map<int, std::vector<od::MobmDocker::PairGroup>> pgOf;  // per protonation variant (one evaluator each)
       for (Group* g : groups) {
-        pg.push_back({g->dk.get(), &g->jobs});
+        pgOf[g->variant].push_back({g->dk.get(), &g->jobs});
         if (!keep) continue;
         g->chunks.assign(g->jobs.size(), {});
         g->sinks.resize(g->jobs.size());
@@ -1556,7 +1797,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           g->jobs[j].sink = [c = &g->chunks[j]](std::vector<od::DockSample>& chunk) { c->push_back(std::move(chunk)); };
         }
       }
-      od::MobmDocker::dockPairs(pg, ms[i].bufferNum);
+      for (auto& [variant, pg] : pgOf) od::MobmDocker::dockPairs(pg, ms[i].bufferNum);
     };
     // Statistics and lowest energies of the docked pairs of MobM i; kept: the kept chunks are
     // delivered first, in StaM conformation, pair and chunk order (as without keeping them).
@@ -1661,13 +1902,23 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         flightDone.notify_all();
       });
     };
+    // Grid atoms of a StaM conformation sample, with its protonation variant (spec 3.4.1).
     auto stamAtomsOf = [&](int sid, bool input) {
       const auto& sa = stamSet.sample(sid).angles;
-      std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end())
-                                                               : stamSet.sys().inputAngles();
+      const int v = input ? 0 : stamSet.sample(sid).variant;
+      const od::EnergySystem& sys = stamSet.sysOf(v);
+      std::vector<double> angles = !input && stamSet.movable() ? std::vector<double>(sa.begin(), sa.end()) : sys.inputAngles();
       std::vector<od::Vec3> x;
-      stamSet.sys().evaluate(angles, nullptr, &x);
-      return od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
+      sys.evaluate(angles, nullptr, &x);
+      return od::gridAtoms(sys, stamSet.partsOf(v), x);
+    };
+    // delta: positions that may change grid values; a protonation variant differs in atoms and
+    // charges, so all atom positions of both.
+    auto deltaChanged = [&](int sid, const od::GridAtoms& a) {
+      if (stamSet.sample(sid).variant == 0) return od::changedPositions(deltaRefAtoms, a);
+      std::vector<od::Vec3> v = deltaRefAtoms.xyz;
+      v.insert(v.end(), a.xyz.begin(), a.xyz.end());
+      return v;
     };
 #ifdef OD_HAVE_CUDA
     // delta on the GPU (spec 15.1.20): the blocks of the next StaM conformation are computed while
@@ -1679,7 +1930,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     const auto builderOf = [&](int d) { return d == 0 ? gpuGrid.get() : gpuGridOthers[d - 1].get(); };
     const auto submitDelta = [&](int sid) {
       const od::GridAtoms a = stamAtomsOf(sid, false);
-      const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
+      const std::vector<od::Vec3> changed = deltaChanged(sid, a);
       const od::GridBuildData gb(geom, a, probe, energyParams(opt));
       const od::DistBuildData db(geom, a, distCap);
       deltaSid[curDev] = sid;
@@ -1710,7 +1961,11 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       const bool firstBuild = !fixedGrids;
       auto fieldPtr = std::make_unique<od::StamField>();
       od::StamField& field = *fieldPtr;
-      if (gridMode == od::GridMode::Flexres) {
+      if (gridMode == od::GridMode::Flexres && stamSet.sample(sid).variant != 0) {
+        // A protonation variant: other atoms than the fixed grids (spec 3.4.1).
+        const auto [g, d] = build(stamAtoms(false));
+        field = od::StamField::full(g, d);
+      } else if (gridMode == od::GridMode::Flexres) {
         if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(od::subset(stamAtoms(true), movedMask, false));
         od::GridAtoms moved = od::subset(stamAtoms(false), movedMask, true);
         movedSum += static_cast<long long>(moved.size());
@@ -1758,7 +2013,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
 #endif
         {
           const od::GridAtoms a = stamAtoms(false);
-          const std::vector<od::Vec3> changed = od::changedPositions(deltaRefAtoms, a);
+          const std::vector<od::Vec3> changed = deltaChanged(sid, a);
           const auto [g, d] = build(a);
           field = od::StamField::delta(fixedGrids, fixedDist, *g, *d, opt.gridDeltaThreshold, &changed);
         }
@@ -1825,8 +2080,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       for (std::size_t i = 0; i < ms.size(); ++i) {
         std::map<int, std::vector<std::pair<Group*, std::size_t>>> byMid;
         for (Built& b : items)
-          if (Group* g = b.item.groups[i].get())
-            for (std::size_t j = 0; j < g->mids.size(); ++j) byMid[g->mids[j]].emplace_back(g, j);
+          for (const auto& gp : b.item.groups[i])
+            for (std::size_t j = 0; j < gp->mids.size(); ++j) byMid[gp->mids[j]].emplace_back(gp.get(), j);
         for (auto& [mid, list] : byMid) {
           std::vector<const od::MobmDocker*> dks;
           for (const auto& [g, j] : list) dks.push_back(g->dk.get());
@@ -1834,6 +2089,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
           for (std::size_t k = 0; k < list.size(); ++k) list[k].first->jobs[list[k].second].conf = std::move(confs[k]);
         }
         if (poseEval[i]) poseEval[i]->prepared();
+        for (auto& [key, ev] : variantEval)
+          if (key.i == i && key.dev == 0) ev->prepared();
       }
       ++fftPasses;
       fftPassMax = std::max(fftPassMax, items.size());
@@ -2444,6 +2701,8 @@ int run(int argc, char** argv) {
       if (v.file == file) p.overrides.push_back(v);
     return p;
   };
+  if (opt.protonationRecompute != "none" && opt.stamProtonation != "pH" && opt.mobmProtonation != "pH")
+    od::logWarn("protonation.recompute: no effect, stam.protonation and mobm.protonation are input");
   std::vector<std::pair<std::string, od::ProtonationReport>> protReports;
   auto load = [&](const std::string& file, od::Role role, bool poseRecords, od::PoseRecords* pr) {
     const auto p = protOf(file, role == od::Role::StaM);
@@ -2589,6 +2848,14 @@ int run(int argc, char** argv) {
                             opt.paramFile.empty() ? "no --paramFile" : opt.paramFile, path));
   }
   const bool gpu = selectGpu(opt);
+  // protonation.recompute (spec 3.4.1): the [[protonation]] entries of each part of a group whose
+  // hydrogens were placed at protonation.pH.
+  const auto recomputeOverrides = [&](const std::string& file, bool stam, std::size_t parts)
+      -> std::optional<std::vector<std::vector<od::ProtonationOverride>>> {
+    const auto p = protOf(file, stam);
+    if (!p) return std::nullopt;
+    return std::vector<std::vector<od::ProtonationOverride>>(parts, p->overrides);
+  };
   std::unique_ptr<ConfSet> stamSet;
   {
     std::vector<od::EnergyPart> parts;
@@ -2597,14 +2864,16 @@ int run(int argc, char** argv) {
       parts.push_back({&sta[i], &cfg->molecules[i].tree});
       settings.push_back(&cfg->molecules[i]);
     }
-    stamSet = std::make_unique<ConfSet>("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0, gpu);
+    stamSet = std::make_unique<ConfSet>("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0, gpu,
+                                        recomputeOverrides(opt.stamFile, true, sta.size()));
   }
   std::vector<std::unique_ptr<ConfSet>> mobSets;
   for (std::size_t i = 0; i < mobs.size(); ++i) {
     const auto& s = cfg->molecules[sta.size() + i];
     mobSets.push_back(std::make_unique<ConfSet>(mobs[i].id, std::vector<od::EnergyPart>{{&mobs[i], &s.tree}},
                                                 std::vector<const od::MolSettings*>{&s}, *cfg, opt,
-                                                od::SampleSet::MobM, seed, 1 + i, gpu));
+                                                od::SampleSet::MobM, seed, 1 + i, gpu,
+                                                recomputeOverrides(opt.mobmFiles[i], false, 1)));
   }
   for (const ConfSet* c : {stamSet.get()})
     if (!c->movable()) od::logInfo(std::format("  {}: no rotatable torsions; the input conformation is the only sample", c->name()));

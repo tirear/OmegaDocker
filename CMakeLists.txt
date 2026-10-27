@@ -120,6 +120,7 @@ add_library(od_core STATIC
   src/propka.cpp
   src/pka_rules.cpp
   src/protonate.cpp
+  src/reprotonate.cpp
   ${OD_CCD_EMBED}
   ${OD_PROT_EMBED}
   ${OD_RAMA_EMBED})

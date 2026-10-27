@@ -18,7 +18,9 @@ namespace od {
 
 struct ConfSample {
   std::vector<float> angles;  // degrees, one per tree torsion of the system
-  float energy = 0;           // EnergyTerms::filterEnergy after 9a minimization
+  float energy = 0;           // EnergyTerms::filterEnergy after 9a minimization (+ protG)
+  int variant = 0;            // protonation variant (protonation.recompute = l2, spec 3.4.1)
+  float protG = 0;            // protonation free energy of the variant at this conformation
 };
 
 // Index of a generated sample: global numbers the random streams (counter of

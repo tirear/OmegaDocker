@@ -68,6 +68,7 @@
 #include "propka.hpp"
 #include "pka_rules.hpp"
 #include "protonate.hpp"
+#include "reprotonate.hpp"
 #include "read_mmcif.hpp"
 #include "score9d.hpp"
 #include "shaking.hpp"
@@ -6503,4 +6504,106 @@ TEST_CASE("protonation: hydrogens of 1L2Y, overrides, pose records") {
   CHECK(rep4.removedH == 16);
   CHECK(rep4.addedH == 15);
   std::filesystem::remove(two);
+}
+
+TEST_CASE("protonation: recomputed states and variants (1L2Y, 2KJJ)") {
+  od::ProtonationOptions opt;
+  for (const std::string file : {"1L2Y", "2KJJ"}) {
+    INFO(file);
+    auto mols = od::loadMolecules(kData + "/" + file + ".cif", od::Role::MobM, ccd(), &opt);
+    const od::Molecule& m = mols.front();
+    od::Topology topo = od::analyzeTopology(m, {});
+    od::assignDssp({&m}, {&topo});
+    const std::vector<od::MolInput> in{{&m, &topo}};
+    std::vector<std::string> errors;
+    auto cfg = od::parseMolConfig(od::defaultMolConfigText(in), in, {}, errors);
+    REQUIRE(cfg);
+    const od::TorsionTree& tree = cfg->molecules[0].tree;
+    const od::EnergySystem base({{&m, &tree}}, {});
+    od::ProtonationVariants pv(base, {{&m, &tree}}, {}, {});
+    REQUIRE(pv.active());
+    const auto& sites = pv.sites(0);
+    auto siteOf = [&](const std::string& label) {
+      for (std::size_t k = 0; k < sites.size(); ++k)
+        if (sites[k].label == label) return static_cast<int>(k);
+      return -1;
+    };
+    // At the input conformation the states are those of the protonation.
+    const auto in0 = base.inputAngles();
+    const std::vector<float> a0(in0.begin(), in0.end());
+    const auto pka = od::calculatePka(pv.pkaMolecules(base.coordinates(std::span<const float>(a0))));
+    CHECK(od::stateChanges(sites, pka[0], opt.pH).empty());
+
+    std::vector<od::StateChange> ch;
+    int dq = 0;
+    if (file == "1L2Y") {
+      const int asp = siteOf("A:9:ASP"), lys = siteOf("A:8:LYS"), nt = siteOf("A:1:ASN"), ct = siteOf("A:20:SER");
+      REQUIRE(asp >= 0);
+      REQUIRE(lys >= 0);
+      REQUIRE(nt >= 0);
+      REQUIRE(ct >= 0);
+      CHECK(sites[asp].state == "ASP");
+      CHECK(sites[lys].state == "LYS");
+      CHECK(sites[nt].state == "NH3+");
+      CHECK(sites[ct].state == "COO-");
+      od::PkaMap forced = pka[0];
+      forced[{sites[asp].key, "ASP"}] = 8.0;
+      forced[{sites[lys].key, "LYS"}] = 6.0;
+      forced[{sites[nt].key, "N+"}] = 6.5;
+      forced[{sites[ct].key, "C-"}] = 7.9;
+      ch = od::stateChanges(sites, forced, opt.pH);
+      REQUIRE(ch.size() == 4);
+      const double c = std::log(10.0) * 0.0019872036 * 298.15;
+      CHECK(od::protonationFreeEnergy(sites, ch, 7.4, 298.15) ==
+            doctest::Approx(c * (7.4 - 8.0) + c * (6.0 - 7.4) + c * (6.5 - 7.4) + c * (7.4 - 7.9)));
+      dq = 1 - 1 - 1 + 1;
+    } else {
+      int his = -1;
+      for (std::size_t k = 0; k < sites.size(); ++k)
+        if (sites[k].type == od::SiteType::His && !sites[k].locked) his = static_cast<int>(k);
+      REQUIRE(his >= 0);
+      CHECK(sites[his].state != "HIP");
+      ch = {{his, "HIP", 8.0}};
+      dq = 1;
+    }
+    const int id = pv.variantOf({ch});
+    CHECK(id == 1);
+    CHECK(pv.variantOf({ch}) == 1);
+    CHECK(pv.count() == 2);
+    const od::EnergySystem& vs = pv.sys(id);
+    REQUIRE(vs.torsionCount() == base.torsionCount());
+    const od::Molecule& vm = *pv.parts(id)[0].mol;
+    int q0 = 0, q1 = 0;
+    for (const auto& a : m.atoms) q0 += a.formalCharge;
+    for (const auto& a : vm.atoms) q1 += a.formalCharge;
+    CHECK(q1 - q0 == dq);
+    if (file == "1L2Y") {
+      bool hd2 = false;
+      int hz = 0;
+      for (const auto& a : vm.atoms) {
+        if (a.residue < 0) continue;
+        const auto& ri = vm.residues[a.residue].info;
+        if (ri.seq == 9 && a.name == "HD2") hd2 = true;
+        if (ri.seq == 8 && a.name.starts_with("HZ")) ++hz;
+      }
+      CHECK(hd2);
+      CHECK(hz == 2);
+      CHECK(pv.describe(id).find("A:9:ASP ASP->ASH") != std::string::npos);
+    }
+    // Heavy atoms at the same positions as in the base system for other angles; finite energies.
+    std::vector<float> a1 = a0;
+    for (std::size_t k = 0; k < a1.size(); ++k) a1[k] += 17.0f * static_cast<float>(k % 5);
+    const auto xb = base.coordinates(std::span<const float>(a1));
+    const auto xv = vs.coordinates(std::span<const float>(a1));
+    std::vector<int> toBase;
+    for (std::size_t i = 0; i < vm.atoms.size(); ++i) {
+      int b = -1;
+      for (std::size_t j = 0; j < m.atoms.size(); ++j)
+        if (m.atoms[j].residue == vm.atoms[i].residue && m.atoms[j].name == vm.atoms[i].name) b = static_cast<int>(j);
+      if (vm.atoms[i].atomicNum == 1 || b < 0) continue;
+      for (int d = 0; d < 3; ++d) CHECK(xv[i][d] == doctest::Approx(xb[b][d]).epsilon(1e-5));
+    }
+    const auto e = vs.evaluate(std::span<const float>(a1), nullptr, nullptr, nullptr);
+    CHECK(std::isfinite(e.filterEnergy()));
+  }
 }
