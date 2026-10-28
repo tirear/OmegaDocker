@@ -99,12 +99,14 @@ Vec3T<T> rotate(const Vec3T<T>& p, const Vec3T<T>& o, const Vec3T<T>& k, T c, T 
 }
 
 template <class T>
-std::vector<Vec3T<T>> buildCoordinatesT(const Molecule& m, const TorsionTree& tree, std::span<const T> anglesDeg) {
+std::vector<Vec3T<T>> buildCoordinatesT(const Molecule& m, const TorsionTree& tree, std::span<const T> anglesDeg,
+                                        const RingOps* ops = nullptr, std::span<const T> ringConf = {}) {
   std::vector<Vec3T<T>> xyz;
   xyz.reserve(m.atoms.size() + tree.virtuals.size());
   auto cast = [](const Vec3& p) { return Vec3T<T>{static_cast<T>(p[0]), static_cast<T>(p[1]), static_cast<T>(p[2])}; };
   for (const Atom& a : m.atoms) xyz.push_back(cast(a.xyz));
   for (const VirtualAtom& v : tree.virtuals) xyz.push_back(cast(v.xyz));
+  if (ops && !ops->ops.empty()) applyRingOps(*ops, ringConf, xyz);
   // Children first; the axis atoms of a torsion are not moved by its descendants.
   for (std::size_t i = tree.torsions.size(); i-- > 0;) {
     const TreeTorsion& tt = tree.torsions[i];
@@ -313,6 +315,16 @@ std::vector<Vec3> buildCoordinates(const Molecule& m, const TorsionTree& tree, s
 
 std::vector<Vec3f> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const float> anglesDeg) {
   return buildCoordinatesT(m, tree, anglesDeg);
+}
+
+std::vector<Vec3> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const double> anglesDeg,
+                                   const RingOps& ops, std::span<const double> ringConf) {
+  return buildCoordinatesT(m, tree, anglesDeg, &ops, ringConf);
+}
+
+std::vector<Vec3f> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const float> anglesDeg,
+                                    const RingOps& ops, std::span<const float> ringConf) {
+  return buildCoordinatesT(m, tree, anglesDeg, &ops, ringConf);
 }
 
 ClosureState evaluateClosure(const TorsionTree& tree, std::span<const Vec3> xyz, double G) {

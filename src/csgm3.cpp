@@ -56,13 +56,14 @@ void csgm3Sample(Rng rng, std::span<const std::vector<float>* const> ends, long 
   const long long k = static_cast<long long>(ends.size());
   if (k < 2) fail("csgm3: at least 2 end points are needed");
   if (line < 0 || line >= k * (k - 1) || m < 0 || m >= p.perLine) fail("csgm3: sample index out of range");
-  const std::size_t d = a.size();
+  const std::size_t d = cisTrans.size();
   const long long i = line / (k - 1);
   long long j = line % (k - 1);
   if (j >= i) ++j;
   const std::vector<float>& pi = *ends[i];
   const std::vector<float>& pj = *ends[j];
-  if (pi.size() != d || pj.size() != d) fail("csgm3: end point size mismatch");
+  if (pi.size() != a.size() || pj.size() != a.size() || d > a.size()) fail("csgm3: end point size mismatch");
+  for (std::size_t t = d; t < a.size(); ++t) a[t] = 2 * m < p.perLine ? pi[t] : pj[t];
   std::vector<double> u(d);
   for (std::size_t t = 0; t < d; ++t) u[t] = wrapDeg(static_cast<double>(pj[t]) - pi[t]);
   const double un = norm(u);

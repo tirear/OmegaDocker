@@ -10,6 +10,7 @@
 
 #include "ad4_pair.hpp"
 #include "log.hpp"
+#include "ringconf.hpp"
 
 namespace od {
 namespace {
@@ -79,6 +80,19 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
     torsionCount_ += static_cast<int>(p.tree->torsions.size());
   }
   if (!unsupported.empty()) fail("no AD4 parameters for the element of:{}", unsupported);
+  // Ring slots after all tree torsions (spec 4.9).
+  for (const EnergyPart& p : parts_) {
+    ringSlotOffset_.push_back(torsionCount_ + static_cast<int>(ringK_.size()));
+    ringOps_.emplace_back();
+    if (p.rings) {
+      std::vector<std::string> notes;
+      ringOps_.back() = buildRingOps(*p.mol, *p.tree, *p.rings,
+                                     p.toBase ? std::span<const int>(*p.toBase) : std::span<const int>{}, &notes);
+      for (auto& n : notes) ringNotes_.push_back(p.mol->id + ": " + n);
+    }
+    for (const RingOp& op : ringOps_.back().ops) ringK_.push_back(op.confCount);
+  }
+  torsionCount_ += static_cast<int>(ringK_.size());
 
   charge_.assign(coordCount_, 0.0);
   sv_.assign(coordCount_, 0.0);
@@ -90,6 +104,17 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
   };
   std::vector<EAtom> atoms;
   std::vector<Groups> groups;
+  // Per atom: (ring operation, token) of the operations moving it (spec 4.9); a pair whose lists
+  // differ may change its distance.
+  std::vector<std::vector<std::vector<std::pair<int, int>>>> ringSig(parts_.size());
+  for (std::size_t k = 0, g = 0; k < parts_.size(); ++k) {
+    ringSig[k].resize(parts_[k].mol->atoms.size());
+    for (const RingOp& op : ringOps_[k].ops) {
+      for (std::size_t a = 0; a < ringSig[k].size(); ++a)
+        if (op.token[a]) ringSig[k][a].push_back({static_cast<int>(g), op.token[a]});
+      ++g;
+    }
+  }
   int nextGroup = 1;  // 0: the fixed frame shared by all StaM roots
   for (std::size_t k = 0; k < parts_.size(); ++k) {
     const Molecule& m = *parts_[k].mol;
@@ -146,7 +171,7 @@ EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& pa
       const EAtom& q = atoms[y];
       if (p.part == q.part && std::binary_search(near[p.part][p.atom].begin(), near[p.part][p.atom].end(), q.atom))
         continue;
-      if (intersect(gp, groups[q.part][q.atom])) {
+      if (intersect(gp, groups[q.part][q.atom]) && ringSig[p.part][p.atom] == ringSig[q.part][q.atom]) {
         if (!p.clash || !q.clash) continue;
         const Molecule& mp = *parts_[p.part].mol;
         const Molecule& mq = *parts_[q.part].mol;
@@ -177,18 +202,30 @@ std::vector<double> EnergySystem::inputAngles() const {
   v.reserve(torsionCount_);
   for (const EnergyPart& p : parts_)
     for (const auto& tt : p.tree->torsions) v.push_back(tt.inputAngle);
+  v.resize(torsionCount_, 0.0);
   return v;
+}
+
+template <class T>
+std::vector<Vec3T<T>> EnergySystem::partCoordinatesT(std::size_t k, std::span<const T> anglesDeg) const {
+  const auto& tree = *parts_[k].tree;
+  const auto tor = anglesDeg.subspan(torsionOffset_[k], tree.torsions.size());
+  if (ringOps_[k].ops.empty()) return buildCoordinates(*parts_[k].mol, tree, tor);
+  return buildCoordinates(*parts_[k].mol, tree, tor, ringOps_[k], anglesDeg.subspan(ringSlotOffset_[k], ringOps_[k].ops.size()));
 }
 
 template <class T>
 std::vector<Vec3T<T>> EnergySystem::coordinatesT(std::span<const T> anglesDeg) const {
   std::vector<Vec3T<T>> x(coordCount_);
   for (std::size_t k = 0; k < parts_.size(); ++k) {
-    const auto& tree = *parts_[k].tree;
-    const auto xyz = buildCoordinates(*parts_[k].mol, tree, anglesDeg.subspan(torsionOffset_[k], tree.torsions.size()));
+    const auto xyz = partCoordinatesT(k, anglesDeg);
     std::copy(xyz.begin(), xyz.end(), x.begin() + offset_[k]);
   }
   return x;
+}
+
+std::vector<Vec3> EnergySystem::partCoordinates(int part, std::span<const double> anglesDeg) const {
+  return partCoordinatesT(static_cast<std::size_t>(part), anglesDeg);
 }
 
 std::vector<Vec3f> EnergySystem::coordinates(std::span<const float> anglesDeg) const { return coordinatesT(anglesDeg); }
@@ -354,6 +391,34 @@ EnergyModel EnergySystem::model() const {
     for (std::size_t v = 0; v < tree.virtuals.size(); ++v)
       m.closures.push_back({o + tree.atomCount + static_cast<int>(v), o + tree.virtuals[v].copyOf, 0, 0.0});
     for (const auto& rs : tree.restraints) m.closures.push_back({o + rs.a, o + rs.b, 1, rs.r0});
+  }
+  // Ring slots: torsions without an axis or moving atoms (no rotation, zero gradient), and the ring
+  // operations (spec 4.9).
+  const int mv = static_cast<int>(m.moving.size());
+  for (std::size_t s = 0; s < ringK_.size(); ++s) m.torsions.push_back({0, 0, mv, mv, 0.0});
+  for (std::size_t k = 0; k < parts_.size(); ++k) {
+    const int o = offset_[k];
+    for (std::size_t i = 0; i < ringOps_[k].ops.size(); ++i) {
+      const RingOp& op = ringOps_[k].ops[i];
+      FlatRing fr{};
+      fr.slot = ringSlotOffset_[k] + static_cast<int>(i);
+      fr.confCount = op.confCount;
+      fr.moveBegin = static_cast<int>(m.ringMove.size());
+      for (int a : op.move) m.ringMove.push_back(o + a);
+      fr.moveEnd = static_cast<int>(m.ringMove.size());
+      fr.exitBegin = static_cast<int>(m.ringExitAtom.size());
+      for (std::size_t e = 0; e < op.exitAtom.size(); ++e) {
+        m.ringExitAtom.push_back(o + op.exitAtom[e]);
+        m.ringExitOf.push_back(op.exitOf[e]);
+      }
+      fr.exitEnd = static_cast<int>(m.ringExitAtom.size());
+      fr.exitCount = op.exitCount;
+      fr.posOff = static_cast<int>(m.ringPos.size());
+      m.ringPos.insert(m.ringPos.end(), op.pos.begin(), op.pos.end());
+      fr.xfOff = static_cast<int>(m.ringXf.size());
+      m.ringXf.insert(m.ringXf.end(), op.xf.begin(), op.xf.end());
+      m.rings.push_back(fr);
+    }
   }
   m.charge = charge_;
   m.sv = sv_;

@@ -40,6 +40,17 @@ struct FlatClosure {
   double r0;
 };
 
+// Ring operation (spec 4.9, RingOp): conformer k = round(angles[slot]) of confCount; for k > 0 the
+// coordinates ringMove[moveBegin, moveEnd) take ringPos[posOff + 3 ((k − 1) n + i)] (n moving
+// atoms) and the coordinates ringExitAtom[exitBegin, exitEnd) the transform ringXf[xfOff + 12 ((k −
+// 1) exitCount + ringExitOf[q])] (R row-major, t). Applied in order to the input coordinates
+// before the torsions.
+struct FlatRing {
+  int slot, confCount;
+  int moveBegin, moveEnd, exitBegin, exitEnd, exitCount;
+  int posOff, xfOff;
+};
+
 struct FlatTerms {
   double vdw, hbond, elec, desolv, clash, closure, closureMaxDeviation;
   int clashPairs;
@@ -56,6 +67,10 @@ struct EnergyModelView {
   const FlatPairParams* pairParams;
   const FlatPair* pairs;
   const FlatClosure* closures;
+  int ringCount;
+  const FlatRing* rings;
+  const int *ringMove, *ringExitAtom, *ringExitOf;
+  const double *ringPos, *ringXf;
   double halfSmooth, clashDistance, clashBase, clashK, closureG, elecCoeff, desolvCoeff, rMin;
 };
 
@@ -68,14 +83,18 @@ struct EnergyModel {
   std::vector<FlatPairParams> pairParams;
   std::vector<FlatPair> pairs;
   std::vector<FlatClosure> closures;
+  std::vector<FlatRing> rings;
+  std::vector<int> ringMove, ringExitAtom, ringExitOf;
+  std::vector<double> ringPos, ringXf;
   double halfSmooth = 0, clashDistance = 0, clashBase = 0, clashK = 0, closureG = 0, elecCoeff = 0, desolvCoeff = 0,
          rMin = 0;
 
   EnergyModelView view() const {
     return {coordCount,       torsionCount, static_cast<int>(pairs.size()), static_cast<int>(closures.size()),
             ref.data(),       torsions.data(), moving.data(), charge.data(), sv.data(), vol.data(),
-            pairParams.data(), pairs.data(), closures.data(), halfSmooth, clashDistance, clashBase, clashK, closureG,
-            elecCoeff,        desolvCoeff,  rMin};
+            pairParams.data(), pairs.data(), closures.data(), static_cast<int>(rings.size()), rings.data(),
+            ringMove.data(),  ringExitAtom.data(), ringExitOf.data(), ringPos.data(), ringXf.data(), halfSmooth,
+            clashDistance,    clashBase,    clashK, closureG, elecCoeff, desolvCoeff, rMin};
   }
 };
 
@@ -84,6 +103,45 @@ namespace flat {
 template <class T>
 OD_HD inline T piT() {
   return T(3.141592653589793);
+}
+
+// Conformer of ring operation r for the angles; 0 (input) when out of range.
+template <class T>
+OD_HD inline int ringConf(const EnergyModelView& m, int r, const T* angles) {
+  const FlatRing& R = m.rings[r];
+  const double v = static_cast<double>(angles[R.slot]);
+  const int k = static_cast<int>(v < 0 ? v - 0.5 : v + 0.5);
+  return k > 0 && k < R.confCount ? k : 0;
+}
+// Coordinate q of ring operation r (q < moveEnd − moveBegin: a moving ring atom, otherwise exit entry
+// q − (moveEnd − moveBegin)) for conformer k > 0.
+template <class T>
+OD_HD inline void ringApply(const EnergyModelView& m, int r, int k, int q, T* x) {
+  const FlatRing& R = m.rings[r];
+  const int nm = R.moveEnd - R.moveBegin;
+  if (q < nm) {
+    const double* P = m.ringPos + R.posOff + 3 * (static_cast<std::size_t>(k - 1) * nm + q);
+    T* p = x + 3 * m.ringMove[R.moveBegin + q];
+    for (int a = 0; a < 3; ++a) p[a] = static_cast<T>(P[a]);
+    return;
+  }
+  const int e = R.exitBegin + q - nm;
+  const double* M = m.ringXf + R.xfOff + 12 * (static_cast<std::size_t>(k - 1) * R.exitCount + m.ringExitOf[e]);
+  T* p = x + 3 * m.ringExitAtom[e];
+  const T p0 = p[0], p1 = p[1], p2 = p[2];
+  for (int a = 0; a < 3; ++a)
+    p[a] = static_cast<T>(M[3 * a]) * p0 + static_cast<T>(M[3 * a + 1]) * p1 + static_cast<T>(M[3 * a + 2]) * p2 +
+           static_cast<T>(M[9 + a]);
+}
+// All ring operations, serially (RingOps applied by buildCoordinates).
+template <class T>
+OD_HD inline void applyRings(const EnergyModelView& m, const T* angles, T* x) {
+  for (int r = 0; r < m.ringCount; ++r) {
+    const int k = ringConf(m, r, angles);
+    if (k == 0) continue;
+    const int n = m.rings[r].moveEnd - m.rings[r].moveBegin + m.rings[r].exitEnd - m.rings[r].exitBegin;
+    for (int q = 0; q < n; ++q) ringApply(m, r, k, q, x);
+  }
 }
 
 // Cos and sin of the rotation of torsion t.
@@ -230,6 +288,7 @@ struct NoExternal {
 template <class T, class Ext = NoExternal>
 inline FlatTerms evaluate(const EnergyModelView& m, const T* angles, T* x, double* g, double* grad, Ext&& ext = {}) {
   for (int i = 0; i < 3 * m.coordCount; ++i) x[i] = static_cast<T>(m.ref[i]);
+  applyRings(m, angles, x);
   for (int t = m.torsionCount; t-- > 0;) {
     T o[3], k[3], c, s;
     if (!torsionAxis(m, t, angles, x, o, k, c, s)) continue;

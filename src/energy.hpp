@@ -11,6 +11,7 @@
 #include "ad4.hpp"
 #include "energy_kernel.hpp"
 #include "molecule.hpp"
+#include "ring_ops.hpp"
 #include "torsion_tree.hpp"
 
 namespace od {
@@ -42,9 +43,15 @@ struct EnergyTerms {
   double total() const { return filterEnergy() + closure; }
 };
 
+struct RingConformers;
+
 struct EnergyPart {
   const Molecule* mol = nullptr;
   const TorsionTree* tree = nullptr;
+  // Ring conformers (spec 4.9) of the molecule they were made for; toBase maps the atoms of mol to
+  // its atoms (protonation variants, -1 for added atoms); null: the same molecule.
+  const RingConformers* rings = nullptr;
+  const std::vector<int>* toBase = nullptr;
 };
 
 // Extra energy term on the coordinates (e.g. the 9b grid energy): adds its
@@ -60,8 +67,18 @@ class EnergySystem {
   // atoms whose distance cannot change clash in the input structure.
   EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& params);
 
+  // Angles of a sample: the tree torsions of all parts in part order, then one slot per ring
+  // operation (spec 4.9) holding its conformer index (0: input), parts in order. A slot has a zero
+  // gradient, so the minimizers leave it unchanged.
   int torsionCount() const { return torsionCount_; }
-  std::vector<double> inputAngles() const;  // degrees
+  int treeTorsionCount() const { return torsionCount_ - static_cast<int>(ringK_.size()); }
+  int ringSlotCount() const { return static_cast<int>(ringK_.size()); }
+  const std::vector<int>& ringConfCounts() const { return ringK_; }  // conformers per ring slot
+  int ringSlotOffset(int part) const { return ringSlotOffset_[part]; }  // angle index of its first slot
+  const RingOps& ringOps(int part) const { return ringOps_[part]; }
+  // Systems of the ring conformers that got no operation, and why (logging).
+  const std::vector<std::string>& ringNotes() const { return ringNotes_; }
+  std::vector<double> inputAngles() const;  // degrees; ring slots 0
   std::size_t pairCount() const { return pairs_.size(); }
   const Ad4Typing& typing(int part) const { return typing_[part]; }
   // Index of atom 0 of a part in the coordinate array; virtual atoms follow the atoms.
@@ -80,6 +97,8 @@ class EnergySystem {
   // Coordinates only (atoms and virtual atoms of all parts).
   std::vector<Vec3f> coordinates(std::span<const float> anglesDeg) const;
   std::vector<Vec3> coordinates(std::span<const double> anglesDeg) const;
+  // Coordinates of one part (atoms, then its virtual atoms).
+  std::vector<Vec3> partCoordinates(int part, std::span<const double> anglesDeg) const;
   // Largest closure deviation (EnergyTerms::closureMaxDeviation) from the coordinates only; 0 without closures.
   double closureDeviation(std::span<const double> anglesDeg) const;
   bool hasClosures() const;
@@ -99,6 +118,8 @@ class EnergySystem {
   template <class T>
   std::vector<Vec3T<T>> coordinatesT(std::span<const T> anglesDeg) const;
   template <class T>
+  std::vector<Vec3T<T>> partCoordinatesT(std::size_t k, std::span<const T> anglesDeg) const;
+  template <class T>
   EnergyTerms evaluateT(std::span<const T> anglesDeg, std::vector<double>* gradient, std::vector<Vec3T<T>>* coords,
                         const ExternalTermT<T>* external) const;
 
@@ -108,6 +129,10 @@ class EnergySystem {
   std::vector<int> offset_;
   std::vector<int> torsionOffset_;
   int torsionCount_ = 0;
+  std::vector<RingOps> ringOps_;     // per part
+  std::vector<int> ringSlotOffset_;  // per part
+  std::vector<int> ringK_;           // per ring slot
+  std::vector<std::string> ringNotes_;
   int coordCount_ = 0;
   std::vector<double> charge_;  // per coordinate index
   std::vector<double> sv_;      // per coordinate index: solpar + qasp*|q|

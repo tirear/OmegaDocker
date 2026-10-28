@@ -17,6 +17,7 @@
 
 #include "log.hpp"
 #include "rama.hpp"
+#include "ringconf.hpp"
 #include "version.hpp"
 
 namespace od {
@@ -204,7 +205,7 @@ void writeTorsion(std::string& o, const std::string& table, const Torsion& tor, 
   o += std::format("{}category  = {}\n", indent, quote(torsionCategoryName(tor.category)));
 }
 
-void writeMolecule(std::string& o, const Molecule& m, const Topology& t) {
+void writeMolecule(std::string& o, const Molecule& m, const Topology& t, int ringMacroMinSize) {
   const AtomRefs refs(m);
   const Layout l = layoutOf(t);
   const bool protein = t.backboneType == BackboneType::Protein;
@@ -213,6 +214,14 @@ void writeMolecule(std::string& o, const Molecule& m, const Topology& t) {
   o += std::format("role         = {}\n", quote(m.role == Role::StaM ? "StaM" : "MobM"));
   o += std::format("file         = {}\n", quote(m.sourceFile));
   if (m.hasResidueInfo) o += std::format("chain        = {}\n", quote(chainList(m)));
+  {
+    bool ringConf = false;
+    for (const RingSystem& rs : findRingSystems(m, t.brokenBonds, ringMacroMinSize)) {
+      const std::set<int> in(rs.ring.begin(), rs.ring.end());
+      for (const Bond& b : m.bonds) ringConf |= in.count(b.a) && in.count(b.b) && !b.aromatic;
+    }
+    if (ringConf) o += "ringConformers = true          # conformers of the small ring systems (spec 4.9)\n";
+  }
   o += std::format("backboneType = {}\n", quote(backboneTypeName(t.backboneType)));
   if (protein) o += "csgm1        = \"1a\"\n";
   if (hasMetalRing(m)) o += "metalBond    = \"keep\"            # \"keep\" | \"break\" (see the top of this file)\n";
@@ -223,6 +232,11 @@ void writeMolecule(std::string& o, const Molecule& m, const Topology& t) {
     o += std::format("  {}source = \"{}\"\n", c, source);
   };
   for (int bi : t.crosslinkBreaks) writeBreak(bi, "auto-crosslink", "");
+  for (int bi : t.macroBreaks) {
+    o += "\n  [[molecule.ringBreak]]\n";
+    o += std::format("  bond   = [{}, {}]\n", quote(refs.ref(m.bonds[bi].a, -1)), quote(refs.ref(m.bonds[bi].b, -1)));
+    o += "  source = \"auto-macro\"\n";
+  }
   if (hasMetalRing(m)) {
     o += "\n  # metalBond = \"break\": set metalBond and remove the leading \"# \" of these entries (spec 4.7)";
     for (int bi : t.metalBreaks) writeBreak(bi, "auto-metal", "# ");
@@ -454,7 +468,9 @@ std::vector<int> readBreaks(const toml::table& mt, const Molecule& m, const Atom
   auto metalBond = [&](int bi) { return isMetalBond(m, m.bonds[bi]); };
   for (const toml::table* t : tablesOf(mt, "ringBreak", where, e)) {
     const std::string field = where + ".ringBreak";
-    checkKeys(*t, {"bond"}, field, e);
+    checkKeys(*t, {"bond", "source"}, field, e);
+    if (auto src = get<std::string>(*t, "source", field, e, false); src && *src != "user" && *src != "auto-macro")
+      e.add(lineOf(*t), field + ".source", "must be user or auto-macro");
     const int bi = bondIndex(*t, field);
     if (bi < 0) continue;
     if (metalBond(bi))
@@ -644,9 +660,10 @@ MolSettings readMolecule(const toml::table& mt, const MolInput& in, const Topolo
   const std::size_t errorsBefore = e.count();
   MolSettings s;
 
-  checkKeys(mt, {"id", "role", "file", "chain", "backboneType", "csgm1", "metalBond", "residue", "torsion", "ringBreak",
-                 "chainBreak"},
+  checkKeys(mt, {"id", "role", "file", "chain", "backboneType", "csgm1", "metalBond", "ringConformers", "residue",
+                 "torsion", "ringBreak", "chainBreak"},
             where, e);
+  if (auto v = get<bool>(mt, "ringConformers", where, e, false)) s.ringConformers = *v;
   for (const char* k : {"role", "file", "chain"}) get<std::string>(mt, k, where, e, false);
   if (auto b = get<std::string>(mt, "backboneType", where, e, true); b && *b != backboneTypeName(bt))
     e.add(lineOf(*mt.get("backboneType")), where + ".backboneType",
@@ -825,7 +842,8 @@ bool hasMetalRing(const Molecule& m) {
   return false;
 }
 
-std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::string& protonationText) {
+std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::string& protonationText,
+                                 int ringMacroMinSize) {
   std::string o;
   o += "# OmegaDocker molecule configuration (spec section 5).\n";
   o += "# Edit a copy and pass it with --molConfig. Entries must match the detected\n";
@@ -858,7 +876,10 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::s
   for (const auto& n : builtinSsTypes()) o += std::format("\n[[ssType]]\nname    = {}\nbuiltin = true\n", quote(n));
   o += protonationText;
   o += "\n# ---------- molecules ----------\n";
-  o += "# [[molecule.ringBreak]] bond = [\"<atom>\", \"<atom>\"] breaks a ring bond (spec 4.5).\n";
+  o += "# [[molecule.ringBreak]] bond = [\"<atom>\", \"<atom>\"] breaks a ring bond (spec 4.5); source = \"user\"\n";
+  o += "#   (default) | \"auto-macro\" (a bond of a macrocycle broken by default, spec 4.9).\n";
+  o += "# ringConformers = true | false: conformers of the small ring systems (spec 4.9); written for\n";
+  o += "#   molecules with a small ring system that is not aromatic (StaM: used in the flexible range).\n";
   o += "# [[molecule.chainBreak]] source = \"auto-loop\" | \"auto-crosslink\" | \"auto-metal\" | \"user\" (spec 4.8).\n";
   o += "#\n";
   o += "# metalBond: only for molecules with metal coordination bonds in rings (spec 4.7).\n";
@@ -869,17 +890,17 @@ std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::s
   o += "#            metal stays bonded to one ligand atom and moves with the molecule. Bonds in rings\n";
   o += "#            through the metal then may be set rotatable. To choose \"break\", set metalBond and\n";
   o += "#            remove the leading \"# \" of those entries; no metal bond may remain in a ring.\n";
-  for (const MolInput& in : mols) writeMolecule(o, *in.mol, *in.topo);
+  for (const MolInput& in : mols) writeMolecule(o, *in.mol, *in.topo, ringMacroMinSize);
   return o;
 }
 
 std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vector<MolInput>& mols,
-                                  const std::string& protonationText) {
+                                  const std::string& protonationText, int ringMacroMinSize) {
   std::string path = outPrefix + ".molconfig.default.toml";
   for (int n = 1; std::filesystem::exists(path); ++n) path = std::format("{}.molconfig.default.{}.toml", outPrefix, n);
   std::ofstream f(path);
   if (!f) fail("Cannot write {}", path);
-  f << defaultMolConfigText(mols, protonationText);
+  f << defaultMolConfigText(mols, protonationText, ringMacroMinSize);
   if (!f) fail("Cannot write {}", path);
   return path;
 }

@@ -221,6 +221,8 @@ struct TorsionData {
   char* buf;
   int rounds, ok, shared;
   const int *ownOff, *own, *pos, *sub;
+  // With ring operations (spec 4.9): per block 6 T per torsion, the axes of the sample (replacing axis).
+  T* axisWork = nullptr;
 };
 
 // Energy terms and gradients of one sample by the block of NT threads (evaluateKernel,
@@ -246,9 +248,35 @@ __device__ __forceinline__ void evalOne(const EnergyModelView& m, const PairData
     if (tcs)
       for (int t = tid; t < m.torsionCount; t += kThreads) flat::torsionCosSin(m, t, ang, tcs[2 * t], tcs[2 * t + 1]);
     __syncthreads();
+    // Ring conformers (spec 4.9): before the torsions, one operation after another.
+    for (int r = 0; r < m.ringCount; ++r) {
+      const int k = flat::ringConf(m, r, ang);
+      if (k == 0) continue;
+      const FlatRing& R = m.rings[r];
+      const int nq = R.moveEnd - R.moveBegin + R.exitEnd - R.exitBegin;
+      for (int q = tid; q < nq; q += kThreads) flat::ringApply(m, r, k, q, x);
+      __syncthreads();
+    }
 
     if constexpr (Tor) {
       const int nt = m.torsionCount;
+      // The axes of the sample when ring conformers moved them (TorsionData::axisWork).
+      const T* axis = td.axis;
+      if (td.axisWork) {
+        T* aw = td.axisWork + static_cast<std::size_t>(blockIdx.x) * 6 * nt;
+        for (int u = tid; u < nt; u += kThreads) {
+          T o[3], k[3];
+          if (!flat::torsionAxisOnly(m, u, x, o, k)) {
+            for (int c = 0; c < 3; ++c) o[c] = k[c] = 0;
+          }
+          for (int c = 0; c < 3; ++c) {
+            aw[6 * u + c] = o[c];
+            aw[6 * u + 3 + c] = k[c];
+          }
+        }
+        __syncthreads();
+        axis = aw;
+      }
       T* mb[2];
       int* pb[2];
       char* b = td.shared ? reinterpret_cast<char*>(x + nc + 2 * nt)
@@ -265,7 +293,7 @@ __device__ __forceinline__ void evalOne(const EnergyModelView& m, const PairData
         } else {
           flat::torsionCosSin(m, u, ang, c, sn);
         }
-        const T* a = td.axis + 6 * u;
+        const T* a = axis + 6 * u;
         const T o[3] = {a[0], a[1], a[2]}, k[3] = {a[3], a[4], a[5]};
         if (k[0] == 0 && k[1] == 0 && k[2] == 0) {
           c = 1;
@@ -297,7 +325,7 @@ __device__ __forceinline__ void evalOne(const EnergyModelView& m, const PairData
             continue;
           }
           const T* P = src + 12 * pa;
-          const T* op = td.axis + 6 * pa;
+          const T* op = axis + 6 * pa;
           const T w[3] = {A[9] - op[0], A[10] - op[1], A[11] - op[2]};
           for (int r = 0; r < 3; ++r) {
             for (int q = 0; q < 3; ++q) D[3 * r + q] = P[3 * r] * A[q] + P[3 * r + 1] * A[3 + q] + P[3 * r + 2] * A[6 + q];
@@ -312,7 +340,7 @@ __device__ __forceinline__ void evalOne(const EnergyModelView& m, const PairData
         const int dd = td.deep[i];
         if (dd < 0) continue;
         const T* A = mf + 12 * dd;
-        const T* od = td.axis + 6 * dd;
+        const T* od = axis + 6 * dd;
         const T p0 = x[3 * i] - od[0], p1 = x[3 * i + 1] - od[1], p2 = x[3 * i + 2] - od[2];
         for (int r = 0; r < 3; ++r) x[3 * i + r] = A[9 + r] + (A[3 * r] * p0 + A[3 * r + 1] * p1 + A[3 * r + 2] * p2);
       }
@@ -1699,7 +1727,7 @@ constexpr std::size_t align8(std::size_t b) { return (b + 7) & ~std::size_t(7); 
 struct Lane {
   DevBuf<char> in, out, xs;
   DevBuf<double> gs;
-  DevBuf<char> tbuf;
+  DevBuf<char> tbuf, abuf;
   PinnedBuf hIn, hOut;
   cudaStream_t stream = nullptr;
   // Pending dock evaluation.
@@ -1718,6 +1746,7 @@ struct Lane {
     xs.release();
     gs.release();
     tbuf.release();
+    abuf.release();
     hIn.release();
     hOut.release();
   }
@@ -1732,6 +1761,9 @@ struct GpuEnergy::Impl {
   DevBuf<FlatTorsion> torsions;
   DevBuf<int> moving;
   DevBuf<FlatClosure> closures;
+  DevBuf<FlatRing> rings;
+  DevBuf<int> ringMove, ringExitAtom, ringExitOf;
+  DevBuf<double> ringPos, ringXf;
   DevBuf<int> tileI, tileJ, tileS0, tileOff, slots;
   DevBuf<GpuPair> gpuPairs;
   int tiles = 0;
@@ -1754,6 +1786,10 @@ struct GpuEnergy::Impl {
     if constexpr (std::is_same_v<T, float>) td.axis = axisF.p;
     else td.axis = axisD.p;
     setGradientPlan(td);
+    if (view.ringCount) {
+      L.abuf.reserve(std::max<std::size_t>(1, n * 6 * sizeof(T) * static_cast<std::size_t>(view.torsionCount)));
+      td.axisWork = reinterpret_cast<T*>(L.abuf.p);
+    }
     return td;
   }
   template <class T>
@@ -2099,7 +2135,7 @@ struct GpuEnergy::Impl {
 
   // Whole 9b minimizations (spec 15.1.26) on the stream of lane 0.
   DevBuf<double> minWork;
-  DevBuf<float> minFwork;
+  DevBuf<float> minFwork, minAxis;
   DevBuf<unsigned long long> minNext;
   DevBuf<int> stealSeen;
   PinnedBuf nextHost;  // [0] the initial counter, [1] the final one
@@ -2182,6 +2218,10 @@ struct GpuEnergy::Impl {
     check(cudaMemcpyAsync(minNext.p, nextHost.p, sizeof(unsigned long long), cudaMemcpyHostToDevice, L.stream), "upload");
     TorsionData<float> td{axisF.p, tParent.p, tDeep.p, nullptr, tRounds, tor ? 1 : 0, tor ? 1 : 0};
     setGradientPlan(td);
+    if (view.ringCount && tor) {
+      minAxis.reserve(static_cast<std::size_t>(blocks) * 6 * nt);
+      td.axisWork = minAxis.p;
+    }
     PairData<float> pdl = pairData<float>();
     pdl.tiled = n > sms ? 1 : 0;
     (tor ? kernelT : kernelS)<<<blocks, NT, shm, L.stream>>>(view, pdl, td, reinterpret_cast<float*>(L.xs.p), L.gs.p, dv,
@@ -2319,6 +2359,12 @@ GpuEnergy::GpuEnergy(const EnergyModel& m, int device) : impl_(std::make_unique<
   d.torsions.upload(m.torsions);
   d.moving.upload(m.moving);
   d.closures.upload(m.closures);
+  d.rings.upload(m.rings);
+  d.ringMove.upload(m.ringMove);
+  d.ringExitAtom.upload(m.ringExitAtom);
+  d.ringExitOf.upload(m.ringExitOf);
+  d.ringPos.upload(m.ringPos);
+  d.ringXf.upload(m.ringXf);
   std::vector<GpuPair> gp(m.pairs.size());
   for (std::size_t p = 0; p < gp.size(); ++p) gp[p] = {m.pairs[p].i, m.pairs[p].j, pairFlags(m, m.pairs[p])};
   d.gpuPairs.upload(gp);
@@ -2335,6 +2381,12 @@ GpuEnergy::GpuEnergy(const EnergyModel& m, int device) : impl_(std::make_unique<
   d.view.pairParams = nullptr;
   d.view.pairs = nullptr;
   d.view.closures = d.closures.p;
+  d.view.rings = d.rings.p;
+  d.view.ringMove = d.ringMove.p;
+  d.view.ringExitAtom = d.ringExitAtom.p;
+  d.view.ringExitOf = d.ringExitOf.p;
+  d.view.ringPos = d.ringPos.p;
+  d.view.ringXf = d.ringXf.p;
   // Highest priority: not delayed by the delta grids of the next StaM conformation (spec 15.1.20).
   int least = 0, greatest = 0;
   check(cudaDeviceGetStreamPriorityRange(&least, &greatest), "cudaDeviceGetStreamPriorityRange");

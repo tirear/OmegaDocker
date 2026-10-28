@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <thread>
 #include <array>
 #include <cmath>
@@ -77,6 +78,7 @@
 #include "molconfig.hpp"
 #include "rama.hpp"
 #include "read_input.hpp"
+#include "ringconf.hpp"
 #include "topology.hpp"
 #include "torsion_tree.hpp"
 
@@ -1600,6 +1602,42 @@ TEST_CASE("csgm2: tournament, crossover and mutation") {
   CHECK(c1 == c2);
   od::Rng r3(1, 1, 1);
   CHECK_THROWS_AS(od::csgm2Offspring(r3, std::vector<od::Csgm2Parent>{}, noCis, od::Csgm2Params{}, c1), od::Error);
+}
+
+TEST_CASE("csgm2, csgm3: ring conformer genes (spec 4.9)") {
+  // Two torsions, then ring slots with 3 and 2 conformers.
+  const std::vector<int> K{3, 2};
+  const std::vector<bool> cis{false, false};
+  const std::vector<float> g0{10, 20, 2, 1}, g1{-30, 40, 0, 0};
+  const std::vector<od::Csgm2Parent> pp{{&g0, 1.0f}, {&g1, 2.0f}};
+  od::Csgm2Params p{0.6, 0.8, 1.0, 30.0};  // every gene mutated
+  std::vector<double> a(4);
+  std::array<std::array<int, 3>, 2> seen{};
+  for (std::uint64_t k = 0; k < 2000; ++k) {
+    od::Rng r(5, 6, k);
+    od::csgm2Offspring(r, pp, cis, p, a, K);
+    for (int s = 0; s < 2; ++s) {
+      REQUIRE(a[2 + s] == std::floor(a[2 + s]));
+      REQUIRE(a[2 + s] >= 0);
+      REQUIRE(a[2 + s] < K[s]);
+      ++seen[s][static_cast<int>(a[2 + s])];
+    }
+  }
+  CHECK(seen[0][0] > 500);
+  CHECK(seen[0][2] > 500);
+  CHECK(seen[1][1] > 800);
+  CHECK_THROWS(od::csgm2Offspring(*std::make_unique<od::Rng>(1, 1, 1), pp, cis, p, a));  // missing ring counts
+
+  const std::vector<const std::vector<float>*> ends{&g0, &g1};
+  od::Csgm3Params q;
+  for (long long line = 0; line < 2; ++line)
+    for (int m = 0; m < q.perLine; ++m) {
+      od::csgm3Sample(od::Rng(1, 2, static_cast<std::uint64_t>(line)), ends, line, m, cis, q, a);
+      const auto& from = *ends[line];
+      const auto& to = *ends[1 - line];
+      CHECK(a[2] == (2 * m < q.perLine ? from[2] : to[2]));
+      CHECK(a[3] == (2 * m < q.perLine ? from[3] : to[3]));
+    }
 }
 
 TEST_CASE("csgm3: lines through the end points") {
@@ -5186,8 +5224,11 @@ struct FlatFixture {
   std::vector<od::Molecule> big;
   std::vector<od::Topology> bigTopo;
   std::optional<od::MolConfig> cfgA, cfgZ, cfgBig;
-  od::MolConfig cfgS;
+  od::MolConfig cfgS, cfgP;
   std::vector<FlatCase> cases;
+  // Ring conformers (spec 4.9): copies of the molecules (stable addresses) and their conformers.
+  std::deque<od::Molecule> ringMols;
+  std::deque<od::RingConformers> rings;
 
   FlatFixture() {
     std::vector<std::string> errors;
@@ -5223,6 +5264,29 @@ struct FlatFixture {
     REQUIRE(cfgBig);
     cases.push_back({"1D3Z", std::make_unique<od::EnergySystem>(
                                  std::vector<od::EnergyPart>{{&big[0], &cfgBig->molecules[0].tree}}, od::EnergyParams{})});
+
+    // Ring conformers: MobM 1L2Y (prolines) and biotin; StaM 2KJJ Pro29 in a fixed region and in a free loop.
+    {
+      std::string t = freeResidues(freeResidues(sf.text, "B", 27, 28), "B", 30, 30);
+      const auto i = t.find("resSeq  = 29\n", t.find("chain   = \"B\"\n  resName"));
+      REQUIRE(i != std::string::npos);
+      const auto p = t.find("psi     = false", i);
+      REQUIRE(p != std::string::npos);
+      t.replace(p, 15, "psi     = true ");
+      cfgP = sf.ok(t);
+    }
+    const std::array<std::tuple<const char*, const od::Molecule*, const od::MolSettings*>, 4> rc{
+        {{"1L2Y ring conformers", &cf.mols[0], &cfgA->molecules[0]},
+         {"BTN ring conformers", &cf.mols[1], &cfgA->molecules[1]},
+         {"2KJJ fixed Pro ring conformers", &sf.mols[0], &cfgS.molecules[0]},
+         {"2KJJ loop Pro ring conformers", &sf.mols[0], &cfgP.molecules[0]}}};
+    for (const auto& [name, mol, set] : rc) {
+      ringMols.push_back(*mol);
+      rings.push_back(od::generateRingConformers(ringMols.back(), set->topology, od::RingParams{}, 7));
+      cases.push_back({name, std::make_unique<od::EnergySystem>(
+                                 std::vector<od::EnergyPart>{{&ringMols.back(), &set->tree, &rings.back()}},
+                                 od::EnergyParams{})});
+    }
   }
 };
 
@@ -5231,7 +5295,9 @@ template <class T>
 std::vector<std::vector<T>> flatAngleSets(const od::EnergySystem& sys, int n) {
   std::vector<std::vector<T>> out;
   for (int s = 0; s < n; ++s) {
-    const auto a = s == 0 ? sys.inputAngles() : perturbed(sys.inputAngles(), 5.0 * s, 100 + s);
+    auto a = s == 0 ? sys.inputAngles() : perturbed(sys.inputAngles(), 5.0 * s, 100 + s);
+    // Ring slots: conformer s modulo the count (spec 4.9).
+    for (int i = 0; i < sys.ringSlotCount(); ++i) a[sys.treeTorsionCount() + i] = s % sys.ringConfCounts()[i];
     out.emplace_back(a.begin(), a.end());
   }
   return out;
@@ -5268,6 +5334,111 @@ TEST_CASE("energy kernel: flat form equals EnergySystem::evaluate") {
     INFO(c.name);
     CHECK(mismatches == 0);
   }
+}
+
+TEST_CASE("ring: small ring systems, macrocycle breaks and conformers (spec 4.9)") {
+  FlatFixture f;
+  const od::Molecule& pep = f.cf.mols[0];  // 1L2Y: Trp6 indole, Pro12, 17, 18, 19
+  const auto sys = od::findRingSystems(pep, {}, 9);
+  int pro = 0, aromatic = 0;
+  for (const auto& rs : sys) {
+    if (rs.ring.size() == 5 && pep.residues[pep.atoms[rs.ring[0]].residue].info.name == "PRO") ++pro;
+    if (rs.ring.size() == 9) ++aromatic;  // indole: one system of 9 atoms (fused 5 + 6)
+    CHECK(rs.conf.size() == 1);
+    CHECK(rs.conf[0].size() == rs.ring.size() + rs.shell.size());
+  }
+  CHECK(pro == 4);
+  CHECK(aromatic == 1);
+
+  // A macrocycle: 1L2Y closed head to tail; one single bond of the cycle is broken.
+  od::Molecule cyc = pep;
+  int nTerm = -1, cTerm = -1;
+  for (std::size_t a = 0; a < cyc.atoms.size(); ++a) {
+    const auto& ri = cyc.residues[cyc.atoms[a].residue].info;
+    if (ri.seq == 1 && cyc.atoms[a].name == "N") nTerm = static_cast<int>(a);
+    if (ri.seq == 20 && cyc.atoms[a].name == "C") cTerm = static_cast<int>(a);
+  }
+  REQUIRE(nTerm >= 0);
+  REQUIRE(cTerm >= 0);
+  cyc.bonds.push_back({cTerm, nTerm, od::BondOrder::Single, false});
+  const od::Topology ct = od::analyzeTopology(cyc, {});
+  const auto br = od::macroRingBreaks(cyc, ct, 9);
+  REQUIRE(br.size() == 1);
+  CHECK(cyc.bonds[br[0]].order == od::BondOrder::Single);
+  std::vector<int> broken = ct.brokenBonds;
+  broken.insert(broken.end(), br.begin(), br.end());
+  const auto c9 = od::smallestCycles(cyc, broken, 9);
+  CHECK(std::count(c9.begin(), c9.end(), 9) == 0);
+  const auto c0 = od::smallestCycles(cyc, ct.brokenBonds, 9);
+  CHECK(c0[br[0]] == 9);
+  CHECK(od::macroRingBreaks(pep, f.cf.topos[0], 9).empty());
+
+  // Conformers: each Pro ring of 1L2Y has its input and at least one other pucker; deterministic.
+  const auto rc = od::generateRingConformers(pep, f.cfgA->molecules[0].topology, od::RingParams{}, 7);
+  const auto rc2 = od::generateRingConformers(pep, f.cfgA->molecules[0].topology, od::RingParams{}, 7);
+  int puckers = 0;
+  for (std::size_t k = 0; k < rc.systems.size(); ++k) {
+    const auto& rs = rc.systems[k];
+    CHECK(rs.conf.size() <= 10);
+    CHECK(rs.energy.size() + 1 == rs.conf.size());
+    CHECK(rs.conf == rc2.systems[k].conf);
+    if (rs.ring.size() == 5) puckers += rs.conf.size() >= 2;
+    if (rs.ring.size() == 9) CHECK(rs.note == "aromatic");
+  }
+  CHECK(puckers == 4);
+  od::RingParams one;
+  one.maxConfNum = 1;
+  for (const auto& rs : od::generateRingConformers(pep, f.cfgA->molecules[0].topology, one, 7).systems)
+    CHECK(rs.conf.size() == 1);
+}
+
+TEST_CASE("ring: conformers move ring atoms and exit branches only (spec 4.9)") {
+  FlatFixture f;
+  auto dist = [](const od::Vec3& a, const od::Vec3& b) {
+    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+  };
+  const std::size_t first = f.cases.size() - f.ringMols.size();
+  int checked = 0;
+  for (std::size_t r = 0; r < f.ringMols.size(); ++r) {
+    const od::EnergySystem& sys = *f.cases[first + r].sys;
+    const od::Molecule& mol = f.ringMols[r];
+    INFO(f.cases[first + r].name);
+    REQUIRE(sys.ringSlotCount() > 0);
+    const od::RingOps& ops = sys.ringOps(0);
+    const auto in = sys.inputAngles();
+    const auto x0 = sys.coordinates(std::span<const double>(in));
+    for (int s = 0; s < sys.ringSlotCount(); ++s)
+      for (int k = 1; k < sys.ringConfCounts()[s]; ++k) {
+        auto a = in;
+        a[sys.treeTorsionCount() + s] = k;
+        const auto x = sys.coordinates(std::span<const double>(a));
+        const od::RingOp& op = ops.ops[s];
+        const std::set<int> mv(op.move.begin(), op.move.end());
+        const auto& ringAtoms = f.rings[r].systems[op.system].ring;
+        const std::set<int> rs(ringAtoms.begin(), ringAtoms.end());
+        // Bond lengths: unchanged outside the ring system (bonds in it take the conformer lengths;
+        // with fixed ring atoms, the bonds to them are the fixed atoms' fit).
+        double maxBond = 0, maxRingBond = 0, maxStill = 0, maxRingMove = 0;
+        for (const od::Bond& b : mol.bonds) {
+          const double dd = std::abs(dist(x[b.a], x[b.b]) - dist(x0[b.a], x0[b.b]));
+          if (rs.count(b.a) && rs.count(b.b)) maxRingBond = std::max(maxRingBond, dd);
+          else maxBond = std::max(maxBond, dd);
+        }
+        for (std::size_t i = 0; i < x.size(); ++i) {
+          const double d = dist(x[i], x0[i]);
+          if (op.token[i] == 0) maxStill = std::max(maxStill, d);
+          if (mv.count(static_cast<int>(i))) maxRingMove = std::max(maxRingMove, d);
+        }
+        CHECK(maxBond < 1e-9);
+        CHECK(maxRingBond < 0.1);
+        CHECK(maxStill < 1e-9);
+        CHECK(maxRingMove > 0.05);
+        ++checked;
+      }
+  }
+  CHECK(checked > 0);
+  // Pairs whose distance changes with a ring conformer are evaluated.
+  CHECK(f.cases[first].sys->pairCount() > f.cases[0].sys->pairCount());
 }
 
 #ifdef OD_HAVE_CUDA

@@ -382,6 +382,23 @@ const std::vector<Param>& params() {
     t.push_back(integer("box.mobmSampleNum", "<n>", "1000", "Automatic box, box.mobmRadius = sampled: csgm1 samples per MobM",
                         OD_ACC(boxMobmSampleNum)));
 
+    t.push_back(integer("ring.macroMinSize", "<n>", "9",
+                        "Rings of at least this many atoms are macrocycles (broken and closed); smaller ones get a "
+                        "conformer library (spec 4.9)",
+                        OD_ACC(ringMacroMinSize)));
+    t.push_back(integer("ring.confGenNum", "<n>", "300", "Ring conformers: ETKDG candidates per small ring system",
+                        OD_ACC(ringConfGenNum)));
+    t.push_back(real("ring.confRmsd", "<deg>", "15",
+                     "Ring conformers: ring dihedral RMSD (degrees) at or below which two conformers are the same",
+                     OD_ACC(ringConfRmsd)));
+    t.push_back(real("ring.confEnergyWindow", "<kcal/mol>", "5",
+                     "Ring conformers: kept candidates are at most this much above the lowest (MMFF94)",
+                     OD_ACC(ringConfEnergyWindow)));
+    t.push_back(integer("ring.maxConfNum", "<n>", "10",
+                        "Ring conformers: most conformers per small ring system, the input conformer included "
+                        "(1: ring conformers off)",
+                        OD_ACC(ringMaxConfNum)));
+
     t.push_back(real("grid.spacing", "<dist>", "0.375", "9b: spacing of the energy and distance grids (Å)", OD_ACC(gridSpacing)));
     t.push_back({"grid.mode", Type::Str, "auto|full|flexres|delta", "auto",
                  "9b: StaM grids (auto: delta when no StaM backbone torsion is rotatable, otherwise full)",
@@ -953,6 +970,11 @@ void validateOptions(const Options& o) {
   check(o.stamFlexMargin >= 0, "stam.flexMargin", ">= 0");
   check(o.boxStamMargin >= 0, "box.stamMargin", ">= 0");
   check(o.boxMobmSampleNum >= 1, "box.mobmSampleNum", ">= 1");
+  check(o.ringMacroMinSize >= 4, "ring.macroMinSize", ">= 4");
+  check(o.ringConfGenNum >= 1, "ring.confGenNum", ">= 1");
+  check(o.ringConfRmsd > 0, "ring.confRmsd", "> 0");
+  check(o.ringConfEnergyWindow >= 0, "ring.confEnergyWindow", ">= 0");
+  check(o.ringMaxConfNum >= 1 && o.ringMaxConfNum <= 255, "ring.maxConfNum", "1 to 255");
   check(o.maxBreakDist > 0, "topology.maxBreakDist", "> 0");
   check(o.reachProtein > 0 && o.reachNucleic > 0, "topology.reachPerRes", "> 0 (both values)");
   check(o.closureG > 0, "energy.closureG", "> 0");

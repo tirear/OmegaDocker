@@ -49,7 +49,7 @@ double dist2(const Vec3& a, const Vec3& b) {
 GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>& parts,
                          const std::vector<const Topology*>& topologies, const std::vector<std::vector<int>>& segments,
                          const GrowParams& p)
-    : clash2_(p.clashDistance * p.clashDistance), maxRetry_(p.maxRetry), maxBacktrack_(p.maxBacktrack) {
+    : sys_(&sys), clash2_(p.clashDistance * p.clashDistance), maxRetry_(p.maxRetry), maxBacktrack_(p.maxBacktrack) {
   // Input coordinates and global torsions.
   std::vector<int> torOffset;
   for (std::size_t k = 0; k < parts.size(); ++k) {
@@ -69,11 +69,13 @@ GrowBuilder::GrowBuilder(const EnergySystem& sys, const std::vector<EnergyPart>&
       const double len = std::sqrt(kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2]);
       t.k = len > 0 ? Vec3{kv[0] / len, kv[1] / len, kv[2] / len} : Vec3{0, 0, 0};
       t.inputAngle = tt.inputAngle;
+      t.fixedC = co + tt.fixedAtom;
+      t.movingC = co + tt.movingAtom;
       tor_.push_back(std::move(t));
     }
   }
   const int T = static_cast<int>(tor_.size());
-  if (T != sys.torsionCount()) fail("grow: torsion count mismatch");
+  if (T != sys.treeTorsionCount()) fail("grow: torsion count mismatch");
   if (!p.fixed.empty() && static_cast<int>(p.fixed.size()) != T) fail("grow: fixed torsion mask size mismatch");
 
   // Deepest torsion moving each coordinate (parents precede children). The
@@ -197,7 +199,27 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
                               std::vector<Vec3>* coords) const {
   constexpr double kRad = std::numbers::pi / 180.0;
   GrowResult res;
-  std::vector<Vec3> x(input_);
+  // Ring conformers (spec 4.9): the coordinates and axes of the sample with its torsions at the input angles.
+  const std::vector<Vec3>* base = &input_;
+  std::vector<Vec3> ringBase, axO, axK;
+  bool rings = false;
+  for (int i = sys_->treeTorsionCount(); i < sys_->torsionCount(); ++i) rings |= std::lround(a[i]) != 0;
+  if (rings) {
+    std::vector<double> in = sys_->inputAngles();
+    std::copy(a.begin() + sys_->treeTorsionCount(), a.end(), in.begin() + sys_->treeTorsionCount());
+    ringBase = sys_->coordinates(std::span<const double>(in));
+    base = &ringBase;
+    axO.resize(tor_.size());
+    axK.resize(tor_.size());
+    for (std::size_t i = 0; i < tor_.size(); ++i) {
+      axO[i] = ringBase[tor_[i].fixedC];
+      const Vec3 q = ringBase[tor_[i].movingC];
+      const Vec3 kv{q[0] - axO[i][0], q[1] - axO[i][1], q[2] - axO[i][2]};
+      const double len = std::sqrt(kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2]);
+      axK[i] = len > 0 ? Vec3{kv[0] / len, kv[1] / len, kv[2] / len} : Vec3{0, 0, 0};
+    }
+  }
+  std::vector<Vec3> x(*base);
   std::vector<Mat3> R(tor_.size());
   std::vector<Vec3> tr(tor_.size());
   std::vector<int> backtracks(steps_.size(), 0);
@@ -207,9 +229,10 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
     for (int attempt = 0;; ++attempt) {
       for (int i : st.torsions) {
         const Tor& t = tor_[i];
-        const Mat3 rk = rotation(t.k, (a[i] - t.inputAngle) * kRad);
-        const Vec3 ro = matVec(rk, t.o);
-        const Vec3 d{t.o[0] - ro[0], t.o[1] - ro[1], t.o[2] - ro[2]};
+        const Vec3& to = rings ? axO[i] : t.o;
+        const Mat3 rk = rotation(rings ? axK[i] : t.k, (a[i] - t.inputAngle) * kRad);
+        const Vec3 ro = matVec(rk, to);
+        const Vec3 d{to[0] - ro[0], to[1] - ro[1], to[2] - ro[2]};
         if (t.parent < 0) {
           R[i] = rk;
           tr[i] = d;
@@ -220,7 +243,7 @@ GrowResult GrowBuilder::build(Rng& rng, std::span<double> a, const SegmentSample
           tr[i] = {pd[0] + pt[0], pd[1] + pt[1], pd[2] + pt[2]};
         }
         for (int c : t.own) {
-          const Vec3 v = matVec(R[i], input_[c]);
+          const Vec3 v = matVec(R[i], (*base)[c]);
           x[c] = {v[0] + tr[i][0], v[1] + tr[i][1], v[2] + tr[i][2]};
         }
       }

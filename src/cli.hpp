@@ -76,6 +76,11 @@ struct Options {
   double boxStamMargin = 4.0;
   std::string boxMobmRadius = "max";    // sampled | input | max
   int boxMobmSampleNum = 1000;
+  int ringMacroMinSize = 9;          // spec 4.9
+  int ringConfGenNum = 300;
+  double ringConfRmsd = 15.0;
+  double ringConfEnergyWindow = 5.0;
+  int ringMaxConfNum = 10;
   bool outPdb = true;
   bool outCif = false;
   bool outSdf = false;

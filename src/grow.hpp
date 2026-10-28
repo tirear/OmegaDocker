@@ -68,6 +68,7 @@ class GrowBuilder {
   struct Tor {
     int parent = -1;  // global tree torsion index
     Vec3 o{}, k{};    // axis point and unit vector in input coordinates
+    int fixedC = -1, movingC = -1;  // coordinate indices of the axis atoms
     double inputAngle = 0;
     std::vector<int> own;  // coordinate indices moved by this torsion but by none of its children
   };
@@ -83,6 +84,7 @@ class GrowBuilder {
     std::vector<std::pair<int, int>> pairs;
     std::vector<Reach> reach;
   };
+  const EnergySystem* sys_ = nullptr;
   std::vector<Vec3> input_;
   std::vector<Tor> tor_;
   std::vector<Step> steps_;

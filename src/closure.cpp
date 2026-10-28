@@ -348,8 +348,7 @@ std::vector<std::string> LoopCloser::describe() const {
 }
 
 std::vector<Vec3> LoopCloser::partCoords(int part, std::span<const double> a) const {
-  const auto& tree = *parts_[part].tree;
-  return buildCoordinates(*parts_[part].mol, tree, a.subspan(sys_.torsionOffset(part), tree.torsions.size()));
+  return sys_.partCoordinates(part, a);
 }
 
 double LoopCloser::deviation(const Link& l, const std::vector<Vec3>& x) const {

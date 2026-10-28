@@ -46,6 +46,7 @@ struct MolSettings {
   Csgm1 csgm1 = Csgm1::A;
   MetalBond metalBond = MetalBond::None;
   std::vector<int> ringBreaks;     // indices into Molecule::bonds
+  bool ringConformers = true;      // conformers of the small ring systems (spec 4.9)
   std::vector<ChainBreak> chainBreaks;
   TorsionTree tree;                // spec 4.7, 4.8
 };
@@ -73,12 +74,15 @@ bool hasMetalRing(const Molecule& m);
 const std::vector<std::string>& builtinSsTypes();
 
 // protonationText: the [[protonation]] section (spec 3.4), inserted before the molecules.
-std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::string& protonationText = "");
+// ringMacroMinSize (ring.macroMinSize): writes ringConformers for molecules with a small ring system
+// that is not aromatic (spec 4.9).
+std::string defaultMolConfigText(const std::vector<MolInput>& mols, const std::string& protonationText = "",
+                                 int ringMacroMinSize = 9);
 
 // Writes the default configuration to <outPrefix>.molconfig.default.toml, or to
 // <outPrefix>.molconfig.default.<n>.toml when that file exists; returns the path.
 std::string writeDefaultMolConfig(const std::string& outPrefix, const std::vector<MolInput>& mols,
-                                  const std::string& protonationText = "");
+                                  const std::string& protonationText = "", int ringMacroMinSize = 9);
 
 // [[protonation]] entries of a configuration file (spec 3.4); none when the file is missing or
 // cannot be parsed (readMolConfig reports that). Throws on invalid entries.

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "molecule.hpp"
+#include "ring_ops.hpp"
 #include "topology.hpp"
 
 namespace od {
@@ -94,6 +95,12 @@ TorsionTree buildTorsionTree(const Molecule& m, const Topology& t, const std::ve
 std::vector<Vec3> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const double> anglesDeg);
 // Single precision (9b, spec 8.6): all arithmetic in float.
 std::vector<Vec3f> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const float> anglesDeg);
+// With ring conformers (spec 4.9): ringConf holds the conformer index of each operation of ops,
+// applied to the input coordinates before the torsions.
+std::vector<Vec3> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const double> anglesDeg,
+                                   const RingOps& ops, std::span<const double> ringConf);
+std::vector<Vec3f> buildCoordinates(const Molecule& m, const TorsionTree& tree, std::span<const float> anglesDeg,
+                                    const RingOps& ops, std::span<const float> ringConf);
 
 struct ClosureState {
   double energy = 0.0;        // G * sum of squared deviations (spec 4.5)

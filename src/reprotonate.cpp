@@ -572,7 +572,7 @@ const ProtonationVariants::Variant& ProtonationVariants::entry(const Key& key) {
       continue;
     }
     var->mols.push_back(std::make_unique<MoleculeVariant>(makeVariant(*parts_[k].mol, *parts_[k].tree, sites_[k], var->changes[k])));
-    var->parts.push_back({&var->mols.back()->mol, &var->mols.back()->tree});
+    var->parts.push_back({&var->mols.back()->mol, &var->mols.back()->tree, parts_[k].rings, &var->mols.back()->toBase});
   }
   var->sys = std::make_unique<EnergySystem>(var->parts, ep_);
   if (var->sys->torsionCount() != base_.torsionCount())

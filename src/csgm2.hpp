@@ -28,7 +28,9 @@ struct Csgm2Parent {
 
 // One offspring written to anglesDeg (size of the parents' angles). cisTrans:
 // genes of cisTrans omegas, which mutate by switching between 0 and 180 degrees.
+// ringK: conformer counts of the ring slots after the torsions (spec 4.9); a mutated ring gene
+// takes a uniform conformer index.
 void csgm2Offspring(Rng& rng, std::span<const Csgm2Parent> parents, const std::vector<bool>& cisTrans,
-                    const Csgm2Params& p, std::span<double> anglesDeg);
+                    const Csgm2Params& p, std::span<double> anglesDeg, std::span<const int> ringK = {});
 
 }  // namespace od

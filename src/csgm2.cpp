@@ -12,10 +12,12 @@
 namespace od {
 
 void csgm2Offspring(Rng& rng, std::span<const Csgm2Parent> parents, const std::vector<bool>& cisTrans,
-                    const Csgm2Params& p, std::span<double> a) {
+                    const Csgm2Params& p, std::span<double> a, std::span<const int> ringK) {
   if (parents.empty()) fail("csgm2: no parents");
   const std::size_t k = parents.size();
   const int n = static_cast<int>(a.size());
+  const int nt = static_cast<int>(cisTrans.size());
+  if (nt + static_cast<int>(ringK.size()) != n) fail("csgm2: gene count mismatch");
   // Two binary tournaments; the four candidates need not be different.
   int cand[4];
   for (int& c : cand) c = static_cast<int>(rng.below(k));
@@ -43,7 +45,8 @@ void csgm2Offspring(Rng& rng, std::span<const Csgm2Parent> parents, const std::v
   }
   for (int i = 0; i < n; ++i) {
     if (rng.uniform() >= p.mutationRate) continue;
-    if (cisTrans[i]) a[i] = std::abs(wrapDeg(a[i])) < 90.0 ? 180.0 : 0.0;
+    if (i >= nt) a[i] = static_cast<double>(rng.below(static_cast<std::uint64_t>(ringK[i - nt])));
+    else if (cisTrans[i]) a[i] = std::abs(wrapDeg(a[i])) < 90.0 ? 180.0 : 0.0;
     else a[i] = wrapDeg(a[i] + p.absMaxDang * (2.0 * rng.uniform() - 1.0));
   }
 }

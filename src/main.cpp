@@ -47,6 +47,7 @@
 #include "orient.hpp"
 #include "pool.hpp"
 #include "reprotonate.hpp"
+#include "ringconf.hpp"
 #include "symrmsd.hpp"
 #include "feparams.hpp"
 #include "score9d.hpp"
@@ -149,6 +150,16 @@ od::TopologyParams topologyParams(const od::Options& opt) {
 
 od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
   od::Topology t = od::analyzeTopology(m, topologyParams(opt));
+  // Macrocycles (spec 4.9): broken by default ([[molecule.ringBreak]] source = "auto-macro").
+  if (const auto macro = od::macroRingBreaks(m, t, opt.ringMacroMinSize); !macro.empty()) {
+    od::TopologyParams p = topologyParams(opt);
+    p.brokenBonds = t.brokenBonds;
+    p.brokenBonds->insert(p.brokenBonds->end(), macro.begin(), macro.end());
+    const std::string dssp = t.dsspSS;
+    t = od::analyzeTopology(m, p);
+    t.dsspSS = dssp;
+    t.macroBreaks = macro;
+  }
   int rotatable = 0;
   for (const auto& tor : t.torsions) rotatable += tor.rotatable;
   od::logInfo(std::format("    backbone {} ({} units), torsions {}, rotatable by default {}",
@@ -233,6 +244,33 @@ od::EnergyParams energyParams(const od::Options& opt) {
 }
 
 // 9a energy of the input conformation (spec 7.9).
+void logRingConformers(const od::Molecule& m, const od::RingConformers& rc) {
+  if (rc.systems.empty()) return;
+  int sampled = 0, conformers = 0;
+  std::map<std::string, int> why;
+  for (const auto& s : rc.systems) {
+    if (s.conf.size() > 1) {
+      ++sampled;
+      conformers += static_cast<int>(s.conf.size());
+    } else {
+      ++why[s.note];
+    }
+  }
+  std::string skipped;
+  for (const auto& [w, n] : why) skipped += std::format("{}{} {}", skipped.empty() ? "" : ", ", n, w);
+  od::logInfo(std::format("  {:<40} small ring systems {}: {} with conformers ({} conformers){}", m.id, rc.systems.size(),
+                          sampled, conformers, skipped.empty() ? "" : "; input only: " + skipped));
+  if (m.role != od::Role::MobM) return;
+  for (std::size_t k = 0; k < rc.systems.size(); ++k) {
+    const auto& s = rc.systems[k];
+    std::string e;
+    for (double v : s.energy) e += std::format(" {:.2f}", v);
+    od::logInfo(std::format("    system {}: {} ring atoms (largest ring {}), {} conformer(s) of {} embedded{}{}", k + 1,
+                            s.ring.size(), s.largestRing, s.conf.size(), s.generated,
+                            e.empty() ? "" : ", relative MMFF energies:" + e, s.note.empty() ? "" : " (" + s.note + ")"));
+  }
+}
+
 void printInputEnergy(const std::string& name, const std::vector<od::EnergyPart>& parts, const od::Options& opt) {
   const od::EnergySystem sys(parts, energyParams(opt));
   int merged = 0, hd = 0;
@@ -293,6 +331,12 @@ class ConfSet {
           bool gpu, const std::optional<std::vector<std::vector<od::ProtonationOverride>>>& prot = std::nullopt)
       : name_(std::move(name)), parts_(std::move(parts)), settings_(std::move(settings)), opt_(opt),
         csgm_(set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm), sys_(parts_, energyParams(opt)) {
+    for (const auto& n : sys_.ringNotes()) od::logInfo(std::format("  {:<40} ring conformers not used: {}", name_, n));
+    if (sys_.ringSlotCount() > 0) {
+      std::string k;
+      for (int c : sys_.ringConfCounts()) k += std::format("{}{}", k.empty() ? "" : ", ", c);
+      od::logInfo(std::format("  {:<40} {} ring conformer variable(s), conformers: {}", name_, sys_.ringSlotCount(), k));
+    }
     if (opt.protonationRecompute != "none" && prot) {
       prot_ = std::make_unique<od::ProtonationVariants>(sys_, parts_, *prot, energyParams(opt));
       int n = 0, locked = 0;
@@ -568,9 +612,16 @@ class ConfSet {
         const int m = static_cast<int>(idx.local % pe_.perLine);
         od::csgm3Sample(od::Rng(p_.seed, p_.stream, idx.global - m), ends, idx.local / pe_.perLine, m, cisTrans_, pe_, a);
       } else if (ga) {
-        od::csgm2Offspring(r, parents, cisTrans_, ga_, a);
+        od::csgm2Offspring(r, parents, cisTrans_, ga_, a, sys_.ringConfCounts());
       } else {
         sampler_.sample(r, a);
+        // Ring conformers (spec 4.9): uniform, from their own random stream.
+        if (sys_.ringSlotCount() > 0) {
+          od::Rng rr(p_.seed, (1ULL << 61) + p_.stream, idx.global);
+          const int t0 = sys_.treeTorsionCount();
+          for (int s = 0; s < sys_.ringSlotCount(); ++s)
+            a[t0 + s] = static_cast<double>(rr.below(static_cast<std::uint64_t>(sys_.ringConfCounts()[s])));
+        }
       }
       // csgm2 / csgm3: the torsions are given; building does not resample.
       const od::SegmentSampler& growResample = pe || ga ? od::SegmentSampler{} : resample;
@@ -2670,6 +2721,7 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         const auto& a = topo.torsions[tt.torsion].atoms;
         ang.push_back(od::dihedralDeg(X[a[0]], X[a[1]], X[a[2]], X[a[3]]));
       }
+      ang.resize(static_cast<std::size_t>(mob.sys().torsionCount()), 0.0);  // ring slots: the input conformers
       const od::MobmDocker::Conf c = dk.conformation(ang);
       // Pose: the record superposed by the conformation at its torsion angles (bond lengths and angles of record 1).
       std::vector<od::Vec3> from(nAtoms);
@@ -2858,7 +2910,7 @@ int run(int argc, char** argv) {
   for (std::size_t i = 0; i < mobs.size(); ++i) inputs.push_back({&mobs[i], &mobTopo[i]});
   const std::string protText = protonationText(opt, protReports, overrides);
   if (opt.molConfig.empty()) {
-    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs, protText);
+    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs, protText, opt.ringMacroMinSize);
     od::logInfo(std::format("Default molecule configuration written to {}\n"
                             "Review it (a copy may be edited) and run again with --molConfig <file>.",
                             path));
@@ -2867,7 +2919,7 @@ int run(int argc, char** argv) {
   std::vector<std::string> errors;
   auto cfg = od::readMolConfig(opt.molConfig, inputs, topologyParams(opt), errors);
   if (!cfg) {
-    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs, protText);
+    const std::string path = od::writeDefaultMolConfig(opt.outPrefix, inputs, protText, opt.ringMacroMinSize);
     std::string list;
     for (const auto& e : errors) list += "\n  " + e;
     od::fail("{}: {} problem(s) found:{}\nDefault molecule configuration written to {}", opt.molConfig, errors.size(),
@@ -2895,12 +2947,30 @@ int run(int argc, char** argv) {
     printTree(*inputs[i].mol, s);
   }
 
+  // score / localMin with run.unbound = input: no 9a (spec 6.1).
+  const bool conf9a = opt.runMode == "dock" || opt.runUnbound == "conf9a";
+  // Ring conformers of the small ring systems (spec 4.9).
+  std::vector<od::RingConformers> ringConfs(inputs.size());
+  if (conf9a && opt.ringMaxConfNum > 1) {
+    const auto t0 = std::chrono::steady_clock::now();
+    od::RingParams rp{opt.ringMacroMinSize, opt.ringConfGenNum, opt.ringConfRmsd, opt.ringConfEnergyWindow,
+                      opt.ringMaxConfNum, seed};
+    od::logInfo("Ring conformers (spec 4.9):");
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+      if (!cfg->molecules[i].ringConformers) continue;
+      ringConfs[i] = od::generateRingConformers(*inputs[i].mol, cfg->molecules[i].topology, rp, (1ULL << 60) + i);
+      logRingConformers(*inputs[i].mol, ringConfs[i]);
+    }
+    od::logInfo(std::format("  ({:.2f} s)", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+  }
+
   {
     std::size_t staTorsions = 0, mobTorsions = 0;
-    for (std::size_t i = 0; i < inputs.size(); ++i)
-      (i < sta.size() ? staTorsions : mobTorsions) += cfg->molecules[i].tree.torsions.size();
-    // score / localMin with run.unbound = input: no 9a (spec 6.1).
-    const bool conf9a = opt.runMode == "dock" || opt.runUnbound == "conf9a";
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+      std::size_t ringVars = 0;
+      for (const auto& rs : ringConfs[i].systems) ringVars += rs.conf.size() > 1;
+      (i < sta.size() ? staTorsions : mobTorsions) += cfg->molecules[i].tree.torsions.size() + ringVars;
+    }
     if (staTorsions > 0 && conf9a) od::requireConfSampleNums(opt, od::SampleSet::StaM);
     if (mobTorsions > 0 && conf9a) od::requireConfSampleNums(opt, od::SampleSet::MobM);
   }
@@ -2938,7 +3008,7 @@ int run(int argc, char** argv) {
     std::vector<od::EnergyPart> parts;
     std::vector<const od::MolSettings*> settings;
     for (std::size_t i = 0; i < sta.size(); ++i) {
-      parts.push_back({&sta[i], &cfg->molecules[i].tree});
+      parts.push_back({&sta[i], &cfg->molecules[i].tree, &ringConfs[i]});
       settings.push_back(&cfg->molecules[i]);
     }
     stamSet = std::make_unique<ConfSet>("StaM group", parts, settings, *cfg, opt, od::SampleSet::StaM, seed, 0, gpu,
@@ -2947,7 +3017,7 @@ int run(int argc, char** argv) {
   std::vector<std::unique_ptr<ConfSet>> mobSets;
   for (std::size_t i = 0; i < mobs.size(); ++i) {
     const auto& s = cfg->molecules[sta.size() + i];
-    mobSets.push_back(std::make_unique<ConfSet>(mobs[i].id, std::vector<od::EnergyPart>{{&mobs[i], &s.tree}},
+    mobSets.push_back(std::make_unique<ConfSet>(mobs[i].id, std::vector<od::EnergyPart>{{&mobs[i], &s.tree, &ringConfs[sta.size() + i]}},
                                                 std::vector<const od::MolSettings*>{&s}, *cfg, opt,
                                                 od::SampleSet::MobM, seed, 1 + i, gpu,
                                                 recomputeOverrides(opt.mobmFiles[i], false, 1)));

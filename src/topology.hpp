@@ -67,6 +67,8 @@ struct Topology {
   // Metal bonds to break with metalBond = "break" (spec 4.7): bond indices of
   // metal bonds that close a cycle once crosslinkBreaks are broken.
   std::vector<int> metalBreaks;
+  // Bonds broken so that no macrocycle remains (spec 4.9, macroRingBreaks); set by the caller.
+  std::vector<int> macroBreaks;
   // Bonds treated as broken when classifying ring bonds (spec 4.5, 4.8).
   std::vector<int> brokenBonds;
   // DSSP code per residue (spec 4.6; set by assignDssp): H G I P E B T S, '.' for

@@ -25,7 +25,9 @@ long long csgm3SampleNum(std::size_t k, const Csgm3Params& p);
 
 // Sample m (0 .. perLine - 1) of line `line` (0 .. k (k - 1) - 1) written to
 // anglesDeg. lineRng: the same generator state for every sample of the line.
-// cisTrans: genes of cisTrans omegas, set to the nearer of 0 and 180 degrees.
+// cisTrans: genes of cisTrans omegas, set to the nearer of 0 and 180 degrees. Angles after the
+// torsions (cisTrans.size()) are ring slots (spec 4.9): the conformer of end point i for
+// m < perLine / 2, otherwise of end point j.
 void csgm3Sample(Rng lineRng, std::span<const std::vector<float>* const> ends, long long line, int m,
                  const std::vector<bool>& cisTrans, const Csgm3Params& p, std::span<double> anglesDeg);
 

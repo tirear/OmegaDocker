@@ -34,7 +34,7 @@ find_package(Threads REQUIRED)
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 
 set(OD_RDKIT_LIBS)
-foreach(c PartialCharges FileParsers SmilesParse SubstructMatch GraphMol RDGeneral)
+foreach(c DistGeomHelpers ForceFieldHelpers PartialCharges FileParsers SmilesParse SubstructMatch GraphMol RDGeneral)
   list(APPEND OD_RDKIT_LIBS RDKit::${c}${OD_RDKIT_SUFFIX})
 endforeach()
 
@@ -94,6 +94,7 @@ add_library(od_core STATIC
   src/molconfig.cpp
   src/rama.cpp
   src/torsion_tree.cpp
+  src/ringconf.cpp
   src/ad4.cpp
   src/energy.cpp
   src/csgm1.cpp
