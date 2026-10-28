@@ -76,6 +76,9 @@ class EnergySystem {
   const std::vector<int>& ringConfCounts() const { return ringK_; }  // conformers per ring slot
   int ringSlotOffset(int part) const { return ringSlotOffset_[part]; }  // angle index of its first slot
   const RingOps& ringOps(int part) const { return ringOps_[part]; }
+  // Sum over the ring slots of the relative MMFF94 energy of the selected conformer (spec 4.9, 10.2).
+  double ringEnergy(std::span<const float> anglesDeg) const;
+  double ringEnergy(std::span<const double> anglesDeg) const;
   // Systems of the ring conformers that got no operation, and why (logging).
   const std::vector<std::string>& ringNotes() const { return ringNotes_; }
   std::vector<double> inputAngles() const;  // degrees; ring slots 0

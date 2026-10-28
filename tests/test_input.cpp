@@ -5456,7 +5456,7 @@ TEST_CASE("ring: small ring systems, macrocycle breaks and conformers (spec 4.9)
   for (std::size_t k = 0; k < rc.systems.size(); ++k) {
     const auto& rs = rc.systems[k];
     CHECK(rs.conf.size() <= 10);
-    CHECK(rs.energy.size() + 1 == rs.conf.size());
+    CHECK(rs.energy.size() == (rs.conf.size() > 1 ? rs.conf.size() : 0));
     CHECK(rs.conf == rc2.systems[k].conf);
     if (rs.ring.size() == 5) puckers += rs.conf.size() >= 2;
     // The conformer nearest to a ring placed at conformer j is j (spec 6.1).
@@ -5518,8 +5518,15 @@ TEST_CASE("ring: conformers move ring atoms and exit branches only (spec 4.9)") 
         CHECK(maxRingBond < 0.1);
         CHECK(maxStill < 1e-9);
         CHECK(maxRingMove > 0.05);
+        // Ring strain (spec 10.2): the relative MMFF94 energy of the selected conformer.
+        const auto& energy = f.rings[r].systems[op.system].energy;
+        REQUIRE(energy.size() == static_cast<std::size_t>(op.confCount));
+        CHECK(sys.ringEnergy(std::span<const double>(a)) - sys.ringEnergy(std::span<const double>(in)) ==
+              doctest::Approx(energy[k] - energy[0]));
         ++checked;
       }
+    for (int s = 0; s < sys.ringSlotCount(); ++s)
+      for (double e : f.rings[r].systems[ops.ops[s].system].energy) CHECK(e >= 0.0);
   }
   CHECK(checked > 0);
   // Pairs whose distance changes with a ring conformer are evaluated.

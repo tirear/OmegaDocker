@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.115 |
+| 文件版本 | 1.116 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -408,7 +408,8 @@
 - 產生：RDKit ETKDGv3 產生 `ring.confGenNum`（預設 300）個構形（亂數種子由 `seed`、分子與環系決定；單執行緒，結果固定），以 MMFF94 最佳化（缺參數時 UFF，最多 2000 步）。
 - 立體化學檢查：環系內四面體原子（輸入的正規化有號體積 |V|/(|b1||b2||b3|) > 0.3；醯胺 N 等平面原子不檢查）的有號體積符號須與輸入相同，否則捨棄該構形。
 - 篩選：依能量由低到高，只取比最低者高不超過 `ring.confEnergyWindow`（預設 5 kcal/mol）者；環內兩面角（環系內的鍵，兩端各取序號最小的另一個環系鄰原子）與已保留構形（含輸入）的 RMSD ≤ `ring.confRmsd`（預設 15°）者視為相同而略過；含輸入最多 `ring.maxConfNum`（預設 10）種。輸入構形為第 0 號。`ring.maxConfNum = 1` 關閉構形庫。
-- 只保存環系與殼層原子的座標；執行紀錄列出每個環系的構形數與相對 MMFF 能量（MobM），或只有輸入構形的原因。
+- 只保存環系與殼層原子的座標；執行紀錄列出每個環系的構形數與相對 MMFF 能量（MobM，輸入構形在前），或只有輸入構形的原因。
+- 相對 MMFF 能量（1.116）：以最低的候選為 0；輸入構形（第 0 號）取環內兩面角最接近的候選的能量（輸入的鍵長、鍵角未經 MMFF 最佳化，不直接計算）。每個樣本的環張力 E_ring = 各環變數所選構形的相對能量和，用於 od_0100（10.2）。
 
 **套用到分子（環操作）**
 - 構形 k > 0 取代環系原子的座標，並把每個外接分支（從環系原子 a 經外接鍵 a–e 到達的所有原子，含氫與附在其上的虛擬原子）作剛體移動；全部在輸入座標系中計算，於兩面角之前套用（7.1）。
@@ -1633,13 +1634,14 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 能量項 t = vdW、hbond、elec、desolv（AD4 各項，已含 AD4 權重；hbond 為 12-10 原子對）。
 - 自由能（係數見下表）：
   - G_complex = Σ_t a_t E_inter,t + Σ_t b_t (E_intra,t(StaM) + E_intra,t(MobM)) + s_StaM (−TS)_StaM,complex + s_MobM (−TS)_MobM,complex。
+  - G_complex 另加 c_ring × E_ring（StaM 與 MobM 的環張力，4.9）；G_unbound(X) 同樣加上該候選構型的 c_ring × E_ring。
   - G_unbound(X) = min over 候選構型 [Σ_t b_t E_intra,t(X) + s_X (−TS)_X,單獨]。
     - 候選構型：X 所有 9a 構型樣本（L2 pool 與 dcss）中 9a 能量最低的 `unboundCandidateNum` 個；不可動時為輸入構型。
     - 9a 構型樣本是單獨存在、各自最小化的構型，比對接後的構型更符合未結合狀態；所得最低值為真正最低值的上限。
     - 選取哪個候選構型取決於 b_t 與 s_X；離線擬合時視為固定（以執行時的係數選取）。
     - 同一 MobM 的所有樣本使用相同的 G_unbound，因此排序不受影響，只影響絕對值。
   - ΔG = c0 + c_tors × N_tors + G_complex − G_unbound(StaM) − G_unbound(MobM)，等同
-    ΔG = c0 + Σ_t a_t E_inter,t + Σ_t b_t ΔE_intra,t + s_StaM Δ(−TS)_StaM + s_MobM Δ(−TS)_MobM + c_tors N_tors。
+    ΔG = c0 + Σ_t a_t E_inter,t + Σ_t b_t ΔE_intra,t + s_StaM Δ(−TS)_StaM + s_MobM Δ(−TS)_MobM + c_tors N_tors + c_ring ΔE_ring。
   - ΔE_intra,t = 複合物中 StaM 與 MobM 的 E_intra,t − 兩者未結合構型的 E_intra,t（形變能）；Δ(−TS)_X = 複合物 − 未結合。參考體積在相減後消去。
   - N_tors：MobM 扭轉樹中可轉動的兩面角數（同 adgpu_16）。
 
@@ -1650,6 +1652,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | a_t | `od_0100.inter.{vdw,hbond,elec,desolv}` | 0.7564 | 分子間各項 |
 | b_t | `od_0100.intra.{vdw,hbond,elec,desolv}` | 0.7564 | 分子內形變能各項（StaM 與 MobM 共用） |
 | s_StaM、s_MobM | `od_0100.entropy.{stam,mobm}` | 0.9 | 熵項；預期相同，分開以便驗證 |
+| c_ring | `od_0100.ring` | 0 | 環張力 ΔE_ring（相對 MMFF94，4.9；1.116 擬合結果約 0.06，見 17.3.1） |
 
 | 其他參數 | 參數檔鍵 | 預設 | 說明 |
 |---|---|---|---|
@@ -1686,7 +1689,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - `rank_<方法>`：在整個 topSampleSet 中的名次（`rank_9b`、`rank_adgpu_16`、`rank_od_0100`）。
   - `E_9b`（重算）、`E_9b_grid`（9c 排序能量，網格）、`inter`、`inter_clash`、`mobm_intra`、`mobm_clash`、`stam_term`、`stam_intra`、`stam_clash`、`clash`（任一碰撞懲罰 > 0 時為 `yes`）。
   - `dG_adgpu_16`（啟用時）。
-  - od_0100 啟用時：`dG_od_0100`、`G_complex`、`G_unbound_stam`、`G_unbound_mobm`；未乘係數的分項 `inter_{vdw,hbond,elec,desolv}`（E_inter,t）、`dintra_{vdw,hbond,elec,desolv}`（ΔE_intra,t）、`mTS_complex_stam`、`mTS_complex_mobm`、`mTS_unbound_stam`、`mTS_unbound_mobm`、`n_tors`。由這些欄位與係數可重算 `dG_od_0100`（差異只來自小數 4 位的捨入）。
+  - od_0100 啟用時：`dG_od_0100`、`G_complex`、`G_unbound_stam`、`G_unbound_mobm`；未乘係數的分項 `inter_{vdw,hbond,elec,desolv}`（E_inter,t）、`dintra_{vdw,hbond,elec,desolv}`（ΔE_intra,t）、`mTS_complex_stam`、`mTS_complex_mobm`、`mTS_unbound_stam`、`mTS_unbound_mobm`、`n_tors`、`dring`（ΔE_ring，1.116）。由這些欄位與係數可重算 `dG_od_0100`（差異只來自小數 4 位的捨入）。
 - `rank_<方法>.tsv`：該方法的排序，欄位 `rank`、`pose`、`mobm_files`、`stam_files`、`energy`、`clash`；只列輸出樣本，依名次排序。
 
 | 格式 | 參數 | 預設 | 副檔名 |
@@ -1976,6 +1979,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9d.symMaxPerm` | `--dock9d_symMaxPerm` | 256 | 10 |
 | `dock9d.freeEnergy` | `--dock9d_freeEnergy` | `["od_0100"]` | 10.2 |
 | `od_0100.c0`、`od_0100.tors` | `--od_0100_c0`、`--od_0100_tors` | 0、0 | 10.2 |
+| `od_0100.ring` | `--od_0100_ring` | 0 | 10.2 |
 | `od_0100.inter.{vdw,hbond,elec,desolv}` | `--od_0100_inter_vdw` 等 | 0.7564 | 10.2 |
 | `od_0100.intra.{vdw,hbond,elec,desolv}` | `--od_0100_intra_vdw` 等 | 0.7564 | 10.2 |
 | `od_0100.entropy.{stam,mobm}` | `--od_0100_entropy_stam` 等 | 0.9 | 10.2 |
@@ -3204,7 +3208,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 
 | 參數 | 預設 | 現況 | 節 |
 |---|---|---|---|
-| `od_0100.c0`、`.tors`、`.inter.*`、`.intra.*`、`.entropy.*` | 0、0、0.7564、0.7564、0.9 | 沿用舊版（0.7564 來源待查）；`summary.tsv` 已輸出未乘係數的分項，可離線擬合 | 10.2 |
+| `od_0100.c0`、`.tors`、`.inter.*`、`.intra.*`、`.entropy.*`、`.ring` | 0、0、0.7564、0.7564、0.9、0 | 沿用舊版（0.7564 來源待查）；排序係數的第一次擬合見 17.3.1（預設值未改）；c0、tors 需要結合親和力資料 | 10.2 |
 | `od_0100.shaking.rrtScaling` | 4 | 暫定 | 10.2 |
 
 **(2) 只有少數案例的測試**
@@ -3236,6 +3240,36 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | `stam.flexMargin` | 4 Å | 推估 | 4.4 |
 | `od_0100.unboundCandidateNum` | 20 | 推估 | 10.2 |
 
+#### 17.3.1 od_0100 排序係數的擬合（1.116）
+
+**資料**：Stage A（StaM 固定）以 1.116 重跑（標籤 B0，設定同 A0：`posm2_fft`、`mobm.dockingConfSampleNum` 16、10 輪、`topSampleNum` 500、seed 1、`output.allSummary`；兩張 TITAN V，對接時間合計約 5.3 h）。每個複合物的姿態池：對接的整個 topSampleSet，加上原生姿態 `localMin` 的結果。
+
+| | A0 | B0 |
+|---|---|---|
+| Astex（82）取樣 ≤ 2 Å | 79 | 78 |
+| Astex 第 1 名 ≤ 2 Å：`E_9b`／od_0100 預設 | 37／11 | 39／11 |
+| LEADS-PEP（53）主鏈 ≤ 2.5 Å：取樣／`E_9b` 第 1 名／od_0100 第 1 名 | 20／4／1 | 20／5／1 |
+
+**方法**（`datasetForDockingParaOpti/scripts/fit_od0100.py`）
+- 只擬合同一複合物各姿態間會變的項：`inter.*`、`intra.*`（ΔE_intra）、`entropy.*`（複合物的 −TS）、`ring`；c0、tors、G_unbound 對同一複合物的所有姿態相同，不影響排序，需要結合親和力資料另外擬合。
+- 損失：每個複合物 −log(Σ_近原生 e^(−βΔG) / Σ_全部 e^(−βΔG))，β = 1/RT（298.15 K），近原生為 `rmsd_ref` ≤ 2 Å；加上 λ × 複合物數 × Σ(c − 預設)²。BFGS。
+- 評估：對接池中 ΔG 最低者 ≤ 2 Å 的複合物數；5 組交叉驗證（每組以其餘複合物擬合），3 種分組。
+- 訓練只用 Astex 中 `n_tors` ≤ 10 的 82 個；LEADS-PEP 只用來檢驗。
+
+**結果**
+- λ 0.01–0.3 的交叉驗證：43–48（od_0100 預設 11、`E_9b` 39）。λ = 0.03、`ring` 固定為 0 時交叉驗證 47、48、47：
+
+| 係數 | 預設 | 擬合 |
+|---|---|---|
+| `inter.vdw`、`.hbond`、`.elec`、`.desolv` | 0.7564 | 1.718、0.757、0.863、1.035 |
+| `intra.vdw`、`.hbond`、`.elec`、`.desolv` | 0.7564 | 1.145、0.428、0.664、0.709 |
+| `entropy.stam`、`.mobm` | 0.9 | 0.105、0.381 |
+
+- 主要差異是熵項：預設 0.9 時複合物 −TS 主導排序（od_0100 預設第 1 名只有 11 個），擬合後降為 0.1–0.4。
+- `ring`：自由擬合得 0.057–0.065，交叉驗證沒有改善（同 λ 下少 0–2 個）；有環變數的 30 個中第 1 名 ≤ 2 Å 18 → 19。把 `ring` 加大到 0.3、0.6、1.0 時，第 1 名 ≤ 2 Å 從 47 降到 46、44、42。1.113 變差的 4 個中 3 個（1HP0、1YQY、1YWR）在擬合的係數下（不論有無 `ring`）第 1 名 ≤ 2 Å，1MZC 仍不是。
+- LEADS-PEP（以 Astex 擬合的係數，全原子 `rmsd_ref` ≤ 2 Å；取樣 12 個）：第 1 名 `E_9b` 5、od_0100 預設 0、擬合 4；第 1 名 RMSD 中位數 9.72、9.68、7.79 Å。寡肽主要受限於取樣。
+- 擬合的係數寫在 `datasetForDockingParaOpti/work/stageA/od0100_B0_fit.toml`（可作為 `--paramFile` 的一部分）；預設值未改。
+
 ### 17.4 已知問題
 
 以下問題與鍵長、鍵角無法最佳化有關，0.40.x 不處理。
@@ -3243,7 +3277,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | # | 問題 | 影響 | 可能改善的未來功能 |
 |---|---|---|---|
 | K1 | 環構形不連續（4.9）：每個小環系只能在構形庫的數種構形中切換；一種構形的鍵長、鍵角、環內兩面角整組固定，最小化不改變環變數（無梯度）。構形庫去除重複的門檻 15°、能量窗口 5 kcal/mol、上限 10 種 | 實際構形可能落在庫中兩種構形之間（環內兩面角最多約差 15°），或因受結合口袋擠壓而高於能量窗口被篩掉；改變構形只能靠 9a 產生新樣本（csgm1／csgm2／csgm3），9b 對接中構形固定 | F1 鍵長、鍵角的最佳化：環內原子可連續變化，構形庫只作為起始點 |
-| K2 | 排序能量不含環構形之間的內能差（4.9）：構形的相對 MMFF94 能量只寫入執行紀錄，不計入 9a 能量、9c 排序與 9d 自由能；環內原子對多屬 1-2／1-3／1-4 而不計 AD4 能量 | 能量窗口內的構形在分子內能量上幾乎視為相同，只靠分子間作用與較遠的原子對區分；高張力的構形可能排名過前（Astex 1.113 實測第 1 名變差的 4 個：1HP0、1MZC、1YQY、1YWR，未確認原因） | F1（最佳化鍵長、鍵角時需要鍵長、鍵角、環內扭轉的能量項）；F2 更多種能量函式（含鍵結項的能量函式） |
+| K2 | 排序能量不含環構形之間的內能差（4.9）：構形的相對 MMFF94 能量不計入 9a 能量與 9c 排序；9d 的 od_0100 有 `od_0100.ring` 項（1.116，預設 0；擬合結果約 0.06，對排序沒有改善，17.3.1）；環內原子對多屬 1-2／1-3／1-4 而不計 AD4 能量 | 能量窗口內的構形在分子內能量上幾乎視為相同，只靠分子間作用與較遠的原子對區分；高張力的構形可能排名過前（Astex 1.113 實測第 1 名變差的 4 個：1HP0、1MZC、1YQY、1YWR，未確認原因） | F1（最佳化鍵長、鍵角時需要鍵長、鍵角、環內扭轉的能量項）；F2 更多種能量函式（含鍵結項的能量函式） |
 
 ---
 
@@ -3386,3 +3420,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.113 | 2026-10-28 | 實作 4.9 環構形：小環系與大環判定、大環預設斷鍵（`auto-macro`）、RDKit ETKDG／MMFF94 構形庫、環操作（父分支／全部／固定原子三種對齊）、角度向量末端的環變數、原子對與 GPU 核心；分子設定檔 `ringConformers`、`ringBreak.source`（5.2）；csgm1／csgm2／csgm3 與 grow 的環變數（7.1、7.5–7.8）；參數 `ring.*`（14.2）；Astex 與 LEADS-PEP 實測 |
 | 1.114 | 2026-10-28 | `score`／`localMin` 每筆紀錄選擇疊合 RMSD 最小的環構形組合（6.1、4.9）；`box.mobmRadius` 的設定加入大環斷鍵，`sampled` 的樣本先閉合（3.3）；新增 17.4 已知問題（K1 環構形不連續、K2 排序不含環構形內能差）；實測 |
 | 1.115 | 2026-10-28 | `box.mobmRadius`：`sampled` 抽環構形，`max` 的片段內距離取環構形組合中的最大值；構形庫在決定盒子時產生，9a 設定相同時沿用（3.3、4.9）；實測 |
+| 1.116 | 2026-10-28 | 環構形的相對 MMFF 能量含輸入構形（4.9）；od_0100 新增環張力項 `od_0100.ring`（預設 0）與 `summary.tsv` 欄位 `dring`（10.2、10.3、14）；Stage A 以 1.116 重跑（B0）與 od_0100 排序係數的第一次擬合（17.3.1）；K2 更新 |

@@ -25,6 +25,7 @@ struct RingOp {
   int exitCount = 0;
   std::vector<double> pos;       // (confCount − 1) × move.size() × 3
   std::vector<double> xf;        // (confCount − 1) × exitCount × 12: R (row-major), t; x' = R x + t
+  std::vector<double> energy;    // per conformer: relative MMFF94 energy (kcal/mol, RingSystem::energy)
   // Per coordinate index: 0 on the side that does not move, otherwise an id of the rigid piece
   // (a moving ring atom or an exit). Two coordinates with different ids may change their distance.
   std::vector<int> token;

@@ -645,6 +645,8 @@ const std::vector<Param>& params() {
 
     t.push_back(real("od_0100.c0", "<c>", "0", "constant term (kcal/mol)", OD_ACC(fe.c0)));
     t.push_back(real("od_0100.tors", "<c>", "0", "coefficient of the MobM rotatable torsion number", OD_ACC(fe.tors)));
+    t.push_back(real("od_0100.ring", "<c>", "0", "coefficient of the ring conformer strain (relative MMFF94 energy)",
+                     OD_ACC(fe.ring)));
     t.push_back(real("od_0100.temperature", "<K>", "298.15", "temperature T of -TS = -RT sum ln f_i (K)", OD_ACC(fe.temperature)));
     t.push_back(integer("od_0100.unboundCandidateNum", "<n>", "20",
                         "conformation samples with the lowest 9a energy evaluated for the unbound free energy",

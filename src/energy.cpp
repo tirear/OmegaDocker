@@ -229,6 +229,23 @@ std::vector<Vec3> EnergySystem::partCoordinates(int part, std::span<const double
 }
 
 std::vector<Vec3f> EnergySystem::coordinates(std::span<const float> anglesDeg) const { return coordinatesT(anglesDeg); }
+
+namespace {
+template <class T>
+double ringEnergyOf(const std::vector<RingOps>& ops, const std::vector<int>& offset, std::span<const T> a) {
+  double e = 0;
+  for (std::size_t k = 0; k < ops.size(); ++k)
+    for (std::size_t i = 0; i < ops[k].ops.size(); ++i) {
+      const RingOp& op = ops[k].ops[i];
+      const long c = std::lround(static_cast<double>(a[offset[k] + i]));
+      if (c >= 0 && c < static_cast<long>(op.energy.size())) e += op.energy[c];
+    }
+  return e;
+}
+}  // namespace
+
+double EnergySystem::ringEnergy(std::span<const float> a) const { return ringEnergyOf(ringOps_, ringSlotOffset_, a); }
+double EnergySystem::ringEnergy(std::span<const double> a) const { return ringEnergyOf(ringOps_, ringSlotOffset_, a); }
 std::vector<Vec3> EnergySystem::coordinates(std::span<const double> anglesDeg) const { return coordinatesT(anglesDeg); }
 
 bool EnergySystem::hasClosures() const {

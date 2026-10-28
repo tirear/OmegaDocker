@@ -35,7 +35,9 @@ struct RingSystem {
   // Conformers: positions of the ring atoms, then of the shell atoms. Conformer 0 is the input;
   // the others are in their own frame (RDKit), aligned when the ring operations are built.
   std::vector<std::vector<Vec3>> conf;
-  std::vector<double> energy;  // MMFF94 (UFF when MMFF has no parameters) of conformers 1.., kcal/mol, relative
+  // MMFF94 (UFF when MMFF has no parameters) per conformer, kcal/mol, relative to the lowest candidate;
+  // conformer 0 (the input) gets the energy of the candidate with the closest ring dihedrals.
+  std::vector<double> energy;
   std::string note;            // why the system has only the input conformer (empty when it has more)
   int generated = 0;           // ETKDG conformers embedded
   // Ring dihedrals (x, a, b, y as positions in ring) used to compare conformers.

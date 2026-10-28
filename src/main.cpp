@@ -286,7 +286,7 @@ void logRingConformers(const od::Molecule& m, const od::RingConformers& rc) {
     for (double v : s.energy) e += std::format(" {:.2f}", v);
     od::logInfo(std::format("    system {}: {} ring atoms (largest ring {}), {} conformer(s) of {} embedded{}{}", k + 1,
                             s.ring.size(), s.largestRing, s.conf.size(), s.generated,
-                            e.empty() ? "" : ", relative MMFF energies:" + e, s.note.empty() ? "" : " (" + s.note + ")"));
+                            e.empty() ? "" : ", relative MMFF energies (input first):" + e, s.note.empty() ? "" : " (" + s.note + ")"));
   }
 }
 
@@ -1089,7 +1089,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
   };
   // Unbound state: the candidate with the lowest G = sum_t intra[t] E_intra,t + entropy (-TS) + protonation free energy.
   struct Unbound {
-    double g = 0, mts = 0, protG = 0;
+    double g = 0, mts = 0, protG = 0, ring = 0;
     Terms4 intra{};
   };
   auto unbound = [&](const ConfSet& set, bool stam) {
@@ -1102,8 +1102,9 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       const Alone& a = stam ? stamOf(smp.angles, ps) : tmp;
       const Terms4 e = terms4(a.terms);
       const double mts = od::minusTS(a.sumLnF, sp);
-      const double g = dot4(fp.intra, e) + cS * mts + ps.g;
-      if (g < u.g) u = {g, mts, ps.g, e};
+      const double ring = set.sysOf(ps.variant).ringEnergy(std::span<const float>(smp.angles));
+      const double g = dot4(fp.intra, e) + cS * mts + ps.g + fp.ring * ring;
+      if (g < u.g) u = {g, mts, ps.g, ring, e};
     }
     return u;
   };
@@ -1128,7 +1129,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     struct Row {
       double e9b = 0, e9bGrid = 0, inter = 0, interClash = 0, mobIntra = 0, mobClash = 0, stamTerm = 0, stamIntra = 0,
              stamClash = 0;
-      double dgAd = 0, dgOd = 0, gComplex = 0, mtsStam = 0, mtsMobm = 0, rmsdRef = 0;
+      double dgAd = 0, dgOd = 0, gComplex = 0, mtsStam = 0, mtsMobm = 0, rmsdRef = 0, dRing = 0;
       Terms4 inter4{}, dIntra4{};
       std::vector<od::Vec3f> world;
       int stamVariant = 0, mobVariant = 0;
@@ -1219,8 +1220,11 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
           intra4[t] = si[t] + mi[t];
           w.dIntra4[t] = intra4[t] - ubStam.intra[t] - ubMob.intra[t];
         }
+        const double ring = stamSet.sysOf(ps.variant).ringEnergy(std::span<const float>(ss.angles)) +
+                            msys.ringEnergy(std::span<const float>(r.s.angles));
+        w.dRing = ring - ubStam.ring - ubMob.ring;
         w.gComplex = dot4(fp.inter, w.inter4) + dot4(fp.intra, intra4) + fp.entropyStam * w.mtsStam +
-                     fp.entropyMobm * w.mtsMobm + w.protG;
+                     fp.entropyMobm * w.mtsMobm + w.protG + fp.ring * ring;
         w.dgOd = fp.c0 + fp.tors * nTors + w.gComplex - ubStam.g - ubMob.g;
       }
     }
@@ -1321,7 +1325,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
         f << "\tdG_od_0100\tG_complex\tG_unbound_stam\tG_unbound_mobm";
         for (const char* t : od::kFeTermNames) f << "\tinter_" << t;
         for (const char* t : od::kFeTermNames) f << "\tdintra_" << t;
-        f << "\tmTS_complex_stam\tmTS_complex_mobm\tmTS_unbound_stam\tmTS_unbound_mobm\tn_tors";
+        f << "\tmTS_complex_stam\tmTS_complex_mobm\tmTS_unbound_stam\tmTS_unbound_mobm\tn_tors\tdring";
       }
       f << "\n";
       for (std::size_t k : listOrder) {
@@ -1347,7 +1351,8 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
           f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}", w.dgOd, w.gComplex, ubStam.g, ubMob.g);
           for (double v : w.inter4) f << std::format("\t{:.4f}", v);
           for (double v : w.dIntra4) f << std::format("\t{:.4f}", v);
-          f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{}", w.mtsStam, w.mtsMobm, ubStam.mts, ubMob.mts, nTors);
+          f << std::format("\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{}\t{:.4f}", w.mtsStam, w.mtsMobm, ubStam.mts, ubMob.mts, nTors,
+                           w.dRing);
         }
         f << "\n";
       }

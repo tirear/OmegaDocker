@@ -413,6 +413,12 @@ void generateSystem(const Molecule& m, RingSystem& s, const RingParams& p,
   std::stable_sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.e < b.e; });
   const double eMin = cand[0].e;
   std::vector<std::vector<double>> kept{dihedrals(s.conf[0])};
+  {
+    std::size_t near = 0;
+    for (std::size_t c = 1; c < cand.size(); ++c)
+      if (rmsd(cand[c].d, kept[0]) < rmsd(cand[near].d, kept[0])) near = c;
+    s.energy.push_back(cand[near].e - eMin);
+  }
   for (const Cand& c : cand) {
     if (static_cast<int>(s.conf.size()) >= p.maxConfNum) break;
     if (c.e - eMin > p.confEnergyWindow) break;
@@ -423,7 +429,10 @@ void generateSystem(const Molecule& m, RingSystem& s, const RingParams& p,
     s.conf.push_back(c.x);
     s.energy.push_back(c.e - eMin);
   }
-  if (s.conf.size() == 1) s.note = "every candidate is the input conformer";
+  if (s.conf.size() == 1) {
+    s.note = "every candidate is the input conformer";
+    s.energy.clear();
+  }
 }
 
 }  // namespace
@@ -676,6 +685,8 @@ RingOps buildRingOps(const Molecule& m, const TorsionTree& tree, const RingConfo
     RingOp op;
     op.system = static_cast<int>(si);
     op.confCount = static_cast<int>(s.conf.size());
+    op.energy = s.energy;
+    op.energy.resize(s.conf.size(), 0.0);
     for (int a : S)
       if (!fixedS[a]) op.move.push_back(a);
     std::vector<int> movingExit;
