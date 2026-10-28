@@ -14,6 +14,7 @@
 #include "csgm1.hpp"
 #include "energy.hpp"
 #include "log.hpp"
+#include "ring_ops.hpp"
 #include "rng.hpp"
 #include "torsion_tree.hpp"
 
@@ -117,7 +118,8 @@ double radiusOf(std::span<const Vec3> x) {
   return r;
 }
 
-double mobmRadiusMax(const Molecule& m, const TorsionTree& tree) {
+double mobmRadiusMax(const Molecule& m, const TorsionTree& tree, const RingOps* rings, int* overflow,
+                     long long maxCombos) {
   const int na = static_cast<int>(m.atoms.size());
   // Rigid part of an atom: 1 + the innermost tree torsion moving it, 0 for the root part.
   std::vector<int> part(na, 0);
@@ -155,6 +157,103 @@ double mobmRadiusMax(const Molecule& m, const TorsionTree& tree) {
   }
   std::vector<Vec3> x(n);
   for (int i = 0; i < n; ++i) x[i] = m.atoms[heavy[i]].xyz;
+  // Distances in each rigid part (its local order): fixed, or the largest over the ring conformers.
+  std::vector<std::vector<double>> dmat(np);
+  std::vector<std::vector<int>> where(n);  // per heavy atom: (part, slot) pairs
+  for (int p = 0; p < np; ++p) {
+    const auto& R = rigid[p];
+    const std::size_t k = R.size();
+    dmat[p].assign(k * k, 0.0);
+    for (std::size_t a = 0; a < k; ++a) {
+      where[R[a]].push_back(p);
+      where[R[a]].push_back(static_cast<int>(a));
+      for (std::size_t b = 0; b < k; ++b) dmat[p][a * k + b] = dist(x[R[a]], x[R[b]]);
+    }
+  }
+  if (overflow) *overflow = 0;
+  if (rings && !rings->ops.empty()) {
+    std::size_t nc = static_cast<std::size_t>(na);
+    for (const RingOp& op : rings->ops) {
+      for (int c : op.move) nc = std::max(nc, static_cast<std::size_t>(c) + 1);
+      for (int c : op.exitAtom) nc = std::max(nc, static_cast<std::size_t>(c) + 1);
+    }
+    std::vector<Vec3> base(nc, Vec3{});
+    for (int a = 0; a < na; ++a) base[a] = m.atoms[a].xyz;
+    const int nr = static_cast<int>(rings->ops.size());
+    auto tokenOf = [&](const RingOp& op, int atom) {
+      return static_cast<std::size_t>(atom) < op.token.size() ? op.token[atom] : 0;
+    };
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int p = 0; p < np; ++p) {
+      const auto& R = rigid[p];
+      const std::size_t k = R.size();
+      if (k < 2) continue;
+      // Ring operations that change distances in this part: its atoms are not all one rigid piece.
+      std::vector<int> ops;
+      for (int r = 0; r < nr; ++r) {
+        const RingOp& op = rings->ops[r];
+        const int t0 = tokenOf(op, heavy[R[0]]);
+        for (std::size_t a = 1; a < k; ++a)
+          if (tokenOf(op, heavy[R[a]]) != t0) {
+            ops.push_back(r);
+            break;
+          }
+      }
+      if (ops.empty()) continue;
+      long long combos = 1;
+      bool over = false;
+      for (int r : ops) {
+        combos *= rings->ops[r].confCount;
+        if (combos > maxCombos) {
+          over = true;
+          break;
+        }
+      }
+      std::vector<double> sel(nr, 0.0);
+      std::vector<Vec3> xyz;
+      auto take = [&] {
+        xyz = base;
+        applyRingOps(*rings, std::span<const double>(sel), xyz);
+        for (std::size_t a = 0; a < k; ++a)
+          for (std::size_t b = a + 1; b < k; ++b) {
+            const double d = dist(xyz[heavy[R[a]]], xyz[heavy[R[b]]]);
+            double& v = dmat[p][a * k + b];
+            if (d > v) v = dmat[p][b * k + a] = d;
+          }
+      };
+      if (!over) {
+        for (long long c = 1; c < combos; ++c) {
+          long long v = c;
+          for (int r : ops) {
+            sel[r] = static_cast<double>(v % rings->ops[r].confCount);
+            v /= rings->ops[r].confCount;
+          }
+          take();
+        }
+      } else {
+        for (int r : ops) {
+          for (int c = 1; c < rings->ops[r].confCount; ++c) {
+            sel[r] = c;
+            take();
+          }
+          sel[r] = 0;
+        }
+#pragma omp critical
+        if (overflow) ++*overflow;
+      }
+    }
+  }
+  auto partDist = [&](int p, int i, int j) {
+    const auto& w = where[i];
+    int si = -1;
+    for (std::size_t q = 0; q < w.size(); q += 2)
+      if (w[q] == p) si = w[q + 1];
+    const auto& v = where[j];
+    int sj = -1;
+    for (std::size_t q = 0; q < v.size(); q += 2)
+      if (v[q] == p) sj = v[q + 1];
+    return dmat[p][static_cast<std::size_t>(si) * rigid[p].size() + static_cast<std::size_t>(sj)];
+  };
   double best = 0;
 #pragma omp parallel
   {
@@ -167,7 +266,7 @@ double mobmRadiusMax(const Molecule& m, const TorsionTree& tree) {
       std::fill(d.begin(), d.end(), std::numeric_limits<double>::infinity());
       std::fill(seen.begin(), seen.end(), 0);
       const int p0 = part[heavy[i]];
-      for (int j : rigid[p0]) d[j] = dist(x[i], x[j]);
+      for (int j : rigid[p0]) d[j] = partDist(p0, i, j);
       seen[p0] = 1;
       stack.assign(1, p0);
       while (!stack.empty()) {
@@ -177,7 +276,7 @@ double mobmRadiusMax(const Molecule& m, const TorsionTree& tree) {
           if (seen[e.to]) continue;
           seen[e.to] = 1;
           for (int j : rigid[e.to])
-            for (int q : e.ports) d[j] = std::min(d[j], d[q] + dist(x[q], x[j]));
+            for (int q : e.ports) d[j] = std::min(d[j], d[q] + partDist(e.to, q, j));
           stack.push_back(e.to);
         }
       }
@@ -213,6 +312,12 @@ SampledRadius mobmRadiusSampled(const Molecule& m, const EnergySystem& sys, cons
     Rng rng(seed, stream, static_cast<std::uint64_t>(k));
     std::vector<double> a = sys.inputAngles();
     sampler.sample(rng, a);
+    if (sys.ringSlotCount() > 0) {
+      Rng rr(seed, (1ULL << 61) + stream, static_cast<std::uint64_t>(k));
+      const int t0 = sys.treeTorsionCount();
+      for (int s = 0; s < sys.ringSlotCount(); ++s)
+        a[t0 + s] = static_cast<double>(rr.below(static_cast<std::uint64_t>(sys.ringConfCounts()[s])));
+    }
     if (closing && (!closer->close(rng, a, resample) || (maxDeviation > 0 && sys.closureDeviation(a) > maxDeviation))) {
       notClosed[k] = 1;
       continue;

@@ -35,11 +35,17 @@ double radiusOf(std::span<const Vec3> x);
 
 // box.mobmRadius = max (spec 3.3): upper bound, over all conformations of the tree, of the distance of
 // a heavy atom from the heavy-atom centre: max_i (1/N) sum_j d_ub(i, j), with d_ub the sum of the
-// fixed distances along the path through the rigid parts of the tree.
-double mobmRadiusMax(const Molecule& m, const TorsionTree& tree);
+// fixed distances along the path through the rigid parts of the tree. With ring operations (spec 4.9),
+// a distance in a rigid part is the largest over the combinations of the ring conformers that change
+// distances in it (all of them up to maxCombos per part; above, each ring operation alone, and
+// *overflow, when given, counts those parts: the result is then not guaranteed to be a bound).
+struct RingOps;
+double mobmRadiusMax(const Molecule& m, const TorsionTree& tree, const RingOps* rings = nullptr,
+                     int* overflow = nullptr, long long maxCombos = 100000);
 
 // box.mobmRadius = sampled: the largest radius of the input conformation and of the csgm1 samples
-// (sample k with Rng(seed, stream, k), k < sampleNum) without clashing heavy-atom pairs. With an
+// (sample k with Rng(seed, stream, k), k < sampleNum) without clashing heavy-atom pairs. The ring
+// slots of sys (spec 4.9) are uniform, from Rng(seed, 2^61 + stream, k) as in 9a. With an
 // active closer (loop, crosslink, metal or macrocycle breaks), each sample is closed first (spec 7.11);
 // samples that fail to close, or whose closure deviation then exceeds maxDeviation (> 0), are left out.
 struct SampledRadius {

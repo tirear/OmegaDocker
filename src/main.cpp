@@ -2592,9 +2592,32 @@ std::vector<std::optional<od::MolSettings>> boxMobmSettings(const od::Options& o
   return out;
 }
 
+// Inputs of generateRingConformers from the topology: the broken bonds and the central bonds of the
+// torsions in the flexible range.
+std::vector<std::array<int, 2>> ringKey(const od::Topology& t) {
+  std::vector<std::array<int, 2>> k;
+  for (int b : t.brokenBonds) k.push_back({-1, b});
+  for (const auto& tor : t.torsions)
+    if (tor.inFlexRange) k.push_back({std::min(tor.atoms[1], tor.atoms[2]), std::max(tor.atoms[1], tor.atoms[2])});
+  std::sort(k.begin(), k.end());
+  return k;
+}
+
+// Ring conformers of a MobM made for the box (input coordinates), reused by 9a when the key matches.
+struct BoxRings {
+  std::vector<std::array<int, 2>> key;
+  od::RingConformers rc;
+};
+
+od::RingParams ringParams(const od::Options& opt, std::uint64_t seed) {
+  return {opt.ringMacroMinSize, opt.ringConfGenNum, opt.ringConfRmsd, opt.ringConfEnergyWindow, opt.ringMaxConfNum, seed};
+}
+
 // Docking box of the run (spec 3.3). Automatic modes: from the StaM heavy atoms and the MobM radii.
+// boxRings: per MobM, the ring conformers used for box.mobmRadius = max / sampled (spec 4.9).
 od::BoxFrame resolveBox(const od::Options& opt, const std::vector<od::Molecule>& sta, const std::vector<od::Molecule>& mobs,
-                        std::uint64_t seed) {
+                        std::uint64_t seed, std::vector<std::optional<BoxRings>>& boxRings) {
+  boxRings.assign(mobs.size(), std::nullopt);
   od::BoxFrame b;
   if (opt.boxMode == "manual") {
     b.center = *opt.boxCenter;
@@ -2619,15 +2642,38 @@ od::BoxFrame resolveBox(const od::Options& opt, const std::vector<od::Molecule>&
       const std::vector<od::Vec3> heavy = od::heavyCoords(m);
       double r = od::radiusOf(heavy);
       std::string how = "input conformation";
+      // Ring conformers (spec 4.9) as 9a will use them: same parameters and random stream.
+      const od::RingConformers* rc = nullptr;
+      std::string ringHow;
+      if (opt.boxMobmRadius != "input" && settings[i] && settings[i]->ringConformers &&
+          (opt.runMode == "dock" || opt.runUnbound == "conf9a") && opt.ringMaxConfNum > 1) {
+        boxRings[i] = BoxRings{ringKey(settings[i]->topology),
+                               od::generateRingConformers(m, settings[i]->topology, ringParams(opt, seed),
+                                                          (1ULL << 60) + sta.size() + i)};
+        rc = &boxRings[i]->rc;
+        int vars = 0, confs = 0;
+        for (const auto& s : rc->systems)
+          if (s.conf.size() > 1) {
+            ++vars;
+            confs += static_cast<int>(s.conf.size());
+          }
+        if (vars > 0) ringHow = std::format(", {} ring system(s) with {} conformers", vars, confs);
+      }
       if (opt.boxMobmRadius != "input" && !settings[i]) {
         od::logWarn(std::format("{}: no valid molecule configuration for box.mobmRadius = {}; the radius of the input "
                                 "conformation is used",
                                 m.id, opt.boxMobmRadius));
       } else if (opt.boxMobmRadius == "max") {
-        r = od::mobmRadiusMax(m, settings[i]->tree);
-        how = std::format("upper bound, {} rotatable torsions", settings[i]->tree.torsions.size());
+        const od::RingOps ops = rc ? od::buildRingOps(m, settings[i]->tree, *rc, {}) : od::RingOps{};
+        int overflow = 0;
+        r = od::mobmRadiusMax(m, settings[i]->tree, &ops, &overflow);
+        how = std::format("upper bound, {} rotatable torsions{}", settings[i]->tree.torsions.size(), ringHow);
+        if (overflow > 0)
+          od::logWarn(std::format("{}: box.mobmRadius = max: {} rigid part(s) with too many ring conformer combinations; "
+                                  "each ring system was varied alone there, the radius may not be an upper bound",
+                                  m.id, overflow));
       } else if (opt.boxMobmRadius == "sampled") {
-        const od::EnergySystem sys({{&m, &settings[i]->tree}}, energyParams(opt));
+        const od::EnergySystem sys({{&m, &settings[i]->tree, rc, nullptr}}, energyParams(opt));
         od::Csgm1GroupSampler smp;
         smp.add(od::Csgm1Sampler(m, *settings[i], cfg, {opt.mobmCsgm.csgm1AngleStep, opt.mobmCsgm.ramaFloor}));
         // Breaks are closed as in 9a (spec 7.11) with the MobM closure settings.
@@ -2648,7 +2694,8 @@ od::BoxFrame resolveBox(const od::Options& opt, const std::vector<od::Molecule>&
                                       : std::format("input and {} of {} csgm1 samples without clashes{}", s.accepted,
                                                     opt.boxMobmSampleNum,
                                                     closer.active() ? std::format(", closed ({} not closed)", s.notClosed)
-                                                                    : std::string());
+                                                                    : std::string()) +
+                  ringHow;
       }
       od::logInfo(std::format("  box: MobM {:<40} radius {:.3f} Å ({})", m.id, r, how));
       rmax = std::max(rmax, r);
@@ -2948,7 +2995,8 @@ int run(int argc, char** argv) {
                : ((static_cast<std::uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}()) >> 1;
   od::logInfo(std::format("seed {}", seed));
   opt.seed = seed;
-  opt.box = resolveBox(opt, sta, mobs, seed);
+  std::vector<std::optional<BoxRings>> boxRings;
+  opt.box = resolveBox(opt, sta, mobs, seed, boxRings);
   if (opt.box.rotated) {
     for (auto* v : {&sta, &mobs, &refs})
       for (auto& m : *v)
@@ -3032,12 +3080,23 @@ int run(int argc, char** argv) {
   std::vector<od::RingConformers> ringConfs(inputs.size());
   if (conf9a && opt.ringMaxConfNum > 1) {
     const auto t0 = std::chrono::steady_clock::now();
-    od::RingParams rp{opt.ringMacroMinSize, opt.ringConfGenNum, opt.ringConfRmsd, opt.ringConfEnergyWindow,
-                      opt.ringMaxConfNum, seed};
+    const od::RingParams rp = ringParams(opt, seed);
     od::logInfo("Ring conformers (spec 4.9):");
     for (std::size_t i = 0; i < inputs.size(); ++i) {
       if (!cfg->molecules[i].ringConformers) continue;
-      ringConfs[i] = od::generateRingConformers(*inputs[i].mol, cfg->molecules[i].topology, rp, (1ULL << 60) + i);
+      std::optional<BoxRings>* bp = i >= sta.size() ? &boxRings[i - sta.size()] : nullptr;
+      if (bp && *bp && (*bp)->key == ringKey(cfg->molecules[i].topology)) {
+        std::optional<BoxRings>& br = *bp;
+        // Made for the box (input coordinates): conformer 0 follows the molecule into the box frame.
+        ringConfs[i] = std::move(br->rc);
+        br.reset();
+        if (opt.box.rotated)
+          for (auto& rs : ringConfs[i].systems)
+            for (auto& x : rs.conf[0]) x = opt.box.toBox(x);
+        od::logInfo(std::format("  {}: from the box (box.mobmRadius)", inputs[i].mol->id));
+      } else {
+        ringConfs[i] = od::generateRingConformers(*inputs[i].mol, cfg->molecules[i].topology, rp, (1ULL << 60) + i);
+      }
       logRingConformers(*inputs[i].mol, ringConfs[i]);
     }
     od::logInfo(std::format("  ({:.2f} s)", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));

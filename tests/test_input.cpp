@@ -2663,6 +2663,43 @@ TEST_CASE("box: MobM radius (box.mobmRadius) and fixAuto") {
   CHECK(od::mobmRadiusMax(m, rigid) == doctest::Approx(ref).epsilon(1e-12));
   CHECK(od::mobmRadiusMax(m, rigid) >= rInput);
 
+  // Ring conformers (spec 4.9): the biotin ring system switches puckers; the bound holds for every
+  // sample with ring conformers and is not below the bound of the input rings.
+  {
+    const od::RingConformers rc = od::generateRingConformers(m, s.topology, od::RingParams{}, 5);
+    const od::RingOps ops = od::buildRingOps(m, s.tree, rc, {});
+    REQUIRE(!ops.ops.empty());
+    int overflow = -1;
+    const double rMaxRing = od::mobmRadiusMax(m, s.tree, &ops, &overflow);
+    CHECK(overflow == 0);
+    CHECK(rMaxRing >= rMax - 1e-12);
+    const od::EnergySystem rsys({{&m, &s.tree, &rc, nullptr}}, {});
+    REQUIRE(rsys.ringSlotCount() == static_cast<int>(ops.ops.size()));
+    const od::SampledRadius rr = od::mobmRadiusSampled(m, rsys, smp, 500, 3, 9);
+    MESSAGE(std::format("BTN with ring conformers: sampled {:.3f} ({} kept), max {:.3f} Å", rr.radius, rr.accepted,
+                        rMaxRing));
+    CHECK(rr.accepted > 0);
+    CHECK(rr.radius <= rMaxRing + 1e-9);
+    int above = 0;
+    for (int k = 0; k < 300; ++k) {
+      od::Rng r(13, 0, k);
+      std::vector<double> a = rsys.inputAngles();
+      smp.sample(r, a);
+      for (int q = 0; q < rsys.ringSlotCount(); ++q)
+        a[rsys.treeTorsionCount() + q] = static_cast<double>(r.below(static_cast<std::uint64_t>(rsys.ringConfCounts()[q])));
+      const auto c = rsys.coordinates(std::span<const double>(a));
+      std::vector<od::Vec3> h;
+      for (std::size_t i = 0; i < m.atoms.size(); ++i)
+        if (m.atoms[i].atomicNum > 1) h.push_back(c[i]);
+      CHECK(od::radiusOf(h) <= rMaxRing + 1e-9);
+      above += od::radiusOf(h) > rMax + 1e-9;
+    }
+    MESSAGE(std::format("BTN: {} of 300 samples with ring conformers above the bound without them", above));
+    // A combination limit of 1: each ring operation alone, reported.
+    od::mobmRadiusMax(m, s.tree, &ops, &overflow, 1);
+    CHECK(overflow > 0);
+  }
+
   // fixAuto: no StaM torsion is rotatable by default; MobM unchanged.
   const od::Molecule sta = od::loadMolecules(kData + "/2KJJ.cif", od::Role::StaM, ccd()).front();
   od::TopologyParams tp;
