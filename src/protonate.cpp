@@ -453,6 +453,18 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
     if (isMetalBondOf(s, b)) metalBonded[b.a] = metalBonded[b.b] = true;
   for (int i = 0; i < n; ++i)
     if (isMetal(s.atoms[i].atomicNum)) metalBonded[i] = false;
+  // Side-chain atoms of standard amino acids covalently linked to another residue (disulfides,
+  // ligand links): their hydrogens follow the pKa rules of the linked system, not PROPKA.
+  std::vector<bool> linked(n, false);
+  if (ccdMode)
+    for (const Bond& b : s.bonds) {
+      if (isMetalBondOf(s, b) || s.atoms[b.a].residue == s.atoms[b.b].residue) continue;
+      for (int x : {b.a, b.b}) {
+        const int r = s.atoms[x].residue;
+        if (r >= 0 && kStdAmino.contains(s.residues[r].info.name) && s.atoms[x].name != "N" && s.atoms[x].name != "C")
+          linked[x] = true;
+      }
+    }
 
   // Residue completeness (heavy atoms of the CCD definition that are not leaving atoms).
   if (ccdMode && !planIn) {
@@ -538,11 +550,28 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
     }
 
     // 4. Heavy-atom molecule with the CCD / input charges; implicit hydrogens.
+    // Atoms bonded to a metal in their CCD definition (e.g. oxo / hydroxo ligands of Mo in
+    // molybdopterin) keep the hydrogens of the definition (ccdBoundToMetal = their number).
+    std::vector<int> ccdBoundToMetal(n, -1);
+    for (const Bond& b : s.bonds) {
+      if (!ccdMode || b.order == BondOrder::Metal || s.atoms[b.a].residue != s.atoms[b.b].residue) continue;
+      const bool ma = isMetal(s.atoms[b.a].atomicNum), mb = isMetal(s.atoms[b.b].atomicNum);
+      if (ma == mb) continue;
+      const int x = ma ? b.b : b.a;
+      const CcdComp* comp = residueComp(s.atoms[x].residue);
+      const int ci = comp ? comp->find(s.atoms[x].name) : -1;
+      if (ci < 0) continue;
+      int h = 0;
+      for (const CcdComp::Bond& cb : comp->bonds)
+        if ((cb.a == ci && comp->atoms[cb.b].atomicNum == 1) || (cb.b == ci && comp->atoms[cb.a].atomicNum == 1)) ++h;
+      ccdBoundToMetal[x] = h;
+    }
     std::vector<bool> fixed(n, false);
     for (int i = 0; i < n; ++i) {
       const int r = s.atoms[i].residue;
-      if (ccdMode && r >= 0 && kStdAmino.contains(s.residues[r].info.name)) fixed[i] = true;
+      if (ccdMode && r >= 0 && kStdAmino.contains(s.residues[r].info.name) && !linked[i]) fixed[i] = true;
       if (isMetal(s.atoms[i].atomicNum)) fixed[i] = true;
+      if (ccdBoundToMetal[i] >= 0) fixed[i] = true;
       if (atomOverride[i] != std::numeric_limits<int>::min()) {
         fixed[i] = true;
         charge[i] = atomOverride[i];
@@ -556,6 +585,8 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
     }
     std::vector<int> baseH(n);
     for (int i = 0; i < n; ++i) baseH[i] = static_cast<int>(mol->getAtomWithIdx(static_cast<unsigned>(i))->getTotalNumHs());
+    for (int i = 0; i < n; ++i)
+      if (ccdBoundToMetal[i] >= 0) baseH[i] = ccdBoundToMetal[i];
 
     // 5. pKa rules for all atoms outside standard amino-acid residues.
     pkarules::Result dm = pkarules::protonate(*mol, opt.pH, fixed, metalBonded);
@@ -612,7 +643,7 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
         };
         // Carboxyl: ASP, GLU side chains and C-terminal OXT.
         auto carboxyl = [&](int carbon, int oA, int oH, const std::string& type, const char* deprot, const char* prot, double model) {
-          if (carbon < 0 || oA < 0 || oH < 0) return;
+          if (carbon < 0 || oA < 0 || oH < 0 || linked[oA] || linked[oH]) return;
           const auto [pk, fp] = pkaOf(type == "C-" ? oH : carbon, type, model);
           bool protonated = pk >= opt.pH;
           const bool metal = metalBonded[oA] || metalBonded[oH];
@@ -649,7 +680,7 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
         }
         auto simple = [&](int atom, int group, const std::string& type, int hProt, const std::string& deprot,
                           const std::string& prot, double model) {
-          if (atom < 0 || atomOverride[atom] != std::numeric_limits<int>::min()) return;
+          if (atom < 0 || linked[atom] || atomOverride[atom] != std::numeric_limits<int>::min()) return;
           const auto [pk, fp] = pkaOf(group, type, model);
           bool protonated = pk >= opt.pH;
           bool overridden = false;
@@ -678,7 +709,7 @@ void protonate(RawStructure& s, const CcdLibrary* ccd, const ProtonationOptions&
         }
         if (rn == "HIS") {
           const int cg = at("CG"), nd1 = at("ND1"), ne2 = at("NE2");
-          if (cg >= 0 && nd1 >= 0 && ne2 >= 0 && atomOverride[nd1] == std::numeric_limits<int>::min() &&
+          if (cg >= 0 && nd1 >= 0 && ne2 >= 0 && !linked[nd1] && !linked[ne2] && atomOverride[nd1] == std::numeric_limits<int>::min() &&
               atomOverride[ne2] == std::numeric_limits<int>::min()) {
             const auto [pk, fp] = pkaOf(cg, "HIS", 6.5);
             std::string state = pk >= opt.pH ? "HIP" : "HIE";

@@ -26,7 +26,8 @@ std::optional<int> chargeFromValence(int z, int v) {
     case 7:  return pick({{3, 0}, {4, 1}, {2, -1}});
     case 8:  return pick({{2, 0}, {1, -1}});
     case 14: return pick({{4, 0}});
-    case 15: return pick({{3, 0}, {5, 0}, {4, 1}});
+    case 15:
+    case 33: return pick({{3, 0}, {5, 0}, {4, 1}});
     case 16:
     case 34: return pick({{2, 0}, {4, 0}, {6, 0}, {1, -1}, {3, 1}});
     case 9:
@@ -35,6 +36,14 @@ std::optional<int> chargeFromValence(int z, int v) {
     case 53: return pick({{1, 0}, {0, -1}});
     default: return std::nullopt;
   }
+}
+
+// Valences outside the table accepted when the charge is given (CCD or pKa rules):
+// carbanion / carbocation (cyanide, isocyanide, carbon monoxide C) and oxonium (carbon monoxide O).
+std::optional<int> chargeFromValenceGiven(int z, int v, int given) {
+  if (z == 6 && v == 3 && (given == -1 || given == 1)) return given;
+  if (z == 8 && v == 3 && given == 1) return given;
+  return std::nullopt;
 }
 
 struct AromaticSystem {
@@ -124,6 +133,7 @@ void assignChargesAndKekule(RawStructure& s, const std::vector<bool>& aromaticCa
       continue;
     }
     auto q = chargeFromValence(a.atomicNum, fixedValence[i]);
+    if (!q) q = chargeFromValenceGiven(a.atomicNum, fixedValence[i], a.formalCharge != 0 ? a.formalCharge : ccdCharge[i]);
     if (!q) {
       errors.push_back(std::format("{}: element {} with bond-order sum {} is not supported "
                                    "(missing atoms or hydrogens? SDF/mol2 input can be used instead)",
@@ -159,11 +169,12 @@ void assignChargesAndKekule(RawStructure& s, const std::vector<bool>& aromaticCa
 
   for (const AromaticSystem& sys : systems) {
     // need: number of extra bond orders (0 or 1) the atom must receive in the system.
-    std::vector<int> needy, nPlusCandidates;
+    std::vector<int> needy, nPlusCandidates, nMinus;
     bool ok = true;
     for (int x : sys.atoms) {
       int base = fixedValence[x] + aromaticDegree[x];
       int z = s.atoms[x].atomicNum;
+      const int given = s.atoms[x].formalCharge != 0 ? s.atoms[x].formalCharge : ccdCharge[x];
       int target = (z == 6) ? 4 : (z == 7) ? 3 : (z == 8 || z == 16 || z == 34) ? 2 : -1;
       if (target < 0 || base > target + (z == 7 ? 1 : 0) || target - base > 1) {
         errors.push_back(std::format("{}: unsupported conjugated-ring environment",
@@ -174,6 +185,8 @@ void assignChargesAndKekule(RawStructure& s, const std::vector<bool>& aromaticCa
       s.atoms[x].formalCharge = 0;
       if (z == 7 && base == 4) {
         s.atoms[x].formalCharge = 1;  // e.g. N-substituted pyridinium with explicit H
+      } else if (z == 7 && base == 2 && given == -1) {
+        nMinus.push_back(x);  // deprotonated aromatic N (e.g. tetrazolate)
       } else if (target - base == 1) {
         needy.push_back(x);
       } else if (z == 7 && base == 3) {
@@ -184,6 +197,13 @@ void assignChargesAndKekule(RawStructure& s, const std::vector<bool>& aromaticCa
 
     std::vector<int> doubles;
     bool solved = matchSystem(sys, s.bonds, needy, doubles);
+    if (solved) {
+      for (int x : nMinus) s.atoms[x].formalCharge = -1;
+    } else if (!nMinus.empty()) {
+      // The given anionic N is not compatible; treat it as pyridine-type N.
+      needy.insert(needy.end(), nMinus.begin(), nMinus.end());
+      solved = matchSystem(sys, s.bonds, needy, doubles);
+    }
     // Promote pyrrole-type N to N+ (needing one double bond) until a pattern exists.
     for (std::size_t k = 1; !solved && k <= std::min<std::size_t>(3, nPlusCandidates.size()); ++k) {
       std::vector<bool> pick(nPlusCandidates.size(), false);

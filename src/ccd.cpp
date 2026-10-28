@@ -64,6 +64,10 @@ void CcdLibrary::addDocument(const void* docPtr, const std::string& origin, bool
       c.atomIndex.emplace(ca.name, static_cast<int>(c.atoms.size()));
       c.atoms.push_back(std::move(ca));
     }
+    if (auto tab = const_cast<gemmi::cif::Block&>(block).find("_chem_comp_atom.", {"atom_id", "?pdbx_leaving_atom_flag"});
+        tab.ok() && tab.has_column(1))
+      for (auto row : tab)
+        if (const int i = c.find(row.str(0)); i >= 0) c.atoms[i].leaving = row.str(1) == "Y";
     // Model coordinates (taken from a PDB entry; their prochiral hydrogen names follow the PDB
     // convention, unlike those of the ideal coordinates), else the ideal coordinates.
     for (int pass = 0; pass < 2; ++pass) {

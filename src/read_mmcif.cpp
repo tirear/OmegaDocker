@@ -71,6 +71,7 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
   std::set<std::pair<int, int>> bonded;
   std::map<std::string, int> atomByAddress;  // "chain|seq|icode|atom"
   std::vector<ResidueRec> recs;
+  std::map<std::string, std::string> missingAromatic;  // residue label "A:103:HIS:" -> missing ring atoms
   int altlocSkipped = 0, duplicateResidues = 0, skippedH = 0;
 
   auto addBond = [&](int a, int b, BondOrder o, bool aromatic) {
@@ -145,6 +146,22 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
         rec.atomByName[at.name] = idx;
         atomByAddress[std::format("{}|{}|{}|{}", info.chain, info.seq, info.iCode, at.name)] = idx;
       }
+      {
+        std::string missing;
+        for (const CcdComp::Bond& cb : comp->bonds) {
+          if (!cb.aromatic) continue;
+          for (int x : {cb.a, cb.b}) {
+            const CcdComp::Atom& ca = comp->atoms[x];
+            if (ca.atomicNum != 1 && !ca.leaving && !rec.atomByName.contains(ca.name) &&
+                missing.find(" " + ca.name + ",") == std::string::npos)
+              missing += " " + ca.name + ",";
+          }
+        }
+        if (!missing.empty()) {
+          missing.pop_back();
+          missingAromatic[std::format("{}:{}{}:{}:", info.chain, info.seq, info.iCode, info.name)] = missing.substr(1);
+        }
+      }
       // Intra-residue bonds from the CCD definition.
       for (const CcdComp::Bond& cb : comp->bonds) {
         auto ia = rec.atomByName.find(comp->atoms[cb.a].name);
@@ -197,7 +214,22 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
     if (ia == ib) continue;
     bool metal = c.type == gemmi::Connection::MetalC || isMetal(s.atoms[ia].atomicNum) ||
                  isMetal(s.atoms[ib].atomicNum);
-    addBond(ia, ib, metal ? BondOrder::Metal : BondOrder::Single, false);
+    // A covalent link replaces the bond to an absent heavy leaving atom of the CCD definition and
+    // takes its order (e.g. the Schiff base LYS NZ=C4A PLP, leaving O4A).
+    int order = 1;
+    if (c.type == gemmi::Connection::Covale && !metal)
+      for (int x : {ia, ib}) {
+        const ResidueRec& rec = recs[s.atoms[x].residue];
+        const int ci = rec.comp->find(s.atoms[x].name);
+        if (ci < 0) continue;
+        for (const CcdComp::Bond& cb : rec.comp->bonds) {
+          if (cb.a != ci && cb.b != ci) continue;
+          const CcdComp::Atom& other = rec.comp->atoms[cb.a == ci ? cb.b : cb.a];
+          if (other.leaving && other.atomicNum != 1 && !rec.atomByName.contains(other.name))
+            order = std::max(order, cb.order);
+        }
+      }
+    addBond(ia, ib, metal ? BondOrder::Metal : static_cast<BondOrder>(order), false);
   }
 
   if (errors.empty() && prot) {
@@ -209,6 +241,14 @@ RawStructure readModel(const gemmi::Structure& st, std::size_t modelIndex, const
     assignChargesAndKekule(s, aromaticCandidate, ccdCharge, errors);
   }
   if (!errors.empty()) {
+    for (std::string& e : errors) {
+      if (e.find("conjugated") == std::string::npos) continue;
+      for (const auto& [label, atoms] : missingAromatic)
+        if (e.starts_with(label)) {
+          e += std::format(" (the residue lacks aromatic atom(s) {} of its CCD definition)", atoms);
+          break;
+        }
+    }
     std::string msg = std::format("{}: {} problem(s) found:", path, errors.size());
     for (std::size_t i = 0; i < errors.size() && i < kMaxListedErrors; ++i) msg += "\n  " + errors[i];
     if (errors.size() > kMaxListedErrors) msg += std::format("\n  ... ({} more)", errors.size() - kMaxListedErrors);

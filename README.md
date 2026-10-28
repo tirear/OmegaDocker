@@ -47,7 +47,7 @@ AutoDock is a Trade Mark of the Scripps Research Institute.
 | Top8000 rama8000 Ramachandran contour grids, Copyright (c) 2016-2026 David C. Richardson, Jane S. Richardson, and contributors, Richardson Lab at Duke University ([rlabduke/reference_data](https://github.com/rlabduke/reference_data)); Williams CJ et al. (2018) Protein Science 27:293-315, https://doi.org/10.1002/pro.3330 | `third_party/top8000/` (embedded in the executable) | CC BY 4.0 |
 | doctest 2.4.11 (bundled with gemmi) | `third_party/gemmi/third_party/` | MIT |
 | wwPDB Chemical Component Dictionary subset | `data/ccd/` | CC0 1.0 |
-| PDB entries 1D18, 1D3Z, 1L2Y, 1PIT, 1RNG, 2KJJ, 2KOC, 2LZX, 1ZNF (first model only), ligand PP7 of 1BXO, ligand BTN and CCD components ACE, NH2, ZN, PP7 | `tests/data/` | CC0 1.0 |
+| PDB entries 1D18, 1D3Z, 1L2Y, 1PIT, 1RNG, 2KJJ, 2KOC, 2LZX, 1ZNF (first model only), ligand PP7 of 1BXO, LYS 202 + PLP of 2A1H, HEM + CYN of 5WK9, ligand 52C of 4AJ2, ligand BTN and CCD components ACE, NH2, ZN, PP7, PLP, HEM, CYN, 52C | `tests/data/` | CC0 1.0 |
 | RDKit test files `benzene.mol2`, `pyrazole_pyridine.mol2` | `tests/data/` | BSD-3-Clause |
 | DSSP algorithm, behavior following DSSP 4 ([PDB-REDO/dssp](https://github.com/PDB-REDO/dssp)), Copyright (c) 2020 NKI/AVL, Netherlands Cancer Institute | `src/dssp.cpp` | BSD-2-Clause |
 | PROPKA 3 ([jensengroup/propka](https://github.com/jensengroup/propka), commit 58ceb7b): parameter file `propka.cfg` and the pKa algorithm ported to C++; Olsson MHM, Søndergaard CR, Rostkowski M, Jensen JH (2011) J Chem Theory Comput 7:525-537, https://doi.org/10.1021/ct100578z | `third_party/propka/` (embedded in the executable), `src/propka.cpp` | LGPL-2.1 |

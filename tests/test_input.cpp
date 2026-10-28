@@ -6868,6 +6868,58 @@ TEST_CASE("protonation: PROPKA 3 port, pKa rules") {
   }
 }
 
+TEST_CASE("protonation: covalent links, aromatic anions, metal ligands (2A1H, 4AJ2, 5WK9)") {
+  od::CcdLibrary lib;
+  lib.addFile(kData + "/ccd_PLP_HEM_CYN_52C.cif");
+  const od::ProtonationOptions opt;
+  auto atomOf = [](const od::RawStructure& s, const std::string& res, const std::string& name) {
+    for (std::size_t i = 0; i < s.atoms.size(); ++i)
+      if (s.atoms[i].name == name && s.residues[s.atoms[i].residue].info.name == res) return static_cast<int>(i);
+    FAIL("atom not found: " << res << ":" << name);
+    return -1;
+  };
+  auto hOf = [](const od::RawStructure& s, int i) {
+    int h = 0;
+    for (const auto& b : s.bonds)
+      if (b.a == i || b.b == i) h += s.atoms[b.a == i ? b.b : b.a].atomicNum == 1;
+    return h;
+  };
+  auto netCharge = [](const od::RawStructure& s) {
+    int q = 0;
+    for (const auto& a : s.atoms) q += a.formalCharge;
+    return q;
+  };
+
+  // Schiff base LYS NZ=C4A PLP: the link takes the order of the bond to the leaving O4A;
+  // NZ follows the pKa rules (neutral imine), not PROPKA.
+  const od::RawStructure plp = od::readMmcif(kData + "/2A1H_LYS_PLP.cif", lib, false, &opt);
+  const int nz = atomOf(plp, "LYS", "NZ"), c4a = atomOf(plp, "PLP", "C4A");
+  bool dbl = false;
+  for (const auto& b : plp.bonds)
+    if ((b.a == nz && b.b == c4a) || (b.a == c4a && b.b == nz)) dbl = b.order == od::BondOrder::Double;
+  CHECK(dbl);
+  CHECK(plp.atoms[nz].formalCharge == 0);
+  CHECK(hOf(plp, nz) == 0);
+  CHECK(hOf(plp, c4a) == 1);
+
+  // Tetrazole deprotonated by the pKa rules: an aromatic N- in the Kekule assignment.
+  const od::RawStructure tz = od::readMmcif(kData + "/4AJ2_52C.cif", lib, false, &opt);
+  CHECK(netCharge(tz) == -1);
+  int nMinus = 0;
+  for (std::size_t i = 0; i < tz.atoms.size(); ++i)
+    if (tz.atoms[i].atomicNum == 7) {
+      CHECK(hOf(tz, static_cast<int>(i)) == 0);
+      nMinus += tz.atoms[i].formalCharge == -1;
+    }
+  CHECK(nMinus == 1);
+
+  // Heme N bonded to Fe in the CCD definition keep its hydrogens (none); cyanide carbon C-.
+  const od::RawStructure hc = od::readMmcif(kData + "/5WK9_HEM_CYN.cif", lib, false, &opt);
+  for (const char* n : {"NA", "NB", "NC", "ND"}) CHECK(hOf(hc, atomOf(hc, "HEM", n)) == 0);
+  CHECK(hc.atoms[atomOf(hc, "CYN", "C")].formalCharge == -1);
+  CHECK(hOf(hc, atomOf(hc, "CYN", "C")) == 0);
+}
+
 TEST_CASE("protonation: hydrogens of 1L2Y, overrides, pose records") {
   // The NMR hydrogens are removed and placed again: same count and names, the same positions
   // for hydrogens that cannot rotate.

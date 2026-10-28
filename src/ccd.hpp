@@ -18,6 +18,7 @@ struct CcdComp {
     int charge = 0;
     std::array<double, 3> xyz{};  // model or ideal coordinates of the definition
     bool hasXyz = false;
+    bool leaving = false;  // pdbx_leaving_atom_flag
   };
   struct Bond {
     int a = 0;

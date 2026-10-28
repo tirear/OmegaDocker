@@ -1,0 +1,87 @@
+data_2A1H
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1588 N N . LYS A 1 202 ? 18.280 9.541 12.298 1.00 14.15 ? 202 LYS A N 1
+ATOM 1589 C CA . LYS A 1 202 ? 17.615 8.412 11.651 1.00 15.74 ? 202 LYS A CA 1
+ATOM 1590 C C . LYS A 1 202 ? 18.608 7.271 11.412 1.00 15.56 ? 202 LYS A C 1
+ATOM 1591 O O . LYS A 1 202 ? 19.023 7.007 10.283 1.00 16.09 ? 202 LYS A O 1
+ATOM 1592 C CB . LYS A 1 202 ? 16.919 8.869 10.352 1.00 17.69 ? 202 LYS A CB 1
+ATOM 1593 C CG . LYS A 1 202 ? 15.432 8.486 10.270 1.00 19.84 ? 202 LYS A CG 1
+ATOM 1594 C CD . LYS A 1 202 ? 14.737 9.057 9.025 1.00 23.16 ? 202 LYS A CD 1
+ATOM 1595 C CE . LYS A 1 202 ? 13.249 8.645 8.937 1.00 23.75 ? 202 LYS A CE 1
+ATOM 1596 N NZ . LYS A 1 202 ? 12.407 9.356 9.901 1.00 26.19 ? 202 LYS A NZ 1
+HETATM 2928 N N1 . PLP C 2 . ? 9.797 9.991 14.071 1.00 19.22 ? 400 PLP A N1 1
+HETATM 2929 C C2 . PLP C 2 . ? 10.609 8.939 13.833 1.00 20.27 ? 400 PLP A C2 1
+HETATM 2930 C C2A . PLP C 2 . ? 11.063 8.094 15.017 1.00 21.73 ? 400 PLP A C2A 1
+HETATM 2931 C C3 . PLP C 2 . ? 10.999 8.675 12.516 1.00 21.62 ? 400 PLP A C3 1
+HETATM 2932 O O3 . PLP C 2 . ? 11.794 7.642 12.288 1.00 24.82 ? 400 PLP A O3 1
+HETATM 2933 C C4 . PLP C 2 . ? 10.563 9.486 11.448 1.00 20.79 ? 400 PLP A C4 1
+HETATM 2934 C C4A . PLP C 2 . ? 11.042 9.167 9.989 1.00 25.08 ? 400 PLP A C4A 1
+HETATM 2935 C C5 . PLP C 2 . ? 9.700 10.571 11.763 1.00 20.29 ? 400 PLP A C5 1
+HETATM 2936 C C6 . PLP C 2 . ? 9.339 10.795 13.059 1.00 20.24 ? 400 PLP A C6 1
+HETATM 2937 C C5A . PLP C 2 . ? 9.089 11.485 10.766 1.00 18.62 ? 400 PLP A C5A 1
+HETATM 2938 O O4P . PLP C 2 . ? 9.957 12.101 9.894 1.00 18.61 ? 400 PLP A O4P 1
+HETATM 2939 P P . PLP C 2 . ? 9.428 12.599 8.507 1.00 18.11 ? 400 PLP A P 1
+HETATM 2940 O O1P . PLP C 2 . ? 9.181 11.511 7.616 1.00 19.01 ? 400 PLP A O1P 1
+HETATM 2941 O O2P . PLP C 2 . ? 10.680 13.322 7.997 1.00 17.55 ? 400 PLP A O2P 1
+HETATM 2942 O O3P . PLP C 2 . ? 8.394 13.629 8.745 1.00 18.94 ? 400 PLP A O3P 1
+#
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale1 covale one ? A LYS 202 NZ ? ? ? 1_555 C PLP . C4A ? ? A LYS 202 A PLP 400 1_555 ? ? ? ? ? ? ? 1.381 ? ?
+#
