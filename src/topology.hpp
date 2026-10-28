@@ -35,7 +35,8 @@ enum class BackboneAngle : std::uint8_t { None, Phi, Psi, Omega, Alpha, Beta, Ga
 //   nucleic: atoms = {P (-1 at a 5' end without phosphate), O5', C5', C4', C3', O3'}
 struct BackboneUnit {
   std::array<int, 6> atoms{-1, -1, -1, -1, -1, -1};
-  int residue = -1;  // residue of CA (protein) or C4' (nucleic); -1 without residue information
+  int residue = -1;  // residue of CA (protein) or C4' (nucleic); -1 without residue information or when
+                     // another unit has the same residue
   int prev = -1;     // neighboring units along the chain (indices into Topology::units)
   int next = -1;
 };

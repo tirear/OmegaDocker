@@ -163,6 +163,15 @@ std::vector<BackboneUnit> linkUnits(std::vector<BackboneUnit> cand, int linkFrom
   return kept;
 }
 
+// Units are listed by residue in the molecule configuration; units sharing a residue (several backbone
+// units inside one component, e.g. a peptidomimetic ligand) are listed by unit number instead.
+void setUnitResidues(std::vector<BackboneUnit>& units, const Graph& g, int atomSlot) {
+  std::map<int, int> count;
+  for (BackboneUnit& u : units) ++count[u.residue = g.m.atoms[u.atoms[atomSlot]].residue];
+  for (BackboneUnit& u : units)
+    if (u.residue >= 0 && count[u.residue] > 1) u.residue = -1;
+}
+
 std::vector<BackboneUnit> findProteinUnits(const Graph& g) {
   std::vector<BackboneUnit> cand;
   for (int c = 0; c < static_cast<int>(g.adj.size()); ++c) {
@@ -182,7 +191,7 @@ std::vector<BackboneUnit> findProteinUnits(const Graph& g) {
     }
   }
   auto units = linkUnits(std::move(cand), 2, 0, g);  // C(i) - N(i+1)
-  for (BackboneUnit& u : units) u.residue = g.m.atoms[u.atoms[1]].residue;
+  setUnitResidues(units, g, 1);
   return units;
 }
 
@@ -215,7 +224,7 @@ std::vector<BackboneUnit> findNucleicUnits(const Graph& g) {
     }
   }
   auto units = linkUnits(std::move(cand), 5, 0, g);  // O3'(i) - P(i+1)
-  for (BackboneUnit& u : units) u.residue = g.m.atoms[u.atoms[3]].residue;
+  setUnitResidues(units, g, 3);
   return units;
 }
 

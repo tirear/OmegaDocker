@@ -507,6 +507,30 @@ TEST_CASE("molconfig: default file is accepted and keeps the defaults") {
   CHECK(text.find("delta   = false") != std::string::npos);
 }
 
+TEST_CASE("molconfig: backbone units inside one residue are listed by unit number (1BXO PP7)") {
+  od::CcdLibrary lib;
+  lib.addFile(kData + "/PP7_ccd.cif");
+  const od::ProtonationOptions prot;
+  auto m = od::loadMolecules(kData + "/1BXO_PP7.cif", od::Role::MobM, lib, &prot).front();
+  REQUIRE(m.residues.size() == 1);
+  auto t = od::analyzeTopology(m, {});
+  od::assignDssp({&m}, {&t});
+  CHECK(t.backboneType == od::BackboneType::Protein);
+  REQUIRE(t.units.size() == 2);
+  for (const auto& u : t.units) CHECK(u.residue == -1);
+  std::vector<od::MolInput> inputs{{&m, &t}};
+  const std::string text = od::defaultMolConfigText(inputs);
+  CHECK(text.find("unit    = 2") != std::string::npos);
+  CHECK(text.find("resSeq") == std::string::npos);
+  const auto path = (std::filesystem::temp_directory_path() / std::format("od_test_pp7_{}.toml", ::getpid())).string();
+  std::ofstream(path) << text;
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(path, inputs, {}, errors);
+  std::filesystem::remove(path);
+  CHECK(cfg.has_value());
+  CHECK(errors.empty());
+}
+
 TEST_CASE("molconfig: validation errors") {
   ConfigFixture f;
   const std::string text = od::defaultMolConfigText(f.inputs);

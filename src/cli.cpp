@@ -643,8 +643,8 @@ const std::vector<Param>& params() {
                    return v;
                  }});
 
-    t.push_back(real("od_0100.c0", "<c>", "0", "constant term (kcal/mol)", OD_ACC(fe.c0)));
-    t.push_back(real("od_0100.tors", "<c>", "0", "coefficient of the MobM rotatable torsion number", OD_ACC(fe.tors)));
+    t.push_back(real("od_0100.c0", "<c>", std::format("{}", FeParams{}.c0), "constant term (kcal/mol)", OD_ACC(fe.c0)));
+    t.push_back(real("od_0100.tors", "<c>", std::format("{}", FeParams{}.tors), "coefficient of the MobM rotatable torsion number", OD_ACC(fe.tors)));
     t.push_back(real("od_0100.ring", "<c>", "0", "coefficient of the ring conformer strain (relative MMFF94 energy)",
                      OD_ACC(fe.ring)));
     t.push_back(real("od_0100.temperature", "<K>", "298.15", "temperature T of -TS = -RT sum ln f_i (K)", OD_ACC(fe.temperature)));
@@ -661,8 +661,8 @@ const std::vector<Param>& params() {
                                      kFeTermNames[k]),
                          [inter, k](auto& o) -> auto& { return (inter ? o.fe.inter : o.fe.intra)[k]; }));
       }
-    t.push_back(real("od_0100.entropy.stam", "<c>", "0.105", "coefficient of -TS of the StaM group", OD_ACC(fe.entropyStam)));
-    t.push_back(real("od_0100.entropy.mobm", "<c>", "0.381", "coefficient of -TS of the MobM", OD_ACC(fe.entropyMobm)));
+    t.push_back(real("od_0100.entropy.stam", "<c>", std::format("{}", FeParams{}.entropyStam), "coefficient of -TS of the StaM group", OD_ACC(fe.entropyStam)));
+    t.push_back(real("od_0100.entropy.mobm", "<c>", std::format("{}", FeParams{}.entropyMobm), "coefficient of -TS of the MobM", OD_ACC(fe.entropyMobm)));
     t.push_back(real("od_0100.shaking.radius", "<dist>", "1.4", "radius of the sphere each heavy atom is moved over (Å)",
                      OD_ACC(fe.shakingRadius)));
     t.push_back(real("od_0100.shaking.step", "<dist>", "0.2", "lattice spacing of the points in the sphere (Å)",
@@ -902,7 +902,7 @@ std::string paramsText(const Options& o) {
     const std::string t = dot == std::string::npos ? "" : p.key.substr(0, dot);
     if (t != table) {
       if (t == "od_0100")
-        s += "\n# od_0100 (spec 10.2; ranking coefficients fitted on Stage A Astex, spec 17.3.1; c0, tors not calibrated):\n"
+        s += "\n# od_0100 (spec 10.2; fitted to pose ranking and affinities of small molecules, spec 17.3.1, 17.3.2):\n"
              "#   dG = c0 + sum_t inter.t * E_inter,t + sum_t intra.t * dE_intra,t\n"
              "#        + entropy.stam * d(-TS)_StaM + entropy.mobm * d(-TS)_MobM + tors * N_tors\n"
              "#   t = vdw, hbond, elec, desolv (AD4 terms, kcal/mol, AD4 weights included)\n"
