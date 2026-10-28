@@ -17,10 +17,11 @@ struct FeParams {
   double c0 = 0;
   double tors = 0;
   double ring = 0;  // ring conformer strain (relative MMFF94, spec 4.9)
-  std::array<double, kTerms> inter{0.7564, 0.7564, 0.7564, 0.7564};
-  std::array<double, kTerms> intra{0.7564, 0.7564, 0.7564, 0.7564};
-  double entropyStam = 0.9;
-  double entropyMobm = 0.9;
+  // Ranking coefficients fitted on Stage A Astex (spec 17.3.1); c0, tors not calibrated.
+  std::array<double, kTerms> inter{1.718, 0.757, 0.863, 1.035};
+  std::array<double, kTerms> intra{1.145, 0.428, 0.664, 0.709};
+  double entropyStam = 0.105;
+  double entropyMobm = 0.381;
   double temperature = 298.15;  // K, RT of -TS
   int unboundCandidateNum = 20;
   double shakingRadius = 1.4;  // Å

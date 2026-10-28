@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.116 |
+| 文件版本 | 1.117 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1649,9 +1649,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 |---|---|---|---|
 | c0 | `od_0100.c0` | 0 | 常數項（平移／轉動熵的損失等） |
 | c_tors | `od_0100.tors` | 0 | 每個可轉動兩面角（AD4 為 0.2983） |
-| a_t | `od_0100.inter.{vdw,hbond,elec,desolv}` | 0.7564 | 分子間各項 |
-| b_t | `od_0100.intra.{vdw,hbond,elec,desolv}` | 0.7564 | 分子內形變能各項（StaM 與 MobM 共用） |
-| s_StaM、s_MobM | `od_0100.entropy.{stam,mobm}` | 0.9 | 熵項；預期相同，分開以便驗證 |
+| a_t | `od_0100.inter.{vdw,hbond,elec,desolv}` | 1.718、0.757、0.863、1.035 | 分子間各項 |
+| b_t | `od_0100.intra.{vdw,hbond,elec,desolv}` | 1.145、0.428、0.664、0.709 | 分子內形變能各項（StaM 與 MobM 共用） |
+| s_StaM、s_MobM | `od_0100.entropy.{stam,mobm}` | 0.105、0.381 | 熵項；分開擬合 |
 | c_ring | `od_0100.ring` | 0 | 環張力 ΔE_ring（相對 MMFF94，4.9；1.116 擬合結果約 0.06，見 17.3.1） |
 
 | 其他參數 | 參數檔鍵 | 預設 | 說明 |
@@ -1662,7 +1662,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | — | `od_0100.shaking.step` | 0.2 Å | 搖動格點間距（> 0） |
 | — | `od_0100.shaking.rrtScaling` | 4（暫定） | 搖動權重的 reverse RT scaling（≥ 0，mol/kcal） |
 
-- 係數預設值沿用 1.32 的 `enthalpyScaling` 0.7564（來源待查）與 `entropyScaling` 0.9；所有預設值（含 `shaking.rrtScaling` 4）**尚未校準**，CUDA 版與 OpenCL 版完成後，以標準資料最佳化。
+- a_t、b_t、s_X 的預設值（1.117）是 Stage A Astex 小分子的排序擬合（17.3.1，1.116 以前為 `enthalpyScaling` 0.7564 與 `entropyScaling` 0.9）；只校準了排序，c0、c_tors、`ring`（0）與 `shaking.rrtScaling`（4）**尚未校準**；寡肽、核酸 MobM 尚無足夠資料另外擬合。
 - 這些參數是參數檔（第 14 節）的 `[od_0100]` 表，命令列以 `--od_0100_<鍵>=<值>` 覆寫（例如 `--od_0100_shaking_rrtScaling=2`、`--od_0100_inter_vdw=0.5`）。係數不限正負（擬合可能得到負值），其他參數的範圍見上表。實際使用的值寫入 `<outPrefix>/params.used.toml`。
 - 係數都是線性的：`summary.tsv` 輸出未乘係數的各分項（10.3），一次對接的結果即可離線以最小平方法擬合，不需重新執行。`shaking.radius`、`shaking.step`、`shaking.rrtScaling`、`unboundCandidateNum` 改變時需重新計算；`temperature` 只經由 RT 線性影響熵項，與 s_X 的效果重疊，擬合時固定為 298.15 K。
 - 方法名稱維持 `od_0100`（代表預計在 OmegaDocker v1.0.0 正式支援的版本）；係數改變不改名稱，以參數檔區分。
@@ -1980,9 +1980,9 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9d.freeEnergy` | `--dock9d_freeEnergy` | `["od_0100"]` | 10.2 |
 | `od_0100.c0`、`od_0100.tors` | `--od_0100_c0`、`--od_0100_tors` | 0、0 | 10.2 |
 | `od_0100.ring` | `--od_0100_ring` | 0 | 10.2 |
-| `od_0100.inter.{vdw,hbond,elec,desolv}` | `--od_0100_inter_vdw` 等 | 0.7564 | 10.2 |
-| `od_0100.intra.{vdw,hbond,elec,desolv}` | `--od_0100_intra_vdw` 等 | 0.7564 | 10.2 |
-| `od_0100.entropy.{stam,mobm}` | `--od_0100_entropy_stam` 等 | 0.9 | 10.2 |
+| `od_0100.inter.{vdw,hbond,elec,desolv}` | `--od_0100_inter_vdw` 等 | 1.718、0.757、0.863、1.035 | 10.2 |
+| `od_0100.intra.{vdw,hbond,elec,desolv}` | `--od_0100_intra_vdw` 等 | 1.145、0.428、0.664、0.709 | 10.2 |
+| `od_0100.entropy.{stam,mobm}` | `--od_0100_entropy_stam` 等 | 0.105、0.381 | 10.2 |
 | `od_0100.temperature` | `--od_0100_temperature` | 298.15 K | 10.2 |
 | `od_0100.unboundCandidateNum` | `--od_0100_unboundCandidateNum` | 20 | 10.2 |
 | `od_0100.shaking.radius`、`od_0100.shaking.step` | `--od_0100_shaking_radius`、`--od_0100_shaking_step` | 1.4 Å、0.2 Å | 10.2 |
@@ -3208,7 +3208,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 
 | 參數 | 預設 | 現況 | 節 |
 |---|---|---|---|
-| `od_0100.c0`、`.tors`、`.inter.*`、`.intra.*`、`.entropy.*`、`.ring` | 0、0、0.7564、0.7564、0.9、0 | 沿用舊版（0.7564 來源待查）；排序係數的第一次擬合見 17.3.1（預設值未改）；c0、tors 需要結合親和力資料 | 10.2 |
+| `od_0100.c0`、`.tors`、`.inter.*`、`.intra.*`、`.entropy.*`、`.ring` | 0、0、見 10.2、見 10.2、0.105／0.381、0 | inter、intra、entropy 為 Astex 小分子的排序擬合（17.3.1，1.117 起為預設）；寡肽、核酸未另外擬合；c0、tors 需要結合親和力資料 | 10.2 |
 | `od_0100.shaking.rrtScaling` | 4 | 暫定 | 10.2 |
 
 **(2) 只有少數案例的測試**
@@ -3268,7 +3268,8 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 - 主要差異是熵項：預設 0.9 時複合物 −TS 主導排序（od_0100 預設第 1 名只有 11 個），擬合後降為 0.1–0.4。
 - `ring`：自由擬合得 0.057–0.065，交叉驗證沒有改善（同 λ 下少 0–2 個）；有環變數的 30 個中第 1 名 ≤ 2 Å 18 → 19。把 `ring` 加大到 0.3、0.6、1.0 時，第 1 名 ≤ 2 Å 從 47 降到 46、44、42。1.113 變差的 4 個中 3 個（1HP0、1YQY、1YWR）在擬合的係數下（不論有無 `ring`）第 1 名 ≤ 2 Å，1MZC 仍不是。
 - LEADS-PEP（以 Astex 擬合的係數，全原子 `rmsd_ref` ≤ 2 Å；取樣 12 個）：第 1 名 `E_9b` 5、od_0100 預設 0、擬合 4；第 1 名 RMSD 中位數 9.72、9.68、7.79 Å。寡肽主要受限於取樣。
-- 擬合的係數寫在 `datasetForDockingParaOpti/work/stageA/od0100_B0_fit.toml`（可作為 `--paramFile` 的一部分）；預設值未改。
+- 擬合的係數寫在 `datasetForDockingParaOpti/work/stageA/od0100_B0_fit.toml`；1.117 起為預設值（取小數 3 位）。
+- 寡肽另外擬合（LEADS-PEP 53 個，留一交叉驗證）：第 1 名 ≤ 2 Å 只有 1–3 個，低於以 Astex 擬合的係數（4 個）；對接池中有近原生姿態的只有 12 個，資料不足以判斷寡肽是否需要不同的係數。`fit_od0100.py` 改為從每個執行的 `params.used.toml` 讀取當時的係數。
 
 ### 17.4 已知問題
 
@@ -3421,3 +3422,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.114 | 2026-10-28 | `score`／`localMin` 每筆紀錄選擇疊合 RMSD 最小的環構形組合（6.1、4.9）；`box.mobmRadius` 的設定加入大環斷鍵，`sampled` 的樣本先閉合（3.3）；新增 17.4 已知問題（K1 環構形不連續、K2 排序不含環構形內能差）；實測 |
 | 1.115 | 2026-10-28 | `box.mobmRadius`：`sampled` 抽環構形，`max` 的片段內距離取環構形組合中的最大值；構形庫在決定盒子時產生，9a 設定相同時沿用（3.3、4.9）；實測 |
 | 1.116 | 2026-10-28 | 環構形的相對 MMFF 能量含輸入構形（4.9）；od_0100 新增環張力項 `od_0100.ring`（預設 0）與 `summary.tsv` 欄位 `dring`（10.2、10.3、14）；Stage A 以 1.116 重跑（B0）與 od_0100 排序係數的第一次擬合（17.3.1）；K2 更新 |
+| 1.117 | 2026-10-28 | od_0100 的 `inter.*`、`intra.*`、`entropy.*` 預設值改為 17.3.1 的擬合值；寡肽另外擬合的測試（17.3.1） |

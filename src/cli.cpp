@@ -654,13 +654,15 @@ const std::vector<Param>& params() {
     for (const char* g : {"inter", "intra"})
       for (int k = 0; k < FeParams::kTerms; ++k) {
         const bool inter = g == std::string("inter");
-        t.push_back(real(std::format("od_0100.{}.{}", g, kFeTermNames[k]), "<c>", "0.7564",
+        const FeParams d;
+        t.push_back(real(std::format("od_0100.{}.{}", g, kFeTermNames[k]), "<c>",
+                         std::format("{}", (inter ? d.inter : d.intra)[k]),
                          std::format("coefficient of the {} {} energy", inter ? "intermolecular" : "intramolecular deformation",
                                      kFeTermNames[k]),
                          [inter, k](auto& o) -> auto& { return (inter ? o.fe.inter : o.fe.intra)[k]; }));
       }
-    t.push_back(real("od_0100.entropy.stam", "<c>", "0.9", "coefficient of -TS of the StaM group", OD_ACC(fe.entropyStam)));
-    t.push_back(real("od_0100.entropy.mobm", "<c>", "0.9", "coefficient of -TS of the MobM", OD_ACC(fe.entropyMobm)));
+    t.push_back(real("od_0100.entropy.stam", "<c>", "0.105", "coefficient of -TS of the StaM group", OD_ACC(fe.entropyStam)));
+    t.push_back(real("od_0100.entropy.mobm", "<c>", "0.381", "coefficient of -TS of the MobM", OD_ACC(fe.entropyMobm)));
     t.push_back(real("od_0100.shaking.radius", "<dist>", "1.4", "radius of the sphere each heavy atom is moved over (Å)",
                      OD_ACC(fe.shakingRadius)));
     t.push_back(real("od_0100.shaking.step", "<dist>", "0.2", "lattice spacing of the points in the sphere (Å)",
@@ -900,7 +902,7 @@ std::string paramsText(const Options& o) {
     const std::string t = dot == std::string::npos ? "" : p.key.substr(0, dot);
     if (t != table) {
       if (t == "od_0100")
-        s += "\n# od_0100 (spec 10.2; not calibrated yet):\n"
+        s += "\n# od_0100 (spec 10.2; ranking coefficients fitted on Stage A Astex, spec 17.3.1; c0, tors not calibrated):\n"
              "#   dG = c0 + sum_t inter.t * E_inter,t + sum_t intra.t * dE_intra,t\n"
              "#        + entropy.stam * d(-TS)_StaM + entropy.mobm * d(-TS)_MobM + tors * N_tors\n"
              "#   t = vdw, hbond, elec, desolv (AD4 terms, kcal/mol, AD4 weights included)\n"

@@ -405,11 +405,12 @@ TEST_CASE("cli: booleans, arrays and od_0100 parameters") {
   CHECK_THROWS_AS(parse({"--dock9b_posStep=inf"}), od::Error);
   const od::FeParams d;
   CHECK(d.rrtScaling == 4.0);
-  CHECK(d.inter[0] == 0.7564);
+  CHECK(d.inter[0] == 1.718);
+  CHECK(d.entropyMobm == 0.381);
   auto f = parse({"--od_0100_c0=-1.5", "--od_0100_inter_elec=0.25", "--od_0100_shaking_rrtScaling=3",
                   "--od_0100_shaking_rrtScaling=5", "--od_0100_unboundCandidateNum=7", "--od_0100_entropy_mobm=0.7"});
   CHECK(f.fe.c0 == -1.5);
-  CHECK(f.fe.inter == std::array<double, 4>{0.7564, 0.7564, 0.25, 0.7564});
+  CHECK(f.fe.inter == std::array<double, 4>{1.718, 0.757, 0.25, 1.035});
   CHECK(f.fe.rrtScaling == 5);  // the last one wins
   CHECK(f.fe.unboundCandidateNum == 7);
   CHECK(f.fe.entropyMobm == 0.7);
@@ -441,7 +442,7 @@ TEST_CASE("cli: --paramFile, command-line overrides and params.used.toml") {
   CHECK(o.midKeepSkipped);
   CHECK(o.fe.rrtScaling == 2);
   CHECK(o.fe.inter[0] == 0.5);
-  CHECK(o.fe.inter[1] == 0.7564);
+  CHECK(o.fe.inter[1] == 0.757);
   CHECK_NOTHROW(od::validateOptions(o));
   // The command line overrides the file, wherever --paramFile is given.
   auto c = parse({"--dock9c_midKeepSkipped=false", "--dock9b_posStep=1.5", file.c_str(), "--od_0100_shaking_rrtScaling=6"});
