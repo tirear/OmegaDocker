@@ -15,6 +15,7 @@ namespace od {
 
 class EnergySystem;
 class Csgm1GroupSampler;
+class LoopCloser;
 struct TorsionTree;
 
 // Docking box (spec 3.3): center and size in box coordinates, whose axes are the rows of axes in
@@ -38,13 +39,17 @@ double radiusOf(std::span<const Vec3> x);
 double mobmRadiusMax(const Molecule& m, const TorsionTree& tree);
 
 // box.mobmRadius = sampled: the largest radius of the input conformation and of the csgm1 samples
-// (sample k with Rng(seed, stream, k), k < sampleNum) without clashing heavy-atom pairs.
+// (sample k with Rng(seed, stream, k), k < sampleNum) without clashing heavy-atom pairs. With an
+// active closer (loop, crosslink, metal or macrocycle breaks), each sample is closed first (spec 7.11);
+// samples that fail to close, or whose closure deviation then exceeds maxDeviation (> 0), are left out.
 struct SampledRadius {
   double radius = 0;
-  int accepted = 0;  // samples without clashes
+  int accepted = 0;     // samples kept
+  int notClosed = 0;    // samples left out by the closure
 };
 SampledRadius mobmRadiusSampled(const Molecule& m, const EnergySystem& sys, const Csgm1GroupSampler& sampler,
-                                int sampleNum, std::uint64_t seed, std::uint64_t stream);
+                                int sampleNum, std::uint64_t seed, std::uint64_t stream,
+                                const LoopCloser* closer = nullptr, double maxDeviation = 0);
 
 // Principal axes of the points (rows, by decreasing variance; right-handed, the largest component
 // of each of the first two axes positive). The input axes for fewer than two points.

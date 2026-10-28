@@ -10,6 +10,7 @@
 #include <limits>
 #include <numbers>
 
+#include "closure.hpp"
 #include "csgm1.hpp"
 #include "energy.hpp"
 #include "log.hpp"
@@ -191,7 +192,8 @@ double mobmRadiusMax(const Molecule& m, const TorsionTree& tree) {
 }
 
 SampledRadius mobmRadiusSampled(const Molecule& m, const EnergySystem& sys, const Csgm1GroupSampler& sampler,
-                                int sampleNum, std::uint64_t seed, std::uint64_t stream) {
+                                int sampleNum, std::uint64_t seed, std::uint64_t stream, const LoopCloser* closer,
+                                double maxDeviation) {
   std::vector<int> heavy;
   for (int a = 0; a < static_cast<int>(m.atoms.size()); ++a)
     if (m.atoms[a].atomicNum > 1) heavy.push_back(a);
@@ -203,11 +205,18 @@ SampledRadius mobmRadiusSampled(const Molecule& m, const EnergySystem& sys, cons
   if (sys.torsionCount() == 0) return out;
   const int off = sys.coordOffset(0);
   std::vector<double> r(sampleNum, -1.0);
+  std::vector<char> notClosed(sampleNum, 0);
+  const bool closing = closer && closer->active();
+  const SegmentSampler resample = [&](Rng& g, int seg, std::span<double> a) { sampler.sampleSegment(g, seg, a); };
 #pragma omp parallel for schedule(dynamic, 4)
   for (int k = 0; k < sampleNum; ++k) {
     Rng rng(seed, stream, static_cast<std::uint64_t>(k));
     std::vector<double> a = sys.inputAngles();
     sampler.sample(rng, a);
+    if (closing && (!closer->close(rng, a, resample) || (maxDeviation > 0 && sys.closureDeviation(a) > maxDeviation))) {
+      notClosed[k] = 1;
+      continue;
+    }
     std::vector<Vec3> c;
     if (sys.evaluate(a, nullptr, &c).clashPairs > 0) continue;
     std::vector<Vec3> h;
@@ -215,6 +224,7 @@ SampledRadius mobmRadiusSampled(const Molecule& m, const EnergySystem& sys, cons
     for (int i : heavy) h.push_back(c[off + i]);
     r[k] = radiusOf(h);
   }
+  for (char v : notClosed) out.notClosed += v;
   for (double v : r)
     if (v >= 0) {
       ++out.accepted;

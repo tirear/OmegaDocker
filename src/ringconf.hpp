@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -37,6 +38,8 @@ struct RingSystem {
   std::vector<double> energy;  // MMFF94 (UFF when MMFF has no parameters) of conformers 1.., kcal/mol, relative
   std::string note;            // why the system has only the input conformer (empty when it has more)
   int generated = 0;           // ETKDG conformers embedded
+  // Ring dihedrals (x, a, b, y as positions in ring) used to compare conformers.
+  std::vector<std::array<int, 4>> dih;
 };
 
 struct RingConformers {
@@ -64,6 +67,10 @@ std::vector<int> macroRingBreaks(const Molecule& m, const Topology& t, int macro
 // system (not part of a larger unbroken ring); otherwise only the input. Deterministic.
 RingConformers generateRingConformers(const Molecule& m, const Topology& t, const RingParams& p,
                                       std::uint64_t stream);
+
+// Conformer of s whose ring dihedrals are closest (RMSD, degrees) to those of the ring atoms at
+// xyz (indexed like Molecule::atoms); 0 for a system with one conformer. rmsdDeg (optional): the RMSD.
+int nearestRingConformer(const RingSystem& s, std::span<const Vec3> xyz, double* rmsdDeg = nullptr);
 
 // Ring operations of a molecule (possibly a protonation variant: toBase maps its atoms to the
 // atoms of the molecule rc was made for, -1 for added atoms; empty: the same molecule) and its

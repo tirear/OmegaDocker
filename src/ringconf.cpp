@@ -10,6 +10,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -358,6 +359,7 @@ void generateSystem(const Molecule& m, RingSystem& s, const RingParams& p,
         if (k != static_cast<int>(i) && k < static_cast<int>(nr) && (y < 0 || k < y)) y = k;
       if (x >= 0 && y >= 0) dih.push_back({x, static_cast<int>(i), j, y});
     }
+  for (const Dih& d : dih) s.dih.push_back({d.x, d.a, d.b, d.y});
   auto dihedrals = [&](const std::vector<Vec3>& c) {
     std::vector<double> v;
     for (const Dih& d : dih) v.push_back(dihedral(c[d.x], c[d.a], c[d.b], c[d.y]));
@@ -425,6 +427,31 @@ void generateSystem(const Molecule& m, RingSystem& s, const RingParams& p,
 }
 
 }  // namespace
+
+int nearestRingConformer(const RingSystem& s, std::span<const Vec3> xyz, double* rmsdDeg) {
+  if (rmsdDeg) *rmsdDeg = 0;
+  if (s.conf.size() < 2 || s.dih.empty()) return 0;
+  std::vector<double> want;
+  for (const auto& d : s.dih)
+    want.push_back(dihedral(xyz[s.ring[d[0]]], xyz[s.ring[d[1]]], xyz[s.ring[d[2]]], xyz[s.ring[d[3]]]));
+  int best = 0;
+  double bestR = std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k < s.conf.size(); ++k) {
+    const auto& c = s.conf[k];
+    double sum = 0;
+    for (std::size_t i = 0; i < s.dih.size(); ++i) {
+      const auto& d = s.dih[i];
+      sum += std::pow(wrapDeg(dihedral(c[d[0]], c[d[1]], c[d[2]], c[d[3]]) - want[i]), 2);
+    }
+    const double r = std::sqrt(sum / static_cast<double>(s.dih.size()));
+    if (r < bestR) {
+      bestR = r;
+      best = static_cast<int>(k);
+    }
+  }
+  if (rmsdDeg) *rmsdDeg = bestR;
+  return best;
+}
 
 RingConformers generateRingConformers(const Molecule& m, const Topology& t, const RingParams& p, std::uint64_t stream) {
   RingConformers rc;

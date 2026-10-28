@@ -5373,6 +5373,45 @@ TEST_CASE("ring: small ring systems, macrocycle breaks and conformers (spec 4.9)
   CHECK(c0[br[0]] == 9);
   CHECK(od::macroRingBreaks(pep, f.cf.topos[0], 9).empty());
 
+  // box.mobmRadius = sampled closes the macrocycle break (spec 3.3, 7.11).
+  {
+    cyc.role = od::Role::MobM;
+    od::TopologyParams tp;
+    tp.brokenBonds = broken;
+    od::Topology t = od::analyzeTopology(cyc, tp);
+    t.macroBreaks = br;
+    const std::vector<od::MolInput> in{{&cyc, &t}};
+    std::vector<std::string> errors;
+    auto cfg = od::parseMolConfig(od::defaultMolConfigText(in), in, {}, errors);
+    for (const auto& e : errors) MESSAGE(e);
+    REQUIRE(cfg);
+    const od::MolSettings& s = cfg->molecules[0];
+    const od::EnergySystem sys({{&cyc, &s.tree}}, {});
+    REQUIRE(sys.hasClosures());
+    od::Csgm1GroupSampler smp;
+    smp.add(od::Csgm1Sampler(cyc, s, *cfg, {}));
+    const std::vector<bool> cis = smp.cisTransMask();
+    std::vector<bool> freeMask(cis.size());
+    for (std::size_t g = 0; g < cis.size(); ++g) freeMask[g] = !cis[g];
+    const od::LoopCloser closer(sys, {{&cyc, &s.tree}}, freeMask, smp.segments(), od::ClosureParams{});
+    REQUIRE(closer.active());
+    const od::SampledRadius open = od::mobmRadiusSampled(cyc, sys, smp, 100, 3, 9);
+    const od::SampledRadius closed = od::mobmRadiusSampled(cyc, sys, smp, 100, 3, 9, &closer, 0.5);
+    MESSAGE(std::format("cyclic 1L2Y radius: input {:.2f}, open {:.2f} ({} kept), closed {:.2f} ({} kept, {} not closed) Å",
+                        od::radiusOf(od::heavyCoords(cyc)), open.radius, open.accepted, closed.radius, closed.accepted,
+                        closed.notClosed));
+    CHECK(open.notClosed == 0);
+    CHECK(closed.accepted > 0);
+    CHECK(closed.accepted + closed.notClosed <= 100);
+    // The deviation limit: none passes a limit below the RCD tolerance; no limit keeps at least as many.
+    const od::SampledRadius tight = od::mobmRadiusSampled(cyc, sys, smp, 100, 3, 9, &closer, 1e-6);
+    const od::SampledRadius loose = od::mobmRadiusSampled(cyc, sys, smp, 100, 3, 9, &closer, 0.0);
+    CHECK(tight.accepted == 0);
+    CHECK(tight.notClosed >= closed.notClosed);
+    CHECK(loose.accepted >= closed.accepted);
+    CHECK(loose.notClosed <= closed.notClosed);
+  }
+
   // Conformers: each Pro ring of 1L2Y has its input and at least one other pucker; deterministic.
   const auto rc = od::generateRingConformers(pep, f.cfgA->molecules[0].topology, od::RingParams{}, 7);
   const auto rc2 = od::generateRingConformers(pep, f.cfgA->molecules[0].topology, od::RingParams{}, 7);
@@ -5383,6 +5422,15 @@ TEST_CASE("ring: small ring systems, macrocycle breaks and conformers (spec 4.9)
     CHECK(rs.energy.size() + 1 == rs.conf.size());
     CHECK(rs.conf == rc2.systems[k].conf);
     if (rs.ring.size() == 5) puckers += rs.conf.size() >= 2;
+    // The conformer nearest to a ring placed at conformer j is j (spec 6.1).
+    std::vector<od::Vec3> xyz;
+    for (const auto& at : pep.atoms) xyz.push_back(at.xyz);
+    for (std::size_t j = 0; j < rs.conf.size(); ++j) {
+      for (std::size_t i = 0; i < rs.ring.size(); ++i) xyz[rs.ring[i]] = rs.conf[j][i];
+      double d = -1;
+      CHECK(od::nearestRingConformer(rs, xyz, &d) == static_cast<int>(j));
+      CHECK(d < 1e-6);
+    }
     if (rs.ring.size() == 9) CHECK(rs.note == "aromatic");
   }
   CHECK(puckers == 4);

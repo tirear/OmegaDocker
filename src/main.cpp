@@ -148,11 +148,9 @@ od::TopologyParams topologyParams(const od::Options& opt) {
   return p;
 }
 
-od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
-  od::Topology t = od::analyzeTopology(m, topologyParams(opt));
-  // Macrocycles (spec 4.9): broken by default ([[molecule.ringBreak]] source = "auto-macro").
-  if (const auto macro = od::macroRingBreaks(m, t, opt.ringMacroMinSize); !macro.empty()) {
-    od::TopologyParams p = topologyParams(opt);
+// Macrocycles (spec 4.9): broken by default ([[molecule.ringBreak]] source = "auto-macro").
+void addMacroBreaks(const od::Molecule& m, od::Topology& t, od::TopologyParams p, int macroMinSize) {
+  if (const auto macro = od::macroRingBreaks(m, t, macroMinSize); !macro.empty()) {
     p.brokenBonds = t.brokenBonds;
     p.brokenBonds->insert(p.brokenBonds->end(), macro.begin(), macro.end());
     const std::string dssp = t.dsspSS;
@@ -160,6 +158,11 @@ od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
     t.dsspSS = dssp;
     t.macroBreaks = macro;
   }
+}
+
+od::Topology analyze(const od::Molecule& m, const od::Options& opt) {
+  od::Topology t = od::analyzeTopology(m, topologyParams(opt));
+  addMacroBreaks(m, t, topologyParams(opt), opt.ringMacroMinSize);
   int rotatable = 0;
   for (const auto& tor : t.torsions) rotatable += tor.rotatable;
   od::logInfo(std::format("    backbone {} ({} units), torsions {}, rotatable by default {}",
@@ -232,6 +235,22 @@ void printTree(const od::Molecule& m, const od::MolSettings& s) {
     if (c.line == 0)
       od::logInfo(std::format("    added chainBreak [{}, {}] source = \"auto-loop\"", atomRef(m.bonds[c.bond].a),
                               atomRef(m.bonds[c.bond].b)));
+}
+
+// Closure settings of one group (spec 7.11).
+od::ClosureParams closureParams(const od::CsgmOpts& c, const od::Options& opt) {
+  od::ClosureParams clp;
+  clp.method = c.closure == "kic" ? od::ClosureMethod::Kic : c.closure == "rcd" ? od::ClosureMethod::Rcd : od::ClosureMethod::None;
+  clp.rcdTolerance = c.rcdTolerance;
+  clp.rcdMaxIter = c.rcdMaxIter;
+  clp.rcdStallTolerance = c.rcdStallTolerance;
+  clp.rcdMaxRestart = c.rcdMaxRestart;
+  clp.kicMaxTrial = c.kicMaxTrial;
+  clp.rcdClash = c.rcdClash == "full" ? od::RcdClash::Full : c.rcdClash == "repair" ? od::RcdClash::Repair : od::RcdClash::None;
+  clp.rcdClashWeight = c.rcdClashWeight;
+  clp.clashDistance = opt.clashDistance;
+  clp.growClose = c.build == "growClose";
+  return clp;
 }
 
 od::EnergyParams energyParams(const od::Options& opt) {
@@ -394,19 +413,7 @@ class ConfSet {
 #else
     (void)gpu;
 #endif
-    od::ClosureParams clp;
-    clp.method = csgm_.closure == "kic" ? od::ClosureMethod::Kic
-                 : csgm_.closure == "rcd" ? od::ClosureMethod::Rcd
-                                          : od::ClosureMethod::None;
-    clp.rcdTolerance = csgm_.rcdTolerance;
-    clp.rcdMaxIter = csgm_.rcdMaxIter;
-    clp.rcdStallTolerance = csgm_.rcdStallTolerance;
-    clp.rcdMaxRestart = csgm_.rcdMaxRestart;
-    clp.kicMaxTrial = csgm_.kicMaxTrial;
-    clp.rcdClash = csgm_.rcdClash == "full" ? od::RcdClash::Full : csgm_.rcdClash == "repair" ? od::RcdClash::Repair : od::RcdClash::None;
-    clp.rcdClashWeight = csgm_.rcdClashWeight;
-    clp.clashDistance = opt.clashDistance;
-    clp.growClose = csgm_.build == "growClose";
+    const od::ClosureParams clp = closureParams(csgm_, opt);
     std::vector<bool> freeMask(cisTrans_.size());
     for (std::size_t g = 0; g < freeMask.size(); ++g) freeMask[g] = !cisTrans_[g];
     closer_.emplace(sys_, parts_, freeMask, sampler_.segments(), clp);
@@ -2556,6 +2563,7 @@ std::vector<std::optional<od::MolSettings>> boxMobmSettings(const od::Options& o
   std::vector<od::Topology> topo;
   for (const auto& m : mobs) {
     topo.push_back(od::analyzeTopology(m, {}));
+    addMacroBreaks(m, topo.back(), {}, opt.ringMacroMinSize);
     od::assignDssp({&m}, {&topo.back()});
   }
   std::vector<od::MolInput> in;
@@ -2622,12 +2630,25 @@ od::BoxFrame resolveBox(const od::Options& opt, const std::vector<od::Molecule>&
         const od::EnergySystem sys({{&m, &settings[i]->tree}}, energyParams(opt));
         od::Csgm1GroupSampler smp;
         smp.add(od::Csgm1Sampler(m, *settings[i], cfg, {opt.mobmCsgm.csgm1AngleStep, opt.mobmCsgm.ramaFloor}));
+        // Breaks are closed as in 9a (spec 7.11) with the MobM closure settings.
+        od::ClosureParams clp = closureParams(opt.mobmCsgm, opt);
+        clp.growClose = false;
+        const std::vector<bool> cis = smp.cisTransMask();
+        std::vector<bool> freeMask(cis.size());
+        for (std::size_t g = 0; g < freeMask.size(); ++g) freeMask[g] = !cis[g];
+        const od::LoopCloser closer(sys, {{&m, &settings[i]->tree}}, freeMask, smp.segments(), clp);
+        const double maxDev = opt.confPreCloseFactor > 0 && sys.hasClosures()
+                                  ? opt.confPreCloseFactor * opt.maxBreakDist
+                                  : 0.0;
         // Random streams of the box samples, apart from those of 9a.
-        const od::SampledRadius s = od::mobmRadiusSampled(m, sys, smp, opt.boxMobmSampleNum, seed, (1ULL << 62) + i);
+        const od::SampledRadius s = od::mobmRadiusSampled(m, sys, smp, opt.boxMobmSampleNum, seed, (1ULL << 62) + i,
+                                                          &closer, maxDev);
         r = s.radius;
         how = sys.torsionCount() == 0 ? std::string("no rotatable torsions")
-                                      : std::format("input and {} of {} csgm1 samples without clashes", s.accepted,
-                                                    opt.boxMobmSampleNum);
+                                      : std::format("input and {} of {} csgm1 samples without clashes{}", s.accepted,
+                                                    opt.boxMobmSampleNum,
+                                                    closer.active() ? std::format(", closed ({} not closed)", s.notClosed)
+                                                                    : std::string());
       }
       od::logInfo(std::format("  box: MobM {:<40} radius {:.3f} Å ({})", m.id, r, how));
       rmax = std::max(rmax, r);
@@ -2713,6 +2734,10 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     m.top.resize(n);
     m.inputs.resize(n);
     std::vector<int> steps(n, 0);
+    const od::RingConformers* rings = mob.parts()[0].rings;
+    const od::RingOps& ringOps = mob.sys().ringOps(0);
+    const int ringOff = mob.sys().ringSlotOffset(0);
+    std::vector<int> ringChanged(n, 0);
     const auto t1 = std::chrono::steady_clock::now();
     od::parallelEach(static_cast<long long>(n), [&](long long r) {
       const std::vector<od::Vec3>& X = poses[i][r];
@@ -2721,12 +2746,64 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         const auto& a = topo.torsions[tt.torsion].atoms;
         ang.push_back(od::dihedralDeg(X[a[0]], X[a[1]], X[a[2]], X[a[3]]));
       }
-      ang.resize(static_cast<std::size_t>(mob.sys().torsionCount()), 0.0);  // ring slots: the input conformers
+      ang.resize(static_cast<std::size_t>(mob.sys().torsionCount()), 0.0);
+      const std::span<const od::Vec3> to(X.data(), nAtoms);
+      std::vector<od::Vec3> from(nAtoms);
+      auto fitOf = [&](const std::vector<double>& g) {
+        const od::MobmDocker::Conf cg = dk.conformation(g);
+        for (std::size_t k = 0; k < nAtoms; ++k) from[k] = {cg.coords[k][0], cg.coords[k][1], cg.coords[k][2]};
+        double f = 0;
+        od::kabschQuat(from, to, f);
+        return f;
+      };
+      // Ring slots (spec 6.1, 4.9): the conformers with the smallest fit RMSD; every combination when
+      // there are at most 1024, otherwise from the conformers with the nearest ring dihedrals, one slot
+      // at a time until the fit RMSD no longer drops.
+      const std::size_t nSlot = rings ? ringOps.ops.size() : 0;
+      if (nSlot > 0) {
+        const std::size_t o = static_cast<std::size_t>(ringOff);
+        double combos = 1;
+        for (const auto& op : ringOps.ops) combos *= op.confCount;
+        double best = std::numeric_limits<double>::infinity();
+        if (combos <= 1024) {
+          std::vector<double> g = ang, keep = ang;
+          for (long long idx = 0; idx < static_cast<long long>(combos); ++idx) {
+            long long v = idx;
+            for (std::size_t k = 0; k < nSlot; ++k) {
+              g[o + k] = static_cast<double>(v % ringOps.ops[k].confCount);
+              v /= ringOps.ops[k].confCount;
+            }
+            if (const double f = fitOf(g); f < best - 1e-9) {
+              best = f;
+              keep = g;
+            }
+          }
+          ang = keep;
+        } else {
+          for (std::size_t k = 0; k < nSlot; ++k)
+            ang[o + k] = od::nearestRingConformer(rings->systems[ringOps.ops[k].system], X);
+          best = fitOf(ang);
+          for (bool better = true; better;) {
+            better = false;
+            for (std::size_t k = 0; k < nSlot; ++k) {
+              std::vector<double> g = ang;
+              for (int c = 0; c < ringOps.ops[k].confCount; ++c) {
+                if (c == static_cast<int>(ang[o + k])) continue;
+                g[o + k] = c;
+                if (const double f = fitOf(g); f < best - 1e-9) {
+                  best = f;
+                  ang = g;
+                  better = true;
+                }
+              }
+            }
+          }
+        }
+        for (std::size_t k = 0; k < nSlot; ++k) ringChanged[r] += ang[o + k] > 0;
+      }
       const od::MobmDocker::Conf c = dk.conformation(ang);
       // Pose: the record superposed by the conformation at its torsion angles (bond lengths and angles of record 1).
-      std::vector<od::Vec3> from(nAtoms);
       for (std::size_t k = 0; k < nAtoms; ++k) from[k] = {c.coords[k][0], c.coords[k][1], c.coords[k][2]};
-      const std::span<const od::Vec3> to(X.data(), nAtoms);
       double fit = 0;
       const od::Quat q = od::kabschQuat(from, to, fit);
       od::Vec3 cf{}, ct{};
@@ -2778,8 +2855,10 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       left += m.inputs[r].gridStatus == "leftGrid";
       stepSum += steps[r];
     }
-    od::logInfo(std::format("{} {:<38} {} pose(s): largest fit RMSD {:.4f} Å, outside the grid {}{} ({:.2f} s)", opt.runMode,
+    const long long ringPoses = std::count_if(ringChanged.begin(), ringChanged.end(), [](int v) { return v > 0; });
+    od::logInfo(std::format("{} {:<38} {} pose(s): largest fit RMSD {:.4f} Å, outside the grid {}{}{} ({:.2f} s)", opt.runMode,
                             mob.name(), n, fitMax, outside,
+                            ringOps.ops.empty() ? "" : std::format(", poses with a ring conformer other than the input {}", ringPoses),
                             localMin ? std::format(", left the grid during minimization {}, steps/pose {:.1f}", left,
                                                    n > static_cast<std::size_t>(outside + left)
                                                        ? static_cast<double>(stepSum) / static_cast<double>(n - outside - left)
