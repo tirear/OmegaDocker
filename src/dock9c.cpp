@@ -170,6 +170,33 @@ std::vector<RoundSample> symmetryFilter(std::vector<RoundSample> top, const Mobm
                               [&](std::span<const Vec3f> a, std::span<const Vec3f> b) { return sym.rmsd(a, b); }));
 }
 
+DcssGrowth growDcssSizes(const std::vector<int>& sizes, const std::vector<bool>& grow,
+                         const std::function<std::size_t(const std::vector<int>&)>& estimate, std::size_t budget) {
+  const auto scaled = [&](double t) {
+    std::vector<int> s = sizes;
+    for (std::size_t k = 0; k < s.size(); ++k)
+      if (grow[k])
+        s[k] = static_cast<int>(std::min(std::floor(static_cast<double>(sizes[k]) * t), static_cast<double>(std::numeric_limits<int>::max() / 4)));
+    return s;
+  };
+  const auto fits = [&](const std::vector<int>& s) { return budget == 0 || estimate(s) <= budget; };
+  DcssGrowth g;
+  g.sizes = scaled(2.0);
+  if (!fits(g.sizes)) {
+    double lo = 1.0, hi = 2.0;
+    for (int it = 0; it < 60; ++it) {
+      const double mid = 0.5 * (lo + hi);
+      (fits(scaled(mid)) ? lo : hi) = mid;
+    }
+    g.sizes = scaled(lo);
+    if (!fits(g.sizes)) g.sizes = sizes;
+  }
+  g.estimate = estimate(g.sizes);
+  for (std::size_t k = 0; k < sizes.size(); ++k)
+    if (grow[k] && g.sizes[k] <= sizes[k]) g.atLimit = true;
+  return g;
+}
+
 int filterDcss(std::vector<int>& dcss, const std::unordered_map<int, float>& lowest, float eTopMax) {
   const auto n = dcss.size();
   std::erase_if(dcss, [&](int id) {

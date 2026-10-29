@@ -182,6 +182,13 @@ void MobmDocker::dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) co
   dockPairs(std::span<const PairGroup>(&g, 1), chunkSize);
 }
 
+std::size_t MobmDocker::preparedBytes(const Prepared& p) {
+  const auto vb = [](const auto& v) { return v.capacity() * sizeof(typename std::decay_t<decltype(v)>::value_type); };
+  const Conf& c = p.c;
+  return sizeof(Prepared) + vb(p.l2) + vb(c.anglesDeg) + vb(c.coords) + vb(c.hopfRange) + vb(c.hopfOffset) + vb(c.pairs) +
+         vb(c.singles) + vb(c.triples) + vb(c.fftPoses) + vb(c.fftEnergy);
+}
+
 void MobmDocker::prepareJobs(std::vector<PairJob>& jobs) const {
   for (PairJob& j : jobs) {
     j.prepared = prepare(j.mobAnglesDeg, j.stream, j.posm1Only, std::move(j.conf));

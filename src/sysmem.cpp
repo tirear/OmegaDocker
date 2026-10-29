@@ -109,6 +109,26 @@ std::size_t residentBytes(const std::string& procRoot) {
   return static_cast<std::size_t>(resident) * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
 }
 
+std::size_t peakResidentBytes(const std::string& procRoot) {
+  std::ifstream in(procRoot + "/self/status");
+  std::string line;
+  while (std::getline(in, line))
+    if (line.starts_with("VmHWM:")) {
+      std::istringstream s(line.substr(6));
+      unsigned long long kib = 0;
+      if (s >> kib) return static_cast<std::size_t>(kib) * 1024;
+      return 0;
+    }
+  return 0;
+}
+
+bool resetPeakResident() {
+  std::ofstream out("/proc/self/clear_refs");
+  out << "5";
+  out.flush();
+  return static_cast<bool>(out);
+}
+
 std::optional<std::size_t> cgroupMemLimit(std::string* source, const std::string& procRoot,
                                           const std::string& cgroupRoot) {
   const CgroupPaths cp = cgroupPaths(procRoot, "memory");

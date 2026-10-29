@@ -145,7 +145,6 @@ struct Options {
   double maxAngleStep = 10.0;
   int maxRound = 10;
   std::optional<int> topSampleNum;  // default: eliteStaM x eliteMobM (spec 9)
-  std::optional<int> dcssTopNum;    // E_top_max from the first n of the topSampleSet; default: eliteStaM x eliteMobM
   double diversityRmsd = 2.0;
   int sampleBufferNum = 65536;
   std::optional<int> midTopSampleFactor;  // default: 2 with midKeepSkipped, otherwise 1 (spec 9)
@@ -189,6 +188,10 @@ struct ConfSampleNums {
 };
 enum class SampleSet : std::uint8_t { StaM, MobM };
 ConfSampleNums confSampleNums(const Options& o, SampleSet set);
+// The sample numbers when the dcss size becomes docking (spec 9, step 6): values left to their
+// defaults follow the defaults, given values keep their ratio to dockingConfSampleNum (rounded up,
+// within the limits of spec 7.2).
+ConfSampleNums scaledConfSampleNums(const Options& o, SampleSet set, int docking);
 
 // Checks that the set is given and valid (spec 7.2); used when the StaM group
 // or any MobM has rotatable torsions. Throws od::Error.

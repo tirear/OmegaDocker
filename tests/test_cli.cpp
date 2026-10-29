@@ -223,11 +223,9 @@ TEST_CASE("cli: errors") {
   o.boxSize = od::Vec3{10, 0, 10};
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.boxSize = od::Vec3{10, 10, 10};
-  auto r = parse({"--dock9c_maxRound=3", "--dock9c_topSampleNum=20", "--dock9c_diversityRmsd=0", "--dock9c_dcssTopNum=4"});
+  auto r = parse({"--dock9c_maxRound=3", "--dock9c_topSampleNum=20", "--dock9c_diversityRmsd=0"});
   CHECK(r.maxRound == 3);
   CHECK(r.topSampleNum == 20);
-  CHECK(r.dcssTopNum == 4);
-  CHECK_FALSE(o.dcssTopNum);
   CHECK(r.diversityRmsd == 0);
   o.maxRound = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
@@ -235,9 +233,6 @@ TEST_CASE("cli: errors") {
   o.topSampleNum = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.topSampleNum.reset();
-  o.dcssTopNum = 0;
-  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
-  o.dcssTopNum.reset();
   o.diversityRmsd = -1;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.diversityRmsd = 2;
@@ -293,6 +288,26 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.mobm.elite = 5;
   CHECK_NOTHROW(od::validateOptions(o));
+  {
+    // dcss size change (spec 9, step 6): given values keep their ratio, the others follow the defaults.
+    auto d = od::scaledConfSampleNums(o, od::SampleSet::MobM, 20);  // minL2 30, elite 5 given for docking 10
+    CHECK(d.docking == 20);
+    CHECK(d.minL2 == 60);
+    CHECK(d.initL1 == 60);
+    CHECK(d.elite == 10);
+    d = od::scaledConfSampleNums(o, od::SampleSet::MobM, 15);
+    CHECK(d.minL2 == 45);
+    CHECK(d.elite == 7);  // ceil(5 x 15 / 10) = 8 > 15 / 2
+    d = od::scaledConfSampleNums(o, od::SampleSet::StaM, 40);  // only docking given (20)
+    CHECK(d.minL2 == 80);
+    CHECK(d.initL1 == 80);
+    CHECK(d.elite == 10);
+    const auto same = od::scaledConfSampleNums(o, od::SampleSet::MobM, 10);
+    const auto n0 = od::confSampleNums(o, od::SampleSet::MobM);
+    CHECK(same.minL2 == n0.minL2);
+    CHECK(same.initL1 == n0.initL1);
+    CHECK(same.elite == n0.elite);
+  }
   o.mobmCsgm.mutationRate = 101;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.mobmCsgm.mutationRate = 2;

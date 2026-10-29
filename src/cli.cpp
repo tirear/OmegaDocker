@@ -214,7 +214,7 @@ void addSetParams(std::vector<Param>& t, const std::string& set) {
                         OD_ACC(stamFixedResMovable)));
   }
   t.push_back(integer(set + ".dockingConfSampleNum", "<n>", "required if rotatable",
-                      who + "conformation samples docked per round (dcss size, >= 4)",
+                      who + "conformation samples docked per round (initial dcss size, >= 4; doubled when no dcss sample is removed)",
                       [acc](auto& o) -> auto& { return acc(o).docking; }));
   t.push_back(integer(set + ".minL2confSampleNum", "<n>", "2 x dockingConfSampleNum",
                       who + "9a: refill the L2 pool to at least this many samples",
@@ -616,10 +616,6 @@ const std::vector<Param>& params() {
     t.push_back(integer("dock9c.maxRound", "<n>", "10", "Number of 9a-9c rounds", OD_ACC(maxRound)));
     t.push_back(integer("dock9c.topSampleNum", "<n>", "eliteStaM x eliteMobM", "9c: size of the topSampleSet of each MobM",
                         OD_ACC(topSampleNum)));
-    t.push_back(integer("dock9c.dcssTopNum", "<n>", "eliteStaM x eliteMobM",
-                        "9c: dcss filtering compares with E_top_max, the highest energy of the first n samples of the "
-                        "topSampleSet (at most topSampleNum)",
-                        OD_ACC(dcssTopNum)));
     t.push_back(real("dock9c.diversityRmsd", "<dist>", "2.0",
                      "9c: samples with the same StaM conformation closer than this RMSD to a kept sample are skipped (Å; 0 disables)",
                      OD_ACC(diversityRmsd)));
@@ -942,6 +938,20 @@ ConfSampleNums confSampleNums(const Options& o, SampleSet set) {
   return n;
 }
 
+ConfSampleNums scaledConfSampleNums(const Options& o, SampleSet set, int docking) {
+  const ConfSampleOpts& s = set == SampleSet::StaM ? o.stam : o.mobm;
+  const ConfSampleNums n0 = confSampleNums(o, set);
+  const auto scale = [&](int v) {
+    return static_cast<int>(std::min<long long>((1LL * v * docking + n0.docking - 1) / n0.docking, std::numeric_limits<int>::max()));
+  };
+  ConfSampleNums n;
+  n.docking = docking;
+  n.minL2 = s.minL2 ? std::max(scale(*s.minL2), 2 * docking) : 2 * docking;
+  n.initL1 = s.initL1 ? std::max(scale(*s.initL1), n.minL2) : n.minL2;
+  n.elite = s.elite ? std::clamp(scale(*s.elite), 2, std::max(2, docking / 2)) : std::max(2, (docking + 3) / 4);
+  return n;
+}
+
 namespace {
 
 void checkConfSampleNums(const Options& o, SampleSet set) {
@@ -1040,7 +1050,6 @@ void validateOptions(const Options& o) {
   check(o.maxAngleStep > 0, "dock9b.maxAngleStep", "> 0");
   check(o.maxRound >= 1, "dock9c.maxRound", ">= 1");
   check(!o.topSampleNum || *o.topSampleNum >= 1, "dock9c.topSampleNum", ">= 1");
-  check(!o.dcssTopNum || *o.dcssTopNum >= 1, "dock9c.dcssTopNum", ">= 1");
   check(o.diversityRmsd >= 0, "dock9c.diversityRmsd", ">= 0");
   check(o.sampleBufferNum >= 1, "dock9c.sampleBufferNum", ">= 1");
   check(!o.midTopSampleFactor || *o.midTopSampleFactor >= 1, "dock9c.midTopSampleFactor", ">= 1");

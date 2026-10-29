@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <functional>
 #include <limits>
 #include <span>
 #include <unordered_map>
@@ -71,11 +72,23 @@ std::vector<RoundSample> symmetryFilter(std::vector<RoundSample> top, const Mobm
 // energy of the topSampleSet; -inf when it is empty. Returns the number removed.
 int filterDcss(std::vector<int>& dcss, const std::unordered_map<int, float>& lowest, float eTopMax);
 
-// n: only the first n samples (all when the set is smaller).
-inline float topMaxEnergy(const std::vector<RoundSample>& top, std::size_t n = std::numeric_limits<std::size_t>::max()) {
+inline float topMaxEnergy(const std::vector<RoundSample>& top) {
   float e = -std::numeric_limits<float>::infinity();
-  for (std::size_t k = 0; k < top.size() && k < n; ++k) e = std::max(e, top[k].rank());
+  for (const auto& t : top) e = std::max(e, t.rank());
   return e;
 }
+
+// Step 6 (dcss size): sizes[0] is the StaM dcss size (1 when not movable), sizes[1..] those of
+// the MobM; grow marks the sizes to double. estimate: host memory of a round with the given sizes
+// (non-decreasing in each size); budget: the host memory budget (0: unknown, no limit). The marked
+// sizes are doubled when the estimate fits, otherwise multiplied by the largest common factor in
+// [1, 2) that fits (rounded down); atLimit: a marked size could not grow.
+struct DcssGrowth {
+  std::vector<int> sizes;
+  std::size_t estimate = 0;  // estimated host memory of a round with the new sizes (bytes)
+  bool atLimit = false;
+};
+DcssGrowth growDcssSizes(const std::vector<int>& sizes, const std::vector<bool>& grow,
+                         const std::function<std::size_t(const std::vector<int>&)>& estimate, std::size_t budget);
 
 }  // namespace od

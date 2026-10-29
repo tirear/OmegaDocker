@@ -236,6 +236,8 @@ class MobmDocker {
     std::optional<Conf> conf;          // optional: conformation(mobAnglesDeg), e.g. from conformations()
   };
   void dockPairs(std::vector<PairJob>& jobs, std::size_t chunkSize) const;
+  // Host memory of a prepared pair (vector capacities included).
+  static std::size_t preparedBytes(const Prepared& p);
   // L1poss and 8.5 quick filter of the jobs ahead of dockPairs (e.g. to count their L2poss).
   void prepareJobs(std::vector<PairJob>& jobs) const;
   // Pair jobs of several dockers of the same MobM and parameters (e.g. different StaM

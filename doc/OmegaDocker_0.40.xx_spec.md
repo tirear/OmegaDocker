@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.120 |
+| 文件版本 | 1.121 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1574,12 +1574,29 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
    - 保存：StaM 構型、MobM 構型、位置、定向、最佳化後兩面角、能量。
 5. **篩選 dcss**：
-   - `E_top_max` = topSampleSet 前 `dock9c.dcssTopNum` 個樣本中的最高能量（預設 eliteStaM × eliteMobM，最多 topSampleNum；topSampleSet 較少時用全部）。1.119 以前為整個 topSampleSet 的最高能量：topSampleNum 遠大於 dcss 時（例如 Stage A 的 500），每個 dcss 樣本幾乎都有對接樣本進入 topSampleSet，第 2 輪之後 dcss 不再更換，之後各輪沒有新的構型（17.3.3）。預設的 topSampleNum 下兩者相同。
+   - `E_top_max` = topSampleSet 中的最高能量。
    - MobM dcss 與 StaM dcss 中，本輪最低能量 > `E_top_max` 的樣本移除。
    - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低排序能量；不重做的配對（決定性 posm）使用先前記錄的值。
    - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除），本輪最低能量記為 +∞，因此一律移除；topSampleSet 為空時，dcss 全部移除。
    - 無可動兩面角的分子（只有輸入結構）不篩選。
-6. 下一輪的 9a 補滿 dcss。
+6. **dcss 大小**（1.121）：每個構型集（StaM 群、各 MobM）分別判斷。
+   - 本輪該構型集的 dcss 沒有任何樣本被移除（每個 dcss 樣本本輪最低排序能量都 ≤ `E_top_max`，即都有對接樣本留在 topSampleSet 的範圍內）時，下一輪的 dcss 大小（`dockingConfSampleNum`）加倍。原因：topSampleNum 遠大於 dcss 時（例如 Stage A 的 500），dcss 不再更換，之後各輪沒有新的構型（17.3.3）。
+   - StaM 群：任一 MobM 的 StaM dcss 沒有移除就成立（StaM 的 dcss 大小由所有 MobM 共用）。沒有可動兩面角的構型集不判斷。
+   - 連帶參數重新計算：`minL2confSampleNum`、`initL1confSampleNum`、`eliteConfSampleNum` 未指定時依 7.2 的預設由新的 dcss 大小計算；有指定時保持與 `dockingConfSampleNum` 的比例（無條件進位，並符合 7.2 的限制）。`topSampleNum` 的預設值以開始時的 elite 計算，不隨之改變。
+   - 硬體上限（主機記憶體）：估計新大小下一輪的主機記憶體，不超過預算（`memory.hostLimit` 的 90%，13）。估計值 = 基準 + 隨 dcss 大小改變的部分（以新大小、全部配對都對接計算）：
+     - 9b 一個 StaM 構型的已準備配對（L1poss、quick filter 結果、構型資料）：Σ MobM dcss 大小 × 每個配對的記憶體（實測平均）。多個 StaM 構型一起對接時由 15.1.16 的視窗限制，因此 StaM dcss 大小不影響此項。
+     - 對接樣本：每個 MobM 2 × min(`sampleBufferNum`, 每個配對的對接樣本數 × 配對數) × 每個樣本的記憶體（9c 合併時有兩份）。
+     - 構型配對紀錄：累計配對數 × 64 bytes。
+     - L2 pool 與 dcss 樣本：(minL2 + dcss 大小) × 每個樣本的記憶體。
+     - 9a 一批：min(`maxL1BatchNum`, 2 × minL2) × (32 × 兩面角數 + 64) bytes。
+     - 基準 = 各輪中（本輪常駐記憶體峰值 − 本輪上述各項的實際值）與輪開始時常駐記憶體的最大值（保存在檢查點）。
+   - 加倍超過預算時，所有要加倍的大小乘以同一個不超過預算的最大倍數（1–2 倍，無條件捨去）。
+   - 已達上限（要加倍的大小無法增加）且仍沒有移除：顯示警告（目前的 `topSampleNum`，建議重新執行時減少），不再執行之後的輪次，照常寫出該輪的檢查點並執行 9d；以 `--resume` 接續此檢查點時直接進行 9d。結束代碼為 0，警告在 9d 之後再顯示一次。
+   - 最後一輪只顯示會改成的大小，不改變。
+   - 預算不明（無法取得記憶體上限）時不限制。
+   - 再現性：預算不構成限制時，大小只依移除數決定（加倍）；預算構成限制時，大小取決於實測的記憶體，相同參數的結果可能不同。
+   - 執行紀錄（每輪）：輪開始時各構型集的 dcss 大小、minL2、elite、L2 pool 大小；9a 合計時間；9a、9b/9c、檢查點、9d 之後的主機常駐記憶體、該階段的峰值與各 GPU 的使用量（全部行程）；加倍時的判斷、估計值的各項與預算。
+7. 下一輪的 9a 補滿 dcss。
 
 **已對接過的構型配對**：以 (StaM 構型樣本 ID, MobM 構型樣本 ID) 記錄。後續輪次中：
 - posm2、posm2_fft、posm3：不重做（決定性方法，結果相同）。
@@ -1912,7 +1929,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `ring.confEnergyWindow` | `--ring_confEnergyWindow` | 5 kcal/mol | 4.9（≥ 0） |
 | `ring.maxConfNum` | `--ring_maxConfNum` | 10 | 4.9（1–255；1 關閉構形庫） |
 | `stam.fixedResMovable` | `--stam_fixedResMovable` | false | 4.7 |
-| `{stam,mobm}.dockingConfSampleNum` | `--{stam,mobm}_dockingConfSampleNum` | 有可動兩面角時必填 | 7.2 |
+| `{stam,mobm}.dockingConfSampleNum` | `--{stam,mobm}_dockingConfSampleNum` | 有可動兩面角時必填（初始值；9 節步驟 6 可加倍） | 7.2、9 |
 | `{stam,mobm}.minL2confSampleNum` | `--{stam,mobm}_minL2confSampleNum` | 2 × docking | 7.2 |
 | `{stam,mobm}.initL1confSampleNum` | `--{stam,mobm}_initL1confSampleNum` | minL2 | 7.2 |
 | `{stam,mobm}.eliteConfSampleNum` | `--{stam,mobm}_eliteConfSampleNum` | max(2, ceil(0.25 × docking)) | 7.2 |
@@ -1977,7 +1994,6 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.maxAngleStep` | `--dock9b_maxAngleStep` | 10° | 12 |
 | `dock9c.maxRound` | `--dock9c_maxRound` | 10 | 10 |
 | `dock9c.topSampleNum` | `--dock9c_topSampleNum` | eliteStaM × eliteMobM | 9 |
-| `dock9c.dcssTopNum` | `--dock9c_dcssTopNum` | eliteStaM × eliteMobM（最多 topSampleNum） | 9 |
 | `dock9c.diversityRmsd` | `--dock9c_diversityRmsd` | 2.0 Å | 9 |
 | `dock9c.sampleBufferNum` | `--dock9c_sampleBufferNum` | 65536（至少 max(4, `midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
 | `dock9c.midTopSampleFactor` | `--dock9c_midTopSampleFactor` | 1（`midKeepSkipped` 為 true 時 2） | 9 |
@@ -3076,10 +3092,11 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 - 檔案（`round_<r>/`）：
   - `manifest.toml`：`version`、`round`（已完成輪次）、`state_sha256`、`[[inputs]]`（`role` = `stamFile`／`mobmFiles`／`molConfig`／`ccd`，絕對路徑，SHA-256）。
   - `params.toml`：全部參數（同 `params.used.toml` 的格式，含實際使用的 `seed`）。
-  - `state.bin`：二進位狀態，開頭為識別碼、位元組順序標記與格式版本（1）；以主機位元組順序寫出，在不同位元組順序的機器上讀取時報錯。
+  - `state.bin`：二進位狀態，開頭為識別碼、位元組順序標記與格式版本（2；1.121 起，1 的檢查點無法接續）；以主機位元組順序寫出，在不同位元組順序的機器上讀取時報錯。
   - `<MobM 目錄>/topSampleSet.tsv`：目前 topSampleSet 的全部樣本（rank、結構檔、StaM／MobM 樣本 ID、9c 排序能量 `E_9b_grid`、inter、inter_clash、mobm_intra、stam_term），前 `output.minPerRank` 個另寫結構檔 `top_<rank>`、`stam_<id>`（格式依 `output.*`）；未做 9d 對稱篩選與精確重算。
 - 亂數狀態：所有亂數都是計數器式（7.9、8.3）。9a 只需保存每個構型集（StaM 群、各 MobM）的樣本計數器；9b 的串流由（輪次、MobM、StaM 樣本 ID、MobM 樣本 ID）決定，不需保存。另保存 7.4 的 nextL1 與是否已做過第一次補充。
 - 其他狀態：StaM 分子內能量的固定參考值（9）、各 MobM 的已對接構型配對最低能量（posm2 略過已對接配對用）、上一輪 dcss 的本輪最低排序能量（csgm2 適應度）。
+- dcss 大小（9 節步驟 6，1.121）：各構型集目前的 dockingConfSampleNum、minL2、initL1、elite；是否已因記憶體上限停止；記憶體估計的基準；各 MobM 每個配對的已準備記憶體與對接樣本數。
 - `state.bin` 的 SHA-256 記在 `manifest.toml`；接續時不一致 → 報錯（檢查點損壞）。
 - 寫入順序：檔案先寫入 `round_<r>.tmp/`，完成後 rename 為 `round_<r>/`（已存在時先刪除），再以暫存 symlink rename 更新 `last`。
 
@@ -3090,7 +3107,7 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
   - 不可同時使用 `--paramFile`、`--outPrefix`（報錯）；輸出寫回 `--resume` 指定的目錄。
   - 輸入檔：未在命令列指定時使用 `manifest.toml` 記錄的路徑；可重新指定 `--stamFile`、`--mobmFiles`、`--molConfig`（例如檔案已搬移），但 SHA-256 必須相同。`ccd` 是參數，路徑須相同、內容也比對 SHA-256。
   - `maxRound` ≤ 已完成輪次：不再執行新的輪次，直接以檢查點的狀態進行 9d 並輸出。
-  - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。
+  - 接續後的結果與不中斷時逐位元相同（相同的執行檔；已以 `maxRound` 3 → 6 與一次跑完 6 輪、以及兩個 MobM、posm2 的情況驗證 `summary.tsv`、結構檔與各輪 `state.bin`）。1.121 起，dcss 大小受記憶體預算限制時（9 節步驟 6）不保證相同。
   - `gpu.*`（`gpu.enable`、`gpu.device`、`gpu.conf9aBatchNum`、`gpu.conf9aPrecision`、`gpu.conf9aRcd`、`gpu.conf9aRcdMinBatch`、`gpu.dock9bBatchNum`、`gpu.dock9bStamNum`、`gpu.dock9bDeviceMin`、`gpu.packedMaps`）可修改；改變 `gpu.enable` 時，接續後的結果與不中斷時不保證逐位元相同（15.1.3）。`gpu.memLimit` 尚未實作。
 - 輸入檔或分子設定檔的 SHA-256 不一致 → 報錯並結束。
 - 參數只允許修改 `maxRound`、`gpu.*`、`cpu.threadNum`、`memory.hostLimit`、`output.allSummary`；其他參數不同 → 報錯並結束。`--refFiles` 不屬於檢查點，接續時可重新指定或省略。
@@ -3319,7 +3336,7 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
 - 失敗原因（B0，以 1.118 係數）：成功 6、排序 16、精修 4、取樣 27。≤ 12 組全部取到近原生姿態，失敗都是排序；≥ 25 組沒有一個取到，對接池中主鏈 RMSD 最低 3.2–12 Å。
   - 只比形狀（主鏈疊合後的 RMSD）：≥ 25 組最低多為 2–3.8 Å，放置後 3.2–12 Å，構型與放置都不足。
   - 排序失敗時，晶體姿態局部最小化後比最佳誘餌高約 0.5 kcal/mol（od_0100），主要差在分子間 vdw 與 hbond（晶體姿態的 vdw 較低，但乘上係數後被其他項抵銷）；取樣失敗時晶體姿態平均低 2.1 kcal/mol，即取到就能排在前面。
-- 停滯（9 節步驟 5）：`topSampleNum` 500 時 dcss 第 2 輪之後不再更換（例如 2B9H 第 3–10 輪沒有對接；Astex 抽查 39 個，第 3 輪起都沒有更換）。Stage A 的 Astex 與 LEADS-PEP 結果（17.3.1）都在此情況下取得；HiQBind 只做 localMin，不受影響。1.120 起以 `dock9c.dcssTopNum` 計算 `E_top_max`。
+- 停滯（9 節步驟 5）：`topSampleNum` 500 時 dcss 第 2 輪之後不再更換（例如 2B9H 第 3–10 輪沒有對接；Astex 抽查 39 個，第 3 輪起都沒有更換）。Stage A 的 Astex 與 LEADS-PEP 結果（17.3.1）都在此情況下取得；HiQBind 只做 localMin，不受影響。1.120 以 `dock9c.dcssTopNum`（`E_top_max` 只取 topSampleSet 前 n 個）處理；1.121 移除此參數，改為 9 節步驟 6（沒有移除時 dcss 大小加倍）。
 - 測試（各組「取到／第 1 名／前 10 名」；時間為 13–24 組相對 B0）：
 
   | 設定 | ≤ 12 | 13–24 | 時間 |
@@ -3327,9 +3344,11 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
   | B0 | 11／5／10 | 9／1／4 | 1 |
   | W0：`energy.searchWeights = od_0100` | 12／4／9 | 12／1／2 | 約 0.8 |
   | C1：`mobm.dockingConfSampleNum` 64 | — | 13／4／5 | 約 4.4 |
-  | D1：1.120 的 `dcssTopNum`（各輪都更換 dcss） | 11／5／9 | 10／3／6 | 約 5.5 |
+  | D1：1.120 的 `dcssTopNum` 4（各輪都更換 dcss；1.121 已移除） | 11／5／9 | 10／3／6 | 約 5.5 |
 
   - ≥ 25 組：W0 沒有改善（0／0／0）；D1 只測 2B9H（12 個殘基，50 個兩面角），主鏈最低 6.19 Å（B0 5.89），時間 5.6 倍。
+  - D1 每輪篩選後 dcss 只剩 3–4 個，少於 elite（4），9a 一直使用 csgm1，沒有用到 csgm2；B0 也只在第 1 輪做過 9a（csgm1）。
+  - 1.121 的步驟 6（2B6N，`rotStep` 15、`maxRound` 4，其餘同 B0）：dcss 16 → 32 → 64，第 3 輪起 9a 使用 csgm2；以 `memory.hostLimit` 420 MiB 測試上限：16 → 32 → 48，第 4 輪已達上限而停止並執行 9d，接續時直接進行 9d。
 - 結論：
   - 以 od_0100 的權重搜尋（W0）不改善排序，`energy.searchWeights` 預設維持 `none`。
   - 13–24 組增加構型數（C1）或讓各輪持續更換構型（D1）都有幫助，但時間增為 4–6 倍。
@@ -3491,3 +3510,4 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
 | 1.118 | 2026-10-28 | od_0100 的 c0、tors 與共同倍數以 HiQBind 子集的結合親和力擬合並設為預設（10.2、17.3.2）；同一殘基內有多個主鏈單元時以 `unit` 識別，修正類肽配體的預設分子設定檔無法讀回（5.2）；已知問題 K3 |
 | 1.119 | 2026-10-28 | mmCIF 讀取與質子化：`covale` 連接取代離去原子時沿用其鍵級（Schiff 鹼）；共價連接的標準胺基酸側鏈原子改由 pKa 規則決定；芳香陰離子 N（四唑）；給定電荷時接受 C／O 價數 3；CCD 中與金屬成鍵的原子沿用 CCD 的氫數（血基質 N 不再帶氫）；As 價數同 P；環不完整的錯誤訊息（3.1、3.4、K3） |
 | 1.120 | 2026-10-29 | 寡肽取樣分析（17.3.3）；`dock9c.dcssTopNum`：dcss 篩選的 `E_top_max` 只取 topSampleSet 的前 n 個，修正 topSampleNum 大時第 2 輪後停滯（9）；`energy.searchWeights`：9a／9b 能量以 od_0100 係數加權（8.6，預設 `none`） |
+| 1.121 | 2026-10-29 | 移除 `dock9c.dcssTopNum`；9 節步驟 6：dcss 沒有移除時大小加倍（StaM 群與各 MobM），連帶參數重算，以主機記憶體估計上限，達上限時警告並停止之後的輪次（照常寫出檢查點與 9d）；每輪各階段的時間、記憶體與數量輸出；檢查點格式 2（16.3） |

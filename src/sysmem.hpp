@@ -15,6 +15,13 @@ namespace od {
 // Resident memory of this process (bytes); 0 when unknown.
 std::size_t residentBytes(const std::string& procRoot = "/proc");
 
+// Peak resident memory of this process (VmHWM, bytes) since the start or the last
+// resetPeakResident(); 0 when unknown.
+std::size_t peakResidentBytes(const std::string& procRoot = "/proc");
+
+// Resets the peak resident memory to the current one (/proc/self/clear_refs); false when not possible.
+bool resetPeakResident();
+
 // Memory limit of the cgroup of this process: the smallest limit of its cgroup and of its
 // ancestors (cgroup v2 memory.max, or cgroup v1 memory.limit_in_bytes); nullopt when unlimited or
 // unknown. source: the file of the limit.

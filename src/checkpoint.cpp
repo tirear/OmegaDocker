@@ -94,7 +94,7 @@ class Sha256 {
 };
 
 constexpr char kMagic[8] = {'O', 'D', 'C', 'K', 'P', 'T', 0, 0};
-constexpr std::uint32_t kStateFormat = 1;
+constexpr std::uint32_t kStateFormat = 2;
 constexpr std::uint32_t kByteOrder = 0x01020304;
 
 void writeFile(const std::string& path, const std::string& content) {

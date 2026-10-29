@@ -4767,9 +4767,6 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   REQUIRE(top.size() == 5);
   for (int k = 0; k < 5; ++k) CHECK(top[k].s.energy == e[k]);
   CHECK(od::topMaxEnergy(top) == e[4]);
-  CHECK(od::topMaxEnergy(top, 2) == e[1]);
-  CHECK(od::topMaxEnergy(top, 9) == e[4]);
-  CHECK(od::topMaxEnergy({}, 2) == -std::numeric_limits<float>::infinity());
   {
     // Ranking energy includes the StaM term (spec 9): StaM 1 shifted below StaM 0.
     auto shifted = merged;
@@ -4904,6 +4901,52 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   CHECK(dcss == std::vector<int>{1, 4});
   CHECK(od::filterDcss(dcss, lowest, -std::numeric_limits<float>::infinity()) == 2);
   CHECK(dcss.empty());
+}
+
+TEST_CASE("dock9c: dcss size growth within the host memory (spec 9, step 6)") {
+  constexpr std::size_t MiB = 1 << 20;
+  // Estimate: base + variable x pairs / (pairs at the current sizes), pairs = sizes[0] x sum(sizes[1..]).
+  const auto linear = [](std::vector<int> s0, std::size_t base, std::size_t variable) {
+    const auto pairs = [](const std::vector<int>& s) {
+      double p = 0;
+      for (std::size_t k = 1; k < s.size(); ++k) p += s[k];
+      return p * s[0];
+    };
+    return [=](const std::vector<int>& s) {
+      return base + static_cast<std::size_t>(static_cast<double>(variable) * pairs(s) / pairs(s0));
+    };
+  };
+  // StaM not movable (1), one MobM of 16: doubled when it fits.
+  auto g = od::growDcssSizes({1, 16}, {false, true}, linear({1, 16}, 1000 * MiB, 100 * MiB), 2000 * MiB);
+  CHECK(g.sizes == std::vector<int>{1, 32});
+  CHECK(g.estimate == 1200 * MiB);
+  CHECK_FALSE(g.atLimit);
+  // Unknown budget: no limit.
+  g = od::growDcssSizes({1, 16}, {false, true}, linear({1, 16}, 1000 * MiB, 100 * MiB), 0);
+  CHECK(g.sizes == std::vector<int>{1, 32});
+  // Limited: base + variable x t <= budget, t = 1.5 -> 24.
+  g = od::growDcssSizes({1, 16}, {false, true}, linear({1, 16}, 1000 * MiB, 100 * MiB), 1150 * MiB);
+  CHECK(g.sizes == std::vector<int>{1, 24});
+  CHECK(g.estimate <= 1150 * MiB);
+  CHECK_FALSE(g.atLimit);
+  // At the limit: no growth possible.
+  g = od::growDcssSizes({1, 16}, {false, true}, linear({1, 16}, 1000 * MiB, 100 * MiB), 1100 * MiB + MiB / 2);
+  CHECK(g.sizes == std::vector<int>{1, 16});
+  CHECK(g.atLimit);
+  g = od::growDcssSizes({1, 16}, {false, true}, linear({1, 16}, 1000 * MiB, 100 * MiB), 900 * MiB);  // the round itself exceeded it
+  CHECK(g.sizes == std::vector<int>{1, 16});
+  CHECK(g.atLimit);
+  // StaM and two MobM; StaM and MobM 2 marked, both doubled -> pairs x 3.
+  g = od::growDcssSizes({8, 16, 16}, {true, false, true}, linear({8, 16, 16}, 0, 256 * MiB), 0);
+  CHECK(g.sizes == std::vector<int>{16, 16, 32});
+  CHECK(g.estimate == 768 * MiB);
+  // Common factor limited: pairs x 2 at most -> t^2 + t <= 4 (t ~ 1.56).
+  g = od::growDcssSizes({8, 16, 16}, {true, false, true}, linear({8, 16, 16}, 0, 256 * MiB), 512 * MiB);
+  CHECK(g.sizes[1] == 16);
+  CHECK(g.sizes[0] > 8);
+  CHECK(g.sizes[2] > 16);
+  CHECK(g.estimate <= 512 * MiB);
+  CHECK_FALSE(g.atLimit);
 }
 
 TEST_CASE("symrmsd: automorphisms, Hungarian pairing, symmetry-corrected RMSD") {

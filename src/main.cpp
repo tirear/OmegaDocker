@@ -494,6 +494,7 @@ class ConfSet {
   }
   // Checkpoint state (spec 16.3): random stream counter, L1 batch state, L2 pool and dcss samples.
   void save(od::BinWriter& w) const {
+    for (int v : {n_.docking, n_.minL2, n_.initL1, n_.elite}) w.put<std::int32_t>(v);
     w.put(counter_);
     w.put<std::uint8_t>(first_);
     w.put(nextL1_);
@@ -524,6 +525,13 @@ class ConfSet {
     }
   }
   void load(od::BinReader& r) {
+    od::ConfSampleNums n;
+    for (int* v : {&n.docking, &n.minL2, &n.initL1, &n.elite}) *v = r.get<std::int32_t>();
+    if (movable()) {
+      if (n.docking < n_.docking || n.minL2 < 2 * n.docking || n.elite < 2)
+        od::fail("checkpoint: {}: invalid sample numbers (dcss size {})", name_, n.docking);
+      setSampleNums(n);
+    }
     counter_ = r.get<std::uint64_t>();
     first_ = r.get<std::uint8_t>() != 0;
     nextL1_ = r.get<long long>();
@@ -586,6 +594,13 @@ class ConfSet {
   }
   int dockingNum() const { return movable() ? n_.docking : 1; }
   int eliteNum() const { return movable() ? n_.elite : 1; }
+  const od::ConfSampleNums& sampleNums() const { return n_; }
+  // dcss size change (spec 9, step 6): minL2confSampleNum and the others recomputed.
+  void setSampleNums(const od::ConfSampleNums& n) {
+    n_ = n;
+    p_.minL2 = n.minL2;
+  }
+  std::size_t poolSize() const { return pool_.size(); }
 
   // Moves need samples from the L2 pool into samples(), refilling the pool by
   // 9a first when it has fewer (spec 7.3); returns their ids. dcss: the samples
@@ -806,8 +821,9 @@ struct MobState {
   std::unordered_map<std::uint64_t, float> pairLowest;  // (StaM id, MobM id) -> lowest docking energy, +inf if none
   std::unordered_map<int, float> stamLowest, mobLowest;  // dcss sample -> lowest ranking energy of the last round (csgm2 fitness)
   std::vector<od::RoundSample> top;
-  int topNum = 0;
-  int dcssTopNum = 0;         // E_top_max of the dcss filtering from the first dcssTopNum samples of top
+  int topNum = 0;  // from the initial eliteConfSampleNum values; not changed with the dcss size
+  // dcss size (spec 9, step 6): host memory of a prepared pair, docking samples per docked pair (last round with docked pairs).
+  double preparedPerPair = 0, samplesPerPair = 0;
   std::size_t bufferNum = 0;  // sampleBufferNum
   std::unique_ptr<od::MobmHeavyAtoms> heavy;
   std::unique_ptr<od::SymmetryRmsd> sym;
@@ -891,6 +907,8 @@ void saveMobState(od::BinWriter& w, const MobState& m) {
   putMap(w, m.pairLowest);
   putMap(w, m.stamLowest);
   putMap(w, m.mobLowest);
+  w.put(m.preparedPerPair);
+  w.put(m.samplesPerPair);
   w.put<std::uint64_t>(m.top.size());
   for (const auto& r : m.top) {
     w.put(r.stam);
@@ -914,6 +932,8 @@ void loadMobState(od::BinReader& r, MobState& m, std::size_t stamSamples, std::s
   m.pairLowest = getMap<std::uint64_t>(r);
   m.stamLowest = getMap<int>(r);
   m.mobLowest = getMap<int>(r);
+  m.preparedPerPair = r.get<double>();
+  m.samplesPerPair = r.get<double>();
   const auto n = r.get<std::uint64_t>();
   m.top.clear();
   for (std::uint64_t k = 0; k < n; ++k) {
@@ -1449,8 +1469,8 @@ void writeTopSnapshot(const std::string& dir, const ConfSet& stamSet, const std:
 }
 
 void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::unique_ptr<ConfSet>>& mobSets,
-                     const std::vector<MobState>& ms, float stamRef, const od::Options& opt, const Checkpointing& ck,
-                     float shift) {
+                     const std::vector<MobState>& ms, float stamRef, bool limitStop, std::uint64_t memBase,
+                     const od::Options& opt, const Checkpointing& ck, float shift) {
   const auto t0 = std::chrono::steady_clock::now();
   od::BinWriter w;
   od::putStateHeader(w);
@@ -1459,6 +1479,8 @@ void writeCheckpoint(int round, const ConfSet& stamSet, const std::vector<std::u
   stamSet.save(w);
   for (const auto& m : mobSets) m->save(w);
   w.put(stamRef);
+  w.put<std::uint8_t>(limitStop);
+  w.put(memBase);
   for (const auto& m : ms) saveMobState(w, m);
   const od::Manifest man{od::kVersion, round, ck.inputs, od::sha256Hex(w.data())};
   const std::string dir = od::commitCheckpoint(
@@ -1704,7 +1726,6 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   std::vector<MobState> ms(mobSets.size());
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
-    ms[i].dcssTopNum = std::min(ms[i].topNum, opt.dcssTopNum ? *opt.dcssTopNum : stamSet.eliteNum() * mobSets[i]->eliteNum());
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
     ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(std::max(4, od::midTopSampleFactor(opt) + 2)) *
                                                                        static_cast<std::size_t>(ms[i].topNum));
@@ -1713,8 +1734,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                                                    static_cast<std::size_t>(opt.symMaxPerm));
     const double symSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
     if (!refs.empty()) setReference(ms[i], *mobSets[i], refs[i], opt);
-    od::logInfo(std::format("  {:<40} topSampleNum {}  dcssTopNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
-                            mobSets[i]->name(), ms[i].topNum, ms[i].dcssTopNum, ms[i].bufferNum,
+    od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
+                            mobSets[i]->name(), ms[i].topNum, ms[i].bufferNum,
                             ms[i].sym->usesPermutations()
                                 ? std::format("{} automorphism(s)", ms[i].sym->permutationCount())
                                 : std::format("more than {} automorphisms, one-to-one pairing within each AD4 type",
@@ -1723,6 +1744,9 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   }
 
   float stamRef = std::numeric_limits<float>::infinity();  // fixed reference of RoundSample::stamRel (spec 9)
+  bool limitStop = false;  // spec 9, step 6: a dcss at the host memory limit did not change; no further rounds
+  std::string limitText;
+  std::uint64_t memBase = 0;  // spec 9, step 6: largest host memory of the rounds without the dcss-dependent parts
   int firstRound = 1;
   if (!ck.resumeDir.empty()) {
     const std::string path = od::checkpointDir(ck.resumeDir, ck.resumeRound) + "/state.bin";
@@ -1735,17 +1759,57 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     stamSet.load(r);
     for (auto& m : mobSets) m->load(r);
     stamRef = r.get<float>();
+    limitStop = r.get<std::uint8_t>() != 0;
+    memBase = r.get<std::uint64_t>();
     for (std::size_t i = 0; i < ms.size(); ++i)
       loadMobState(r, ms[i], stamSet.sampleCount(), mobSets[i]->sampleCount(), mobSets[i]->sys().torsionCount());
     if (!r.atEnd()) od::fail("{}: unexpected data at the end", path);
     firstRound = ck.resumeRound + 1;
     od::logInfo(std::format("Resumed from {} (round {} completed)", path, ck.resumeRound));
-    if (firstRound > opt.maxRound)
+    if (limitStop) {
+      limitText = std::format("the rounds ended after round {} because a dcss at the host memory limit did not change (spec 9, "
+                              "step 6); a smaller dock9c.topSampleNum (now {}) in a new run lets the dcss change",
+                              ck.resumeRound, ms.empty() ? 0 : ms[0].topNum);
+      od::logWarn("  " + limitText);
+      firstRound = opt.maxRound + 1;
+    } else if (firstRound > opt.maxRound) {
       od::logInfo(std::format("  dock9c.maxRound {}: no further rounds", opt.maxRound));
+    }
   }
+  const bool peakReset = od::resetPeakResident();
+  std::size_t roundPeak = 0;
+  // Memory after a stage (spec 9, step 6): host resident and peak resident since the last stage, used device memory.
+  const auto stageMemory = [&](const std::string& stage) {
+    const std::size_t res = od::residentBytes(), peak = std::max(od::peakResidentBytes(), res);
+    roundPeak = std::max(roundPeak, peak);
+    od::resetPeakResident();
+    std::string dev;
+#ifdef OD_HAVE_CUDA
+    if (gpu)
+      for (int d : opt.gpuDevices) {
+        const auto info = od::gpuDeviceInfo(d);
+        dev += std::format(", GPU {} in use {} of {} MiB", d, (info.totalMem - info.freeMem) >> 20, info.totalMem >> 20);
+      }
+#endif
+    od::logInfo(std::format("  {} memory: host resident {} MiB, peak {} MiB{}{}", stage, res >> 20, peak >> 20,
+                            peakReset ? "" : " (peak since the start)", dev));
+  };
+  const auto sizeText = [](const ConfSet& set) {
+    const od::ConfSampleNums& n = set.sampleNums();
+    return std::format("{} (minL2confSampleNum {}, eliteConfSampleNum {}, L2 pool {})", n.docking, n.minL2, n.elite, set.poolSize());
+  };
   for (int round = firstRound; round <= opt.maxRound; ++round) {
     od::logInfo(std::format("Round {} of {}:", round, opt.maxRound));
+    const std::size_t roundBase = od::residentBytes();
+    od::resetPeakResident();
+    roundPeak = roundBase;
+    {
+      std::string t = stamSet.movable() ? "StaM " + sizeText(stamSet) : "StaM 1 (input conformation)";
+      for (const auto& m : mobSets) t += ", " + m->name() + " " + (m->movable() ? sizeText(*m) : "1 (input conformation)");
+      od::logInfo("  dcss size: " + t);
+    }
     // 9a: refill the dcss (spec 7.3).
+    const auto a0 = std::chrono::steady_clock::now();
     for (std::size_t i = 0; i < ms.size(); ++i) {
       auto fill = [](ConfSet& set, std::vector<int>& dcss, const std::unordered_map<int, float>& lowest) {
         if (!set.movable()) {
@@ -1762,6 +1826,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       fill(stamSet, ms[i].stamDcss, ms[i].stamLowest);
       fill(*mobSets[i], ms[i].mobDcss, ms[i].mobLowest);
     }
+    od::logInfo(std::format("  9a total {:.2f} s", std::chrono::duration<double>(std::chrono::steady_clock::now() - a0).count()));
+    stageMemory("9a");
     if (stamSet.movable() && !std::isfinite(stamRef)) stamRef = stamSet.minEnergy();
     const float shift = stamSet.movable() ? stamRef - stamSet.minEnergy() : 0.0f;
 
@@ -1773,6 +1839,10 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     std::vector<od::Dock9bStats> st(ms.size());
     std::vector<long long> docked(ms.size(), 0), skipped(ms.size(), 0), sampleNum(ms.size(), 0), partial(ms.size(), 0),
         posm3Docked(ms.size(), 0);
+    // Prepared pairs (spec 9, step 6): their host memory per MobM and the largest of one StaM conformation.
+    std::vector<double> preparedSum(ms.size(), 0);
+    std::vector<long long> preparedCnt(ms.size(), 0);
+    std::size_t itemMaxBytes = 0;
     std::vector<std::vector<od::RoundSample>> buffer(ms.size());
     std::vector<double> selectSec(ms.size(), 0);
     std::vector<float> droppedMin(ms.size(), std::numeric_limits<float>::infinity());  // --midKeepSkipped
@@ -1899,6 +1969,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       }
     };
     const auto prepareItem = [&] {
+      std::size_t itemBytes = 0;
       WindowItem& w = window.back();
       gpuFieldSlots(curDev, static_cast<int>(window.size()));
       if (w.groups.empty()) makeGroups(w);
@@ -1906,10 +1977,17 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         for (const auto& gp : w.groups[i]) {
           Group& g = *gp;
           g.dk->prepareJobs(g.jobs);
-          for (const auto& j : g.jobs) windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
+          for (const auto& j : g.jobs) {
+            windowPoses[i] += static_cast<long long>(j.prepared->l2.size());
+            const std::size_t b = od::MobmDocker::preparedBytes(*j.prepared);
+            itemBytes += b;
+            preparedSum[i] += static_cast<double>(b);
+            ++preparedCnt[i];
+          }
           od::PoseEvaluator* ev = evalFor(curDev, i, g.variant);
           if (poseTarget[i] < 0) poseTarget[i] = ev ? kWindowPosesPerResident * static_cast<long long>(ev->residentPoses(*g.dk)) : 0;
         }
+      itemMaxBytes = std::max(itemMaxBytes, itemBytes);
     };
 
     std::size_t windowBytes = 0, windows = 0, largestWindow = 0;
@@ -2364,6 +2442,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     }
 
     // 9c (spec 9).
+    std::vector<int> rmStamOf(ms.size(), -1), rmMobOf(ms.size(), -1);
     for (std::size_t i = 0; i < ms.size(); ++i) {
       MobState& m = ms[i];
       const auto& s = st[i];
@@ -2395,15 +2474,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         }
       select(i, true);
       const float eTop = od::topMaxEnergy(m.top);
-      const float eDcss = od::topMaxEnergy(m.top, static_cast<std::size_t>(m.dcssTopNum));
-      const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eDcss) : 0;
-      const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eDcss) : 0;
+      const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
+      const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
+      rmStamOf[i] = rmStam;
+      rmMobOf[i] = rmMob;
       m.stamLowest = std::move(stamLowest);
       m.mobLowest = std::move(mobLowest);
-      od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f} (first {})  dcss removed: StaM {}, MobM {}  "
+      od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}  "
                               "9c runs {}  {:.2f} s",
-                              mobSets[i]->name(), m.top.size(), m.topNum, eDcss + shift,
-                              std::min<std::size_t>(m.top.size(), static_cast<std::size_t>(m.dcssTopNum)), rmStam, rmMob, partial[i] + 1,
+                              mobSets[i]->name(), m.top.size(), m.topNum, eTop + shift, rmStam, rmMob, partial[i] + 1,
                               selectSec[i]));
       if (opt.midKeepSkipped) {
         const bool same = std::isinf(droppedMin[i]) ||
@@ -2449,7 +2528,94 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                                 "and about {} MiB of free device memory",
                                 n, (roundResident + n * hostPerField) / 9 * 10 >> 20, 2 * n * gpuPerField >> 20));
     }
-    writeCheckpoint(round, stamSet, mobSets, ms, stamRef, opt, ck, shift);
+    stageMemory("9b/9c");
+
+    // dcss size (spec 9, step 6): doubled when no dcss sample was removed, within the host memory.
+    {
+      std::vector<int> sizes{stamSet.dockingNum()};
+      std::vector<bool> grow{false};
+      for (std::size_t i = 0; i < ms.size(); ++i) {
+        sizes.push_back(mobSets[i]->dockingNum());
+        grow.push_back(mobSets[i]->movable() && rmMobOf[i] == 0);
+        if (stamSet.movable() && rmStamOf[i] == 0) grow[0] = true;
+      }
+      for (std::size_t i = 0; i < ms.size(); ++i) {
+        if (preparedCnt[i] > 0) ms[i].preparedPerPair = preparedSum[i] / static_cast<double>(preparedCnt[i]);
+        if (docked[i] > 0) ms[i].samplesPerPair = static_cast<double>(sampleNum[i]) / static_cast<double>(docked[i]);
+      }
+      {
+        // Host memory of a round (spec 9, step 6): the measured peak of this round, with the parts that depend on the
+        // dcss sizes replaced by their values at the new sizes (all pairs docked).
+        enum { kPrepared, kSamples, kPairs, kPool, kBatch, kTerms };
+        const auto terms = [&](const std::vector<int>& s, bool actual) {
+          std::array<double, kTerms> t{};
+          for (std::size_t i = 0; i < ms.size(); ++i) {
+            const double pairs = static_cast<double>(s[0]) * s[i + 1];
+            const double sampleBytes =
+                sizeof(od::RoundSample) + 4.0 * mobSets[i]->sys().torsionCount() + 16.0;
+            if (!actual) t[kPrepared] += s[i + 1] * ms[i].preparedPerPair;
+            const double n = actual ? static_cast<double>(sampleNum[i]) : ms[i].samplesPerPair * pairs;
+            t[kSamples] += 2.0 * std::min(static_cast<double>(ms[i].bufferNum), n) * sampleBytes;
+            t[kPairs] += 64.0 * (static_cast<double>(ms[i].pairLowest.size()) + (actual ? 0.0 : pairs));
+          }
+          if (actual) t[kPrepared] = static_cast<double>(itemMaxBytes);
+          const auto group = [&](const ConfSet& set, od::SampleSet which, int size, const od::CsgmOpts& c) {
+            if (!set.movable()) return;
+            const int minL2 = size == set.dockingNum() ? set.sampleNums().minL2 : od::scaledConfSampleNums(opt, which, size).minL2;
+            const double tors = set.sys().torsionCount();
+            t[kPool] += (minL2 + size) * (sizeof(od::ConfSample) + 4.0 * tors + 16.0);
+            t[kBatch] += static_cast<double>(std::min<long long>(c.maxL1BatchNum, 2LL * minL2)) * (32.0 * tors + 64.0);
+          };
+          group(stamSet, od::SampleSet::StaM, s[0], opt.stamCsgm);
+          for (std::size_t i = 0; i < ms.size(); ++i) group(*mobSets[i], od::SampleSet::MobM, s[i + 1], opt.mobmCsgm);
+          return t;
+        };
+        const auto sum = [](const std::array<double, kTerms>& t) { return std::accumulate(t.begin(), t.end(), 0.0); };
+        const double now = sum(terms(sizes, true));
+        memBase = std::max<std::uint64_t>({memBase, roundBase, roundPeak > now ? roundPeak - static_cast<std::size_t>(now) : 0});
+        const auto base = static_cast<std::size_t>(memBase);
+        if (std::find(grow.begin(), grow.end(), true) != grow.end()) {
+          const auto estimate = [&](const std::vector<int>& s) { return base + static_cast<std::size_t>(sum(terms(s, false))); };
+          const od::DcssGrowth g = od::growDcssSizes(sizes, grow, estimate, hostBudget);
+          const auto next = terms(g.sizes, false);
+          const auto mib = [](double b) { return static_cast<long long>(b / (1 << 20)); };
+          const auto nameOf = [&](std::size_t k) { return k == 0 ? std::string("StaM") : mobSets[k - 1]->name(); };
+          std::string which, change;
+          for (std::size_t k = 0; k < sizes.size(); ++k)
+            if (grow[k]) {
+              which += (which.empty() ? "" : ", ") + nameOf(k);
+              change += std::format("{}{} {} -> {}", change.empty() ? "" : ", ", nameOf(k), sizes[k], g.atLimit ? sizes[k] : g.sizes[k]);
+            }
+          od::logInfo(std::format("  dcss: no sample removed ({}); host memory: round peak {} MiB (of which dcss-dependent {} MiB); "
+                                  "estimate with the new sizes {} MiB = {} MiB + 9b prepared pairs of one StaM conformation {} MiB "
+                                  "+ docking samples {} MiB + pair records {} MiB + L2 pool and dcss {} MiB + 9a batch {} MiB; budget {}",
+                                  which, roundPeak >> 20, mib(now), g.estimate >> 20, base >> 20, mib(next[kPrepared]),
+                                  mib(next[kSamples]), mib(next[kPairs]), mib(next[kPool]), mib(next[kBatch]),
+                                  hostBudget > 0 ? std::format("{} MiB (90% of memory.hostLimit)", hostBudget >> 20)
+                                                 : std::string("unknown (no limit)")));
+          if (g.atLimit) {
+            limitStop = true;
+            limitText = std::format("round {}: no dcss sample of {} was removed and the dcss size cannot grow within the host memory "
+                                    "budget{}. A smaller dock9c.topSampleNum (now {}) in a new run "
+                                    "lets the dcss change",
+                                    round, which, round < opt.maxRound ? "; the remaining rounds are skipped" : "",
+                                    ms.empty() ? 0 : ms[0].topNum);
+            od::logWarn("  " + limitText);
+          } else if (round == opt.maxRound) {
+            od::logInfo(std::format("  dcss size: {} not applied (last round)", change));
+          } else {
+            if (grow[0] && g.sizes[0] > sizes[0]) stamSet.setSampleNums(od::scaledConfSampleNums(opt, od::SampleSet::StaM, g.sizes[0]));
+            for (std::size_t i = 0; i < ms.size(); ++i)
+              if (grow[i + 1] && g.sizes[i + 1] > sizes[i + 1])
+                mobSets[i]->setSampleNums(od::scaledConfSampleNums(opt, od::SampleSet::MobM, g.sizes[i + 1]));
+            od::logInfo(std::format("  dcss size: {}", change));
+          }
+        }
+      }
+    }
+    writeCheckpoint(round, stamSet, mobSets, ms, stamRef, limitStop, memBase, opt, ck, shift);
+    stageMemory("checkpoint");
+    if (limitStop) break;
   }
 
   for (std::size_t i = 0; i < ms.size(); ++i) {
@@ -2462,6 +2628,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   }
   const float shift = stamSet.movable() && std::isfinite(stamRef) ? stamRef - stamSet.minEnergy() : 0.0f;
   run9d(stamSet, mobSets, ms, opt, fp, shift, gpu);
+  stageMemory("9d");
+  if (limitStop) od::logWarn(limitText);
   od::logInfo("Final topSampleSet:");
   for (std::size_t i = 0; i < ms.size(); ++i) {
     od::logInfo(std::format("  {:<40} {} sample(s)", mobSets[i]->name(), ms[i].top.size()));
