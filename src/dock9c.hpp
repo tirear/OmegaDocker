@@ -67,10 +67,9 @@ PoolSelection selectPool(std::vector<RoundSample> merged, const MobmHeavyAtoms& 
 std::vector<RoundSample> symmetryFilter(std::vector<RoundSample> top, const MobmHeavyAtoms& atoms,
                                         const SymmetryRmsd& sym, double rmsd);
 
-// Step 5: removes the samples whose lowest ranking energy of the round is
-// above eTopMax, or that have none (absent from lowest). eTopMax: highest
-// energy of the topSampleSet; -inf when it is empty. Returns the number removed.
-int filterDcss(std::vector<int>& dcss, const std::unordered_map<int, float>& lowest, float eTopMax);
+// Step 5: removes the dcss samples without a sample in the topSampleSet top; id: the conformation
+// sample id of a topSampleSet sample (&RoundSample::stam or &RoundSample::mobm). Returns the number removed.
+int filterDcss(std::vector<int>& dcss, const std::vector<RoundSample>& top, int RoundSample::* id);
 
 inline float topMaxEnergy(const std::vector<RoundSample>& top) {
   float e = -std::numeric_limits<float>::infinity();

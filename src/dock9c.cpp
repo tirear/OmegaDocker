@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <unordered_set>
 
 #include "ad4.hpp"
 #include "orient.hpp"
@@ -197,12 +198,11 @@ DcssGrowth growDcssSizes(const std::vector<int>& sizes, const std::vector<bool>&
   return g;
 }
 
-int filterDcss(std::vector<int>& dcss, const std::unordered_map<int, float>& lowest, float eTopMax) {
+int filterDcss(std::vector<int>& dcss, const std::vector<RoundSample>& top, int RoundSample::* id) {
   const auto n = dcss.size();
-  std::erase_if(dcss, [&](int id) {
-    const auto it = lowest.find(id);
-    return it == lowest.end() || it->second > eTopMax;
-  });
+  std::unordered_set<int> inTop;
+  for (const auto& t : top) inTop.insert(t.*id);
+  std::erase_if(dcss, [&](int s) { return !inTop.contains(s); });
   return static_cast<int>(n - dcss.size());
 }
 

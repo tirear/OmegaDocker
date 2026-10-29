@@ -4894,13 +4894,18 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
     CHECK(od::selectTopSamples(r.pool, heavy, 4, rmsd).size() == 4);
   }
 
-  // dcss filter.
-  std::vector<int> dcss{1, 2, 3, 4};
-  const std::unordered_map<int, float> lowest{{1, -5.f}, {2, -2.f}, {4, -3.f}};
-  CHECK(od::filterDcss(dcss, lowest, -3.f) == 2);  // 2 above E_top_max, 3 without docking samples
-  CHECK(dcss == std::vector<int>{1, 4});
-  CHECK(od::filterDcss(dcss, lowest, -std::numeric_limits<float>::infinity()) == 2);
-  CHECK(dcss.empty());
+  // dcss filter: dcss samples without a sample in the topSampleSet are removed (StaM and MobM ids separately).
+  std::vector<od::RoundSample> topSet(3);
+  topSet[0].stam = 0, topSet[0].mobm = 1;
+  topSet[1].stam = 2, topSet[1].mobm = 4;
+  topSet[2].stam = 0, topSet[2].mobm = 4;
+  std::vector<int> mobDcss{1, 2, 3, 4}, stamDcss{0, 1, 2};
+  CHECK(od::filterDcss(mobDcss, topSet, &od::RoundSample::mobm) == 2);
+  CHECK(mobDcss == std::vector<int>{1, 4});
+  CHECK(od::filterDcss(stamDcss, topSet, &od::RoundSample::stam) == 1);
+  CHECK(stamDcss == std::vector<int>{0, 2});
+  CHECK(od::filterDcss(mobDcss, {}, &od::RoundSample::mobm) == 2);
+  CHECK(mobDcss.empty());
 }
 
 TEST_CASE("dock9c: dcss size growth within the host memory (spec 9, step 6)") {

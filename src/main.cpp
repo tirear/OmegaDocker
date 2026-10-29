@@ -2474,8 +2474,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         }
       select(i, true);
       const float eTop = od::topMaxEnergy(m.top);
-      const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
-      const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
+      const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, m.top, &od::RoundSample::stam) : 0;
+      const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, m.top, &od::RoundSample::mobm) : 0;
       rmStamOf[i] = rmStam;
       rmMobOf[i] = rmMob;
       m.stamLowest = std::move(stamLowest);

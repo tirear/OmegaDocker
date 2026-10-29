@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.122 |
+| 文件版本 | 1.123 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -802,7 +802,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `MutationRate` | 2% |
 | `AbsMaxDang` | ±90° |
 
-- 父代池：dcss，適應度 = 該樣本在上一輪 9c 的本輪最低排序能量（9 節步驟 5 所用的值，含 StaM 分子內能量項）；越低越好。通過 9c dcss 篩選的樣本都有有限值。
+- 父代池：dcss，適應度 = 該樣本在上一輪 9c 的本輪最低排序能量（9 節步驟 5 記錄的值，含 StaM 分子內能量項）；越低越好。留在 dcss 的樣本通常有有限值；只因 topSampleSet 中前幾輪的樣本而留下、與本輪 dcss 中的配對對象都沒有對接樣本時為 +∞（最差）。
 - 產生數量：依 7.3、7.4 的 L1 數量。
 - 不沿用 OmegaDocker v0.34 kernel4 的錦標賽寫法（該處能量與候選者索引不對應）。
 - 每個子代的操作（同 AutoDock-GPU 1.6 kernel4，基因只有兩面角，順序同樣本表示 7.1）：
@@ -1460,7 +1460,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
   - 出界判定不設容許值。
 - **計算精度**：能量在 float 的 pose（`float(t)`、`float(q)`）與 float 的兩面角上計算（精度分工見 12.1）。
 - **對接樣本 = 能量最低的被接受點**：儲存的 pose、兩面角（float）與能量，就是被接受的點中能量最低者（含起點）那次計算所用的值與結果，不在最佳化之後重算；以相同的值重算會得到完全相同的結果。`sd`、`cg`、`lbfgs` 只接受能量下降的步，此點即最後被接受的點；`fire`、`adadelta` 每步都接受，此點不一定是最後一步。
-- 每個構型配對記錄其所有對接樣本中的最低能量，作為 9c 篩選 dcss 的依據；StaM 構型樣本與 MobM 構型樣本的「最低能量」分別取其參與之所有構型配對的最小值。
+- 每個構型配對記錄其所有對接樣本中的最低能量，作為 csgm2 適應度（9 節步驟 5）的依據；StaM 構型樣本與 MobM 構型樣本的「最低能量」分別取其參與之所有構型配對的最小值。
 
 ---
 
@@ -1573,14 +1573,16 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    - 預設 `topSampleNum = eliteConfSampleNum(StaM) × eliteConfSampleNum(MobM)`。
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
    - 保存：StaM 構型、MobM 構型、位置、定向、最佳化後兩面角、能量。
-5. **篩選 dcss**：
-   - `E_top_max` = topSampleSet 中的最高能量。
-   - MobM dcss 與 StaM dcss 中，本輪最低能量 > `E_top_max` 的樣本移除。
-   - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低排序能量；不重做的配對（決定性 posm）使用先前記錄的值。
-   - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除），本輪最低能量記為 +∞，因此一律移除；topSampleSet 為空時，dcss 全部移除。
+5. **篩選 dcss**（1.123）：
+   - MobM dcss 與 StaM dcss 中，在目前的 topSampleSet（含前幾輪留下的樣本）中沒有任何樣本的構型樣本移除：StaM dcss 依 topSampleSet 樣本的 StaM 構型 ID，MobM dcss 依 MobM 構型 ID。
+   - 因此以下構型都會移除：最低排序能量 > `E_top_max`；本輪沒有任何對接樣本（所有配對的 pos 都被移除）；對接樣本能量夠低，但都因多樣性篩選（步驟 3）被跳過。topSampleSet 為空時，dcss 全部移除。
+   - 1.122 以前只移除本輪最低能量 > `E_top_max` 或沒有對接樣本的樣本；對接樣本都被多樣性篩選跳過的構型（與另一個能量較低的姿態幾乎重複）仍留在 dcss，topSampleNum 遠大於 dcss 時 dcss 不再更換（17.3.3）。
+   - StaM：多樣性篩選只比 MobM 原子，因此某個 StaM 構型上的 MobM 姿態都與另一個 StaM 構型上能量較低的姿態相近時，該 StaM 構型也會移除（即使兩者的側鏈不同）。
+   - 樣本的「本輪最低能量」（csgm2 的適應度，7.6）：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低排序能量；不重做的配對（決定性 posm）使用先前記錄的值；沒有對接樣本時記為 +∞。
+   - `E_top_max` = topSampleSet 中的最高能量（執行紀錄顯示）。
    - 無可動兩面角的分子（只有輸入結構）不篩選。
 6. **dcss 大小**（1.121）：每個構型集（StaM 群、各 MobM）分別判斷。
-   - 本輪該構型集的 dcss 沒有任何樣本被移除（每個 dcss 樣本本輪最低排序能量都 ≤ `E_top_max`，即都有對接樣本留在 topSampleSet 的範圍內）時，下一輪的 dcss 大小（`dockingConfSampleNum`）加倍。原因：topSampleNum 遠大於 dcss 時（例如 Stage A 的 500），dcss 不再更換，之後各輪沒有新的構型（17.3.3）。
+   - 本輪該構型集的 dcss 沒有任何樣本被移除（每個 dcss 樣本在 topSampleSet 中都有樣本）時，下一輪的 dcss 大小（`dockingConfSampleNum`）加倍。原因：topSampleNum 遠大於 dcss 時（例如 Stage A 的 500），dcss 不再更換，之後各輪沒有新的構型（17.3.3）。
    - StaM 群：任一 MobM 的 StaM dcss 沒有移除就成立（StaM 的 dcss 大小由所有 MobM 共用）。沒有可動兩面角的構型集不判斷。
    - 連帶參數重新計算：`minL2confSampleNum`、`initL1confSampleNum`、`eliteConfSampleNum` 未指定時依 7.2 的預設由新的 dcss 大小計算；有指定時保持與 `dockingConfSampleNum` 的比例（無條件進位，並符合 7.2 的限制）。`topSampleNum` 的預設值以開始時的 elite 計算，不隨之改變。
    - 硬體上限（主機記憶體）：估計新大小下一輪的主機記憶體，不超過預算（`memory.hostLimit` 的 90%，13）。估計值 = 基準 + 隨 dcss 大小改變的部分（以新大小、全部配對都對接計算）：
@@ -3349,6 +3351,7 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
 
   - ≥ 25 組：W0 沒有改善（0／0／0）；D1 只測 2B9H（12 個殘基，50 個兩面角），主鏈最低 6.19 Å（B0 5.89），時間 5.6 倍。
   - D1 每輪篩選後 dcss 只剩 3–4 個，少於 elite（4），9a 一直使用 csgm1，沒有用到 csgm2；B0 也只在第 1 輪做過 9a（csgm1）。
+  - 1.123 的步驟 5（2B6N，`rotStep` 15、`maxRound` 5）：MobM dcss 每輪移除 0／1／0／11／6 個（1.121 為 0／0／1／0），dcss 16 → 32（第 2 輪有移除，不加倍）→ 64；第 1 名與 1.121 相同（−13.227）。
   - 1.121 的步驟 6（2B6N，`rotStep` 15、`maxRound` 4，其餘同 B0）：dcss 16 → 32 → 64，第 3 輪起 9a 使用 csgm2；以 `memory.hostLimit` 420 MiB 測試上限：16 → 32 → 48，第 4 輪已達上限而停止並執行 9d，接續時直接進行 9d。
 - 結論：
   - 以 od_0100 的權重搜尋（W0）不改善排序，`energy.searchWeights` 預設維持 `none`。
@@ -3513,3 +3516,4 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
 | 1.120 | 2026-10-29 | 寡肽取樣分析（17.3.3）；`dock9c.dcssTopNum`：dcss 篩選的 `E_top_max` 只取 topSampleSet 的前 n 個，修正 topSampleNum 大時第 2 輪後停滯（9）；`energy.searchWeights`：9a／9b 能量以 od_0100 係數加權（8.6，預設 `none`） |
 | 1.121 | 2026-10-29 | 移除 `dock9c.dcssTopNum`；9 節步驟 6：dcss 沒有移除時大小加倍（StaM 群與各 MobM），連帶參數重算，以主機記憶體估計上限，達上限時警告並停止之後的輪次（照常寫出檢查點與 9d）；每輪各階段的時間、記憶體與數量輸出；檢查點格式 2（16.3） |
 | 1.122 | 2026-10-29 | `memory.hostLimit`：用途加上 dcss 大小上限、`auto` 取值時間、多個行程同時執行時的注意事項（13） |
+| 1.123 | 2026-10-29 | 9 節步驟 5：dcss 篩選改為移除在 topSampleSet 中沒有樣本的構型（StaM 與 MobM），包含對接樣本都被多樣性篩選跳過的構型；本輪最低能量只作為 csgm2 適應度（7.6、8.6） |
