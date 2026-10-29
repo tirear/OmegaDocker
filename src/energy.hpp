@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #pragma once
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -28,7 +29,12 @@ struct EnergyParams {
   double clashBase = 10000.0;
   double clashK = 1000.0;
   double closureG = 200.0;
+  // Weights of vdw, hbond, elec, desolv already applied to coeffs (energy.searchWeights); all 1 otherwise.
+  std::array<double, 4> weights{1, 1, 1, 1};
 };
+
+// coeffs.vdW, .hb, .elec, .desolv multiplied by w (recorded in weights).
+EnergyParams weighted(EnergyParams p, const std::array<double, 4>& w);
 
 struct EnergyTerms {
   double vdw = 0, hbond = 0, elec = 0, desolv = 0;
@@ -90,6 +96,9 @@ class EnergySystem {
   // anglesDeg: absolute angles of the tree torsions of all parts, in part
   // order. gradient (optional): dE/dangle of total() in kcal/mol/rad.
   // external (optional): its gradient enters the torsion gradient, its energy goes to EnergyTerms::external.
+  // The vdw, hbond, elec, desolv terms of an evaluation without the weights of EnergyParams::weights.
+  EnergyTerms unweighted(EnergyTerms t) const;
+  const EnergyParams& params() const { return params_; }
   EnergyTerms evaluate(std::span<const double> anglesDeg, std::vector<double>* gradient = nullptr,
                        std::vector<Vec3>* coords = nullptr, const ExternalTerm* external = nullptr) const;
   // Single precision (9b, spec 8.6): coordinates and per-pair terms in float;

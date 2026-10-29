@@ -223,9 +223,11 @@ TEST_CASE("cli: errors") {
   o.boxSize = od::Vec3{10, 0, 10};
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.boxSize = od::Vec3{10, 10, 10};
-  auto r = parse({"--dock9c_maxRound=3", "--dock9c_topSampleNum=20", "--dock9c_diversityRmsd=0"});
+  auto r = parse({"--dock9c_maxRound=3", "--dock9c_topSampleNum=20", "--dock9c_diversityRmsd=0", "--dock9c_dcssTopNum=4"});
   CHECK(r.maxRound == 3);
   CHECK(r.topSampleNum == 20);
+  CHECK(r.dcssTopNum == 4);
+  CHECK_FALSE(o.dcssTopNum);
   CHECK(r.diversityRmsd == 0);
   o.maxRound = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
@@ -233,6 +235,9 @@ TEST_CASE("cli: errors") {
   o.topSampleNum = 0;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.topSampleNum.reset();
+  o.dcssTopNum = 0;
+  CHECK_THROWS_AS(od::validateOptions(o), od::Error);
+  o.dcssTopNum.reset();
   o.diversityRmsd = -1;
   CHECK_THROWS_AS(od::validateOptions(o), od::Error);
   o.diversityRmsd = 2;
@@ -365,6 +370,15 @@ TEST_CASE("cli: 9a sample numbers and minimization") {
   CHECK(gm.gridMode == "flexres");
   CHECK(gm.gridDeltaThreshold == doctest::Approx(0.01));
   CHECK_THROWS_AS(parse({"--grid_mode=partial"}), od::Error);
+  CHECK(rc.searchWeights == "none");
+  CHECK(parse({"--energy_searchWeights=od_0100"}).searchWeights == "od_0100");
+  CHECK_THROWS_AS(parse({"--energy_searchWeights=ad4"}), od::Error);
+  auto sw = parse({"--stamFile=r.cif", "--dock9b_posm=posm1", "--mobmFiles=a.sdf", "--box_center=0,0,0",
+                   "--box_size=20,20,20", "--outPrefix=out"});
+  sw.fe.intra[1] = 0;
+  CHECK_NOTHROW(od::validateOptions(sw));
+  sw.searchWeights = "od_0100";
+  CHECK_THROWS_AS(od::validateOptions(sw), od::Error);
   rc.stamCsgm.rcdClashWeight = 0;
   CHECK_THROWS_AS(od::validateOptions(rc), od::Error);
   auto ga = parse({"--stam_tournamentRate=70", "--mobm_crossoverRate=50", "--mobm_mutationRate=5", "--mobm_absMaxDang=45",

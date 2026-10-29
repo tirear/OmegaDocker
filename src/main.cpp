@@ -262,6 +262,13 @@ od::EnergyParams energyParams(const od::Options& opt) {
   return p;
 }
 
+// 9a / 9b energies (energy.searchWeights): od_0100.inter.* for the 9b grids, od_0100.intra.* otherwise.
+od::EnergyParams searchParams(const od::Options& opt, bool inter) {
+  const od::EnergyParams p = energyParams(opt);
+  if (opt.searchWeights != "od_0100") return p;
+  return od::weighted(p, inter ? opt.fe.inter : opt.fe.intra);
+}
+
 // 9a energy of the input conformation (spec 7.9).
 void logRingConformers(const od::Molecule& m, const od::RingConformers& rc) {
   if (rc.systems.empty()) return;
@@ -349,7 +356,7 @@ class ConfSet {
           const od::MolConfig& cfg, const od::Options& opt, od::SampleSet set, std::uint64_t seed, std::uint64_t stream,
           bool gpu, const std::optional<std::vector<std::vector<od::ProtonationOverride>>>& prot = std::nullopt)
       : name_(std::move(name)), parts_(std::move(parts)), settings_(std::move(settings)), opt_(opt),
-        csgm_(set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm), sys_(parts_, energyParams(opt)) {
+        csgm_(set == od::SampleSet::StaM ? opt.stamCsgm : opt.mobmCsgm), sys_(parts_, searchParams(opt, false)) {
     for (const auto& n : sys_.ringNotes()) od::logInfo(std::format("  {:<40} ring conformers not used: {}", name_, n));
     if (sys_.ringSlotCount() > 0) {
       std::string k;
@@ -357,7 +364,7 @@ class ConfSet {
       od::logInfo(std::format("  {:<40} {} ring conformer variable(s), conformers: {}", name_, sys_.ringSlotCount(), k));
     }
     if (opt.protonationRecompute != "none" && prot) {
-      prot_ = std::make_unique<od::ProtonationVariants>(sys_, parts_, *prot, energyParams(opt));
+      prot_ = std::make_unique<od::ProtonationVariants>(sys_, parts_, *prot, searchParams(opt, false));
       int n = 0, locked = 0;
       for (std::size_t k = 0; k < prot_->partCount(); ++k)
         for (const auto& s : prot_->sites(static_cast<int>(k))) {
@@ -760,6 +767,7 @@ od::Dock9bParams dockParams(const od::Options& opt, std::uint64_t seed) {
   dp.sepaShellMax = opt.sepaShellMax;
   dp.sepaPotPercentile = opt.sepaPotPercentile;
   dp.sepaPotThreshold = opt.sepaPotThreshold;
+  dp.elecWeight = searchParams(opt, true).weights[2];
   dp.sepaChargeThreshold = opt.sepaChargeThreshold;
   dp.sepaDistTolerance = opt.sepaDistTolerance;
   dp.sepaPosStep = opt.sepaPosStep;
@@ -799,6 +807,7 @@ struct MobState {
   std::unordered_map<int, float> stamLowest, mobLowest;  // dcss sample -> lowest ranking energy of the last round (csgm2 fitness)
   std::vector<od::RoundSample> top;
   int topNum = 0;
+  int dcssTopNum = 0;         // E_top_max of the dcss filtering from the first dcssTopNum samples of top
   std::size_t bufferNum = 0;  // sampleBufferNum
   std::unique_ptr<od::MobmHeavyAtoms> heavy;
   std::unique_ptr<od::SymmetryRmsd> sym;
@@ -1045,7 +1054,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
   // Energy alone (9a terms) of a conformation with the system of a protonation variant.
   const auto aloneEnergy = [](const std::vector<float>& angles) {
     return [&angles](const od::EnergySystem& sys, const std::vector<od::EnergyPart>&) {
-      return sys.evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr).filterEnergy();
+      return sys.unweighted(sys.evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr)).filterEnergy();
     };
   };
   // A sample alone: l2, its variant; final, from PROPKA of the set alone (neutral His: the tautomer
@@ -1074,7 +1083,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
     const od::EnergySystem& sys = set.sysOf(ps.variant);
     a.x = sys.coordinates(angles);
     a.atoms = od::shakeAtoms(sys, set.partsOf(ps.variant), a.x);
-    a.terms = sys.evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr);
+    a.terms = sys.unweighted(sys.evaluate(std::span<const float>(angles), nullptr, nullptr, nullptr));
     if (shake) {
       a.lnF = lnF(a.atoms);
       a.sumLnF = std::accumulate(a.lnF.begin(), a.lnF.end(), 0.0);
@@ -1163,7 +1172,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
               flips += stamSet.prot()->chooseTautomers(cs, [&](const od::EnergySystem& sys, const std::vector<od::EnergyPart>& parts) {
                 const auto x = sys.coordinates(std::span<const float>(ss.angles));
                 const od::InterTerms it = od::exactInter(od::shakeAtoms(sys, parts, x), ma, ep);
-                return sys.evaluate(std::span<const float>(ss.angles), nullptr, nullptr, nullptr).filterEnergy() + it.inter() + it.clash;
+                return sys.unweighted(sys.evaluate(std::span<const float>(ss.angles), nullptr, nullptr, nullptr)).filterEnergy() + it.inter() + it.clash;
               });
             if (stamSet.prot()) {
               const od::EnergySystem& sys = stamSet.prot()->sysOf(cs);
@@ -1173,7 +1182,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
               flips += mob.prot()->chooseTautomers(cm, [&](const od::EnergySystem& sys, const std::vector<od::EnergyPart>& parts) {
                 const auto x = od::dockWorld(sys.coordinates(std::span<const float>(r.s.angles)), r.s);
                 const od::InterTerms it = od::exactInter(sa, od::shakeAtoms(sys, parts, x), ep);
-                return sys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr).filterEnergy() + it.inter() + it.clash;
+                return sys.unweighted(sys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr)).filterEnergy() + it.inter() + it.clash;
               });
             if (mob.prot()) {
               const od::EnergySystem& sys = mob.prot()->sysOf(cm);
@@ -1194,7 +1203,7 @@ void run9d(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets, con
       w.world = od::dockWorld(y, r.s);
       if (!ms[i].ref.empty()) w.rmsdRef = refRmsd(ms[i], ms[i].heavy->world(r.s));
       const od::ShakeAtoms mobAtoms = od::shakeAtoms(msys, mob.partsOf(pm.variant), w.world);
-      const od::EnergyTerms mt = msys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr);
+      const od::EnergyTerms mt = msys.unweighted(msys.evaluate(std::span<const float>(r.s.angles), nullptr, nullptr, nullptr));
       const od::InterTerms it = od::exactInter(st.atoms, mobAtoms, ep);
       w.inter = it.inter();
       w.interClash = it.clash;
@@ -1517,7 +1526,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                                    opt.posm == "posm3" || opt.posm == "posm4" ? opt.sepaShellMax : 0.0}) +
                          2 * opt.gridSpacing;
   std::function<od::EnergyGrids(const od::GridAtoms&)> energyGrids = [&](const od::GridAtoms& a) {
-    return od::buildEnergyGrids(geom, a, probe, energyParams(opt));
+    return od::buildEnergyGrids(geom, a, probe, searchParams(opt, true));
   };
   std::function<od::DistanceGrid(const od::GridAtoms&)> distanceGrid = [&](const od::GridAtoms& a) {
     return od::buildDistanceGrid(geom, a, distCap);
@@ -1551,7 +1560,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
       return g;
     };
     energyGrids = [&](const od::GridAtoms& a) {
-      const od::GridBuildData b(geom, a, probe, energyParams(opt));
+      const od::GridBuildData b(geom, a, probe, searchParams(opt, true));
       od::EnergyGrids g;
       g.geom = geom;
       g.types = b.types;
@@ -1695,6 +1704,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   std::vector<MobState> ms(mobSets.size());
   for (std::size_t i = 0; i < ms.size(); ++i) {
     ms[i].topNum = opt.topSampleNum ? *opt.topSampleNum : stamSet.eliteNum() * mobSets[i]->eliteNum();
+    ms[i].dcssTopNum = std::min(ms[i].topNum, opt.dcssTopNum ? *opt.dcssTopNum : stamSet.eliteNum() * mobSets[i]->eliteNum());
     ms[i].heavy = std::make_unique<od::MobmHeavyAtoms>(mobSets[i]->sys());
     ms[i].bufferNum = std::max<std::size_t>(opt.sampleBufferNum, static_cast<std::size_t>(std::max(4, od::midTopSampleFactor(opt) + 2)) *
                                                                        static_cast<std::size_t>(ms[i].topNum));
@@ -1703,8 +1713,8 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
                                                    static_cast<std::size_t>(opt.symMaxPerm));
     const double symSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
     if (!refs.empty()) setReference(ms[i], *mobSets[i], refs[i], opt);
-    od::logInfo(std::format("  {:<40} topSampleNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
-                            mobSets[i]->name(), ms[i].topNum, ms[i].bufferNum,
+    od::logInfo(std::format("  {:<40} topSampleNum {}  dcssTopNum {}  sampleBufferNum {}  9d symmetry: {} ({:.3f} s)",
+                            mobSets[i]->name(), ms[i].topNum, ms[i].dcssTopNum, ms[i].bufferNum,
                             ms[i].sym->usesPermutations()
                                 ? std::format("{} automorphism(s)", ms[i].sym->permutationCount())
                                 : std::format("more than {} automorphisms, one-to-one pairing within each AD4 type",
@@ -2070,7 +2080,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
     const auto submitDelta = [&](int sid) {
       const od::GridAtoms a = stamAtomsOf(sid, false);
       const std::vector<od::Vec3> changed = deltaChanged(sid, a);
-      const od::GridBuildData gb(geom, a, probe, energyParams(opt));
+      const od::GridBuildData gb(geom, a, probe, searchParams(opt, true));
       const od::DistBuildData db(geom, a, distCap);
       deltaSid[curDev] = sid;
       for (auto* b : [&] {
@@ -2108,7 +2118,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(od::subset(stamAtoms(true), movedMask, false));
         od::GridAtoms moved = od::subset(stamAtoms(false), movedMask, true);
         movedSum += static_cast<long long>(moved.size());
-        field = od::StamField::flexres(fixedGrids, fixedDist, std::move(moved), energyParams(opt));
+        field = od::StamField::flexres(fixedGrids, fixedDist, std::move(moved), searchParams(opt, true));
       } else if (!stamSet.movable()) {
         if (!fixedGrids) std::tie(fixedGrids, fixedDist) = build(stamAtoms(true));
         field = od::StamField::full(fixedGrids, fixedDist);
@@ -2163,7 +2173,7 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         if (gpuGrid && !deltaHostData) {
           // Built on the device of the window and kept there (spec 15.1.34).
           const od::GridAtoms a = stamAtoms(false);
-          const od::GridBuildData gb(geom, a, probe, energyParams(opt));
+          const od::GridBuildData gb(geom, a, probe, searchParams(opt, true));
           auto g = std::make_shared<od::EnergyGrids>();
           g->geom = geom;
           g->types = gb.types;
@@ -2385,13 +2395,15 @@ void runRounds(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
         }
       select(i, true);
       const float eTop = od::topMaxEnergy(m.top);
-      const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eTop) : 0;
-      const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eTop) : 0;
+      const float eDcss = od::topMaxEnergy(m.top, static_cast<std::size_t>(m.dcssTopNum));
+      const int rmStam = stamSet.movable() ? od::filterDcss(m.stamDcss, stamLowest, eDcss) : 0;
+      const int rmMob = mobSets[i]->movable() ? od::filterDcss(m.mobDcss, mobLowest, eDcss) : 0;
       m.stamLowest = std::move(stamLowest);
       m.mobLowest = std::move(mobLowest);
-      od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f}  dcss removed: StaM {}, MobM {}  "
+      od::logInfo(std::format("  9c {:<37} topSampleSet {}/{}  E_top_max {:.3f} (first {})  dcss removed: StaM {}, MobM {}  "
                               "9c runs {}  {:.2f} s",
-                              mobSets[i]->name(), m.top.size(), m.topNum, eTop + shift, rmStam, rmMob, partial[i] + 1,
+                              mobSets[i]->name(), m.top.size(), m.topNum, eDcss + shift,
+                              std::min<std::size_t>(m.top.size(), static_cast<std::size_t>(m.dcssTopNum)), rmStam, rmMob, partial[i] + 1,
                               selectSec[i]));
       if (opt.midKeepSkipped) {
         const bool same = std::isinf(droppedMin[i]) ||
@@ -2760,7 +2772,7 @@ void runScore(ConfSet& stamSet, std::vector<std::unique_ptr<ConfSet>>& mobSets,
   const od::GridAtoms ga = od::gridAtoms(stamSet.sys(), stamSet.parts(), x);
   const double distCap = std::max(opt.maxNearDistance, opt.clashDistance) + 2 * opt.gridSpacing;
   const od::StamField field =
-      od::StamField::full(std::make_shared<od::EnergyGrids>(od::buildEnergyGrids(geom, ga, probe, energyParams(opt))),
+      od::StamField::full(std::make_shared<od::EnergyGrids>(od::buildEnergyGrids(geom, ga, probe, searchParams(opt, true))),
                           std::make_shared<od::DistanceGrid>(od::buildDistanceGrid(geom, ga, distCap)));
   od::logInfo(std::format("{}: 9b grid of the input StaM conformation, {} x {} x {} points, spacing {} Å ({:.2f} s)",
                           opt.runMode, geom.n[0], geom.n[1], geom.n[2], geom.spacing,

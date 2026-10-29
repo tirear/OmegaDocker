@@ -71,9 +71,10 @@ std::vector<RoundSample> symmetryFilter(std::vector<RoundSample> top, const Mobm
 // energy of the topSampleSet; -inf when it is empty. Returns the number removed.
 int filterDcss(std::vector<int>& dcss, const std::unordered_map<int, float>& lowest, float eTopMax);
 
-inline float topMaxEnergy(const std::vector<RoundSample>& top) {
+// n: only the first n samples (all when the set is smaller).
+inline float topMaxEnergy(const std::vector<RoundSample>& top, std::size_t n = std::numeric_limits<std::size_t>::max()) {
   float e = -std::numeric_limits<float>::infinity();
-  for (const auto& t : top) e = std::max(e, t.rank());
+  for (std::size_t k = 0; k < top.size() && k < n; ++k) e = std::max(e, top[k].rank());
   return e;
 }
 

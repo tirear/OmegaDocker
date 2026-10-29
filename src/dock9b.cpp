@@ -307,7 +307,8 @@ std::vector<StamSepa> stamSepas(const StamField& field, const Dock9bParams& p, S
         const std::size_t i = g.index(x, y, z);
         shell[i] = 1;
         // Potential = energy per unit charge: (E(q = 1) - E(q = -1)) / 2 (spec 8.1).
-        phi[i] = static_cast<float>(0.5 * (field.energy<double>(m0, 1.0, pt, nullptr) - field.energy<double>(m0, -1.0, pt, nullptr)));
+        phi[i] = static_cast<float>(0.5 * (field.energy<double>(m0, 1.0, pt, nullptr) - field.energy<double>(m0, -1.0, pt, nullptr)) /
+                                    p.elecWeight);
       }
   std::vector<float> mags;
   for (std::size_t i = 0; i < n; ++i)

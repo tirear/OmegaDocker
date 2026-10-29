@@ -502,6 +502,15 @@ const std::vector<Param>& params() {
                    return Tokens{fmtReal(o.reachProtein), fmtReal(o.reachNucleic)};
                  }});
 
+    t.push_back({"energy.searchWeights", Type::Str, "none|od_0100", "none",
+                 "9a / 9b energy: none (AD4 terms as they are) or od_0100 (each AD4 term times od_0100.intra.* in 9a and "
+                 "the MobM intramolecular energy, od_0100.inter.* in the 9b grids)",
+                 [](Options& o, const Tokens& v) {
+                   const std::string& s = one(v);
+                   if (s != "none" && s != "od_0100") fail("expected none or od_0100 but got '{}'", s);
+                   o.searchWeights = s;
+                 },
+                 [](const Options& o) -> std::optional<Tokens> { return Tokens{o.searchWeights}; }});
     t.push_back(real("energy.closureG", "<k>", "200", "Closure constraint stiffness G (kcal/mol/Å²)", OD_ACC(closureG)));
     t.push_back(real("energy.clashDistance", "<dist>", "1.8", "Heavy-atom pairs closer than this clash (Å)", OD_ACC(clashDistance)));
     t.push_back(real("energy.Emax", "<E>", "1000", "9a: conformations with energy below this enter the L2 pool (kcal/mol)",
@@ -607,6 +616,10 @@ const std::vector<Param>& params() {
     t.push_back(integer("dock9c.maxRound", "<n>", "10", "Number of 9a-9c rounds", OD_ACC(maxRound)));
     t.push_back(integer("dock9c.topSampleNum", "<n>", "eliteStaM x eliteMobM", "9c: size of the topSampleSet of each MobM",
                         OD_ACC(topSampleNum)));
+    t.push_back(integer("dock9c.dcssTopNum", "<n>", "eliteStaM x eliteMobM",
+                        "9c: dcss filtering compares with E_top_max, the highest energy of the first n samples of the "
+                        "topSampleSet (at most topSampleNum)",
+                        OD_ACC(dcssTopNum)));
     t.push_back(real("dock9c.diversityRmsd", "<dist>", "2.0",
                      "9c: samples with the same StaM conformation closer than this RMSD to a kept sample are skipped (Å; 0 disables)",
                      OD_ACC(diversityRmsd)));
@@ -982,6 +995,11 @@ void validateOptions(const Options& o) {
   check(o.maxBreakDist > 0, "topology.maxBreakDist", "> 0");
   check(o.reachProtein > 0 && o.reachNucleic > 0, "topology.reachPerRes", "> 0 (both values)");
   check(o.closureG > 0, "energy.closureG", "> 0");
+  if (o.searchWeights == "od_0100")
+    for (int k = 0; k < FeParams::kTerms; ++k) {
+      check(o.fe.inter[k] > 0, std::format("od_0100.inter.{}", kFeTermNames[k]), "> 0 with energy.searchWeights = od_0100");
+      check(o.fe.intra[k] > 0, std::format("od_0100.intra.{}", kFeTermNames[k]), "> 0 with energy.searchWeights = od_0100");
+    }
   check(o.clashDistance > 0, "energy.clashDistance", "> 0");
   check(o.protonationPH >= 0 && o.protonationPH <= 14, "protonation.pH", "in [0, 14]");
   check(o.Kclash >= 0, "energy.Kclash", ">= 0");
@@ -1022,6 +1040,7 @@ void validateOptions(const Options& o) {
   check(o.maxAngleStep > 0, "dock9b.maxAngleStep", "> 0");
   check(o.maxRound >= 1, "dock9c.maxRound", ">= 1");
   check(!o.topSampleNum || *o.topSampleNum >= 1, "dock9c.topSampleNum", ">= 1");
+  check(!o.dcssTopNum || *o.dcssTopNum >= 1, "dock9c.dcssTopNum", ">= 1");
   check(o.diversityRmsd >= 0, "dock9c.diversityRmsd", ">= 0");
   check(o.sampleBufferNum >= 1, "dock9c.sampleBufferNum", ">= 1");
   check(!o.midTopSampleFactor || *o.midTopSampleFactor >= 1, "dock9c.midTopSampleFactor", ">= 1");

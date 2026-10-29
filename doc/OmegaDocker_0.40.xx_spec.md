@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.119 |
+| 文件版本 | 1.120 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1450,6 +1450,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 - 能量：分子間（8.1）+ StaM–MobM 碰撞懲罰 + MobM 分子內（含 MobM 碰撞懲罰）+ 斷鍵約束；StaM 分子內能量在 9b 為常數，不計入。
   - StaM–MobM 碰撞懲罰：MobM 每個重原子以距離網格內插得 d，d < `clashDistance` 時加 `E_clashBase + K_clash·(clashDistance − d)²`（7.9 的形式，以原子計，不以原子對計）。
   - 對接樣本的能量（9b 能量）= 上述總和扣除斷鍵約束（4.5）。9c 的排序能量另加 StaM 項（第 9 節）。
+  - `energy.searchWeights = od_0100`（預設 `none`）：9b 網格的 vdw、hbond、elec、desolv 各乘 `od_0100.inter.*`，9a 與 MobM 分子內能量各乘 `od_0100.intra.*`（碰撞懲罰與斷鍵約束不變；`Emax` 比較加權後的能量）；9b 能量、9c 排序與 9d 的 `E_9b` 因此改變，9d 的分項與 od_0100 仍以未加權的 AD4 項計算。posm3／posm4 的靜電位除以 elec 的權重。目的與結果見 17.3.3。
 - 停止條件（任一成立）：
   1. 步數達 `dockMinMaxStep`（預設 1000）。
   2. 連續 `dockMinConvSteps`（預設 10）步 `|ΔE| < dockMinDeltaE`（預設 1×10⁻³ kcal/mol）。
@@ -1573,7 +1574,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
    - StaM 無可動兩面角時，StaM 的 elite 視為 1；MobM 無可動兩面角時，該 MobM 的 elite 視為 1。
    - 保存：StaM 構型、MobM 構型、位置、定向、最佳化後兩面角、能量。
 5. **篩選 dcss**：
-   - `E_top_max` = topSampleSet 中的最高能量。
+   - `E_top_max` = topSampleSet 前 `dock9c.dcssTopNum` 個樣本中的最高能量（預設 eliteStaM × eliteMobM，最多 topSampleNum；topSampleSet 較少時用全部）。1.119 以前為整個 topSampleSet 的最高能量：topSampleNum 遠大於 dcss 時（例如 Stage A 的 500），每個 dcss 樣本幾乎都有對接樣本進入 topSampleSet，第 2 輪之後 dcss 不再更換，之後各輪沒有新的構型（17.3.3）。預設的 topSampleNum 下兩者相同。
    - MobM dcss 與 StaM dcss 中，本輪最低能量 > `E_top_max` 的樣本移除。
    - 樣本的「本輪最低能量」：該樣本與本輪 dcss 中所有配對對象的構型配對中，對接樣本的最低排序能量；不重做的配對（決定性 posm）使用先前記錄的值。
    - 本輪沒有任何對接樣本的樣本（所有配對的 pos 都被移除），本輪最低能量記為 +∞，因此一律移除；topSampleSet 為空時，dcss 全部移除。
@@ -1899,6 +1900,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `topology.maxBreakDist` | `--topology_maxBreakDist` | 0.5 Å | 4.8 |
 | `topology.reachPerRes` | `--topology_reachPerRes` | `[3.8, 7.0]`（蛋白質, 核酸；Å） | 4.8 |
 | `energy.closureG` | `--energy_closureG` | 200 | 4.5 |
+| `energy.searchWeights` | `--energy_searchWeights` | `none`（`none`／`od_0100`） | 8.6、17.3.3 |
 | `energy.clashDistance` | `--energy_clashDistance` | 1.8 Å | 7.9 |
 | `energy.Emax` | `--energy_Emax` | 1000 kcal/mol | 7.9 |
 | `energy.EclashBase` | `--energy_EclashBase` | 10000 kcal/mol | 7.9 |
@@ -1975,6 +1977,7 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 | `dock9b.maxAngleStep` | `--dock9b_maxAngleStep` | 10° | 12 |
 | `dock9c.maxRound` | `--dock9c_maxRound` | 10 | 10 |
 | `dock9c.topSampleNum` | `--dock9c_topSampleNum` | eliteStaM × eliteMobM | 9 |
+| `dock9c.dcssTopNum` | `--dock9c_dcssTopNum` | eliteStaM × eliteMobM（最多 topSampleNum） | 9 |
 | `dock9c.diversityRmsd` | `--dock9c_diversityRmsd` | 2.0 Å | 9 |
 | `dock9c.sampleBufferNum` | `--dock9c_sampleBufferNum` | 65536（至少 max(4, `midTopSampleFactor` + 2) × `topSampleNum`） | 9 |
 | `dock9c.midTopSampleFactor` | `--dock9c_midTopSampleFactor` | 1（`midKeepSkipped` 為 true 時 2） | 9 |
@@ -3309,6 +3312,29 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 - 1.119 重跑後（1,746 個）：模型 2 交叉驗證 r 0.458、ρ 0.474、RMSE 2.42；c0 −4.729、c_tors 0.004、α 0.262，與上述差異小於擬合的不確定性，預設值不變。`fit_affinity.py` 改為所有複合物使用同一組參考係數（第一個複合物的 `params.used.toml` 或 `--ref`；執行時係數必須與參考平行，即排序相同），以便混用 1.117 與 1.118 預設執行的結果。
 - 參數檔：`datasetForDockingParaOpti/work/stageA/od0100_H0_fit.toml`（1.119 重跑後的擬合，取小數 3 位）。
 
+#### 17.3.3 寡肽取樣（1.120）
+
+LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；設定同 Stage A（`posm2_fft`、`mobm.dockingConfSampleNum` 16、10 輪、`topSampleNum` 500、`seed` 1），對接池（500 個）以 1.118 的 od_0100 係數重新排序。依 MobM 可轉動兩面角數分 3 組：≤ 12（12 個）、13–24（20 個）、≥ 25（21 個）。
+
+- 失敗原因（B0，以 1.118 係數）：成功 6、排序 16、精修 4、取樣 27。≤ 12 組全部取到近原生姿態，失敗都是排序；≥ 25 組沒有一個取到，對接池中主鏈 RMSD 最低 3.2–12 Å。
+  - 只比形狀（主鏈疊合後的 RMSD）：≥ 25 組最低多為 2–3.8 Å，放置後 3.2–12 Å，構型與放置都不足。
+  - 排序失敗時，晶體姿態局部最小化後比最佳誘餌高約 0.5 kcal/mol（od_0100），主要差在分子間 vdw 與 hbond（晶體姿態的 vdw 較低，但乘上係數後被其他項抵銷）；取樣失敗時晶體姿態平均低 2.1 kcal/mol，即取到就能排在前面。
+- 停滯（9 節步驟 5）：`topSampleNum` 500 時 dcss 第 2 輪之後不再更換（例如 2B9H 第 3–10 輪沒有對接；Astex 抽查 39 個，第 3 輪起都沒有更換）。Stage A 的 Astex 與 LEADS-PEP 結果（17.3.1）都在此情況下取得；HiQBind 只做 localMin，不受影響。1.120 起以 `dock9c.dcssTopNum` 計算 `E_top_max`。
+- 測試（各組「取到／第 1 名／前 10 名」；時間為 13–24 組相對 B0）：
+
+  | 設定 | ≤ 12 | 13–24 | 時間 |
+  |---|---|---|---|
+  | B0 | 11／5／10 | 9／1／4 | 1 |
+  | W0：`energy.searchWeights = od_0100` | 12／4／9 | 12／1／2 | 約 0.8 |
+  | C1：`mobm.dockingConfSampleNum` 64 | — | 13／4／5 | 約 4.4 |
+  | D1：1.120 的 `dcssTopNum`（各輪都更換 dcss） | 11／5／9 | 10／3／6 | 約 5.5 |
+
+  - ≥ 25 組：W0 沒有改善（0／0／0）；D1 只測 2B9H（12 個殘基，50 個兩面角），主鏈最低 6.19 Å（B0 5.89），時間 5.6 倍。
+- 結論：
+  - 以 od_0100 的權重搜尋（W0）不改善排序，`energy.searchWeights` 預設維持 `none`。
+  - 13–24 組增加構型數（C1）或讓各輪持續更換構型（D1）都有幫助，但時間增為 4–6 倍。
+  - ≥ 25 組的取樣需要新的方法（例如以片段或錨點逐段對接），現有參數無法補足。
+
 ### 17.4 已知問題
 
 以下問題與鍵長、鍵角無法最佳化有關，0.40.x 不處理。
@@ -3464,3 +3490,4 @@ AMD Ryzen 7 9700X（16 執行緒）、NVIDIA TITAN V × 2。例子 A、RB4 同 1
 | 1.117 | 2026-10-28 | od_0100 的 `inter.*`、`intra.*`、`entropy.*` 預設值改為 17.3.1 的擬合值；寡肽另外擬合的測試（17.3.1） |
 | 1.118 | 2026-10-28 | od_0100 的 c0、tors 與共同倍數以 HiQBind 子集的結合親和力擬合並設為預設（10.2、17.3.2）；同一殘基內有多個主鏈單元時以 `unit` 識別，修正類肽配體的預設分子設定檔無法讀回（5.2）；已知問題 K3 |
 | 1.119 | 2026-10-28 | mmCIF 讀取與質子化：`covale` 連接取代離去原子時沿用其鍵級（Schiff 鹼）；共價連接的標準胺基酸側鏈原子改由 pKa 規則決定；芳香陰離子 N（四唑）；給定電荷時接受 C／O 價數 3；CCD 中與金屬成鍵的原子沿用 CCD 的氫數（血基質 N 不再帶氫）；As 價數同 P；環不完整的錯誤訊息（3.1、3.4、K3） |
+| 1.120 | 2026-10-29 | 寡肽取樣分析（17.3.3）；`dock9c.dcssTopNum`：dcss 篩選的 `E_top_max` 只取 topSampleSet 的前 n 個，修正 topSampleNum 大時第 2 輪後停滯（9）；`energy.searchWeights`：9a／9b 能量以 od_0100 係數加權（8.6，預設 `none`） |

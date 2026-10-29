@@ -61,6 +61,23 @@ bool intersect(const std::vector<int>& a, const std::vector<int>& b) {
 
 }  // namespace
 
+EnergyParams weighted(EnergyParams p, const std::array<double, 4>& w) {
+  p.coeffs.vdW *= w[0];
+  p.coeffs.hb *= w[1];
+  p.coeffs.elec *= w[2];
+  p.coeffs.desolv *= w[3];
+  for (int k = 0; k < 4; ++k) p.weights[k] *= w[k];
+  return p;
+}
+
+EnergyTerms EnergySystem::unweighted(EnergyTerms t) const {
+  t.vdw /= params_.weights[0];
+  t.hbond /= params_.weights[1];
+  t.elec /= params_.weights[2];
+  t.desolv /= params_.weights[3];
+  return t;
+}
+
 EnergySystem::EnergySystem(std::vector<EnergyPart> parts, const EnergyParams& params)
     : parts_(std::move(parts)), params_(params) {
   constexpr int kTypes = static_cast<int>(Ad4Type::Count);

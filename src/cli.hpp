@@ -91,6 +91,7 @@ struct Options {
   bool stamFixedResMovable = false;
   double maxBreakDist = 0.5;
   double closureG = 200.0;
+  std::string searchWeights = "none";  // none | od_0100: AD4 terms of 9a / 9b weighted by od_0100.intra / .inter
   double reachProtein = 3.8;  // topology.reachPerRes = [protein, nucleic]
   double reachNucleic = 7.0;
   double clashDistance = 1.8;
@@ -144,6 +145,7 @@ struct Options {
   double maxAngleStep = 10.0;
   int maxRound = 10;
   std::optional<int> topSampleNum;  // default: eliteStaM x eliteMobM (spec 9)
+  std::optional<int> dcssTopNum;    // E_top_max from the first n of the topSampleSet; default: eliteStaM x eliteMobM
   double diversityRmsd = 2.0;
   int sampleBufferNum = 65536;
   std::optional<int> midTopSampleFactor;  // default: 2 with midKeepSkipped, otherwise 1 (spec 9)

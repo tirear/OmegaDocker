@@ -1327,6 +1327,34 @@ TEST_CASE("energy: pairs, gradient and clash (1L2Y)") {
   CHECK(found);
 }
 
+TEST_CASE("energy: weighted terms (energy.searchWeights, 1L2Y)") {
+  ConfigFixture f;
+  std::ofstream(f.path) << od::defaultMolConfigText(f.inputs);
+  std::vector<std::string> errors;
+  auto cfg = od::readMolConfig(f.path, f.inputs, {}, errors);
+  REQUIRE(cfg);
+  const od::Molecule& m = f.mols[0];
+  const od::TorsionTree& tree = cfg->molecules[0].tree;
+  const std::array<double, 4> w{0.3, 0.11, 0.17, 0.19};
+  const od::EnergySystem raw({{&m, &tree}}, {});
+  const od::EnergySystem ws({{&m, &tree}}, od::weighted({}, w));
+  od::Rng rng(7, 1, 0);
+  for (int k = 0; k < 5; ++k) {
+    std::vector<double> a = raw.inputAngles();
+    for (double& v : a) v += rng.uniform(-5.0, 5.0);
+    const od::EnergyTerms e = raw.evaluate(a), f2 = ws.evaluate(a);
+    CHECK(f2.vdw == doctest::Approx(w[0] * e.vdw).epsilon(1e-9));
+    CHECK(f2.hbond == doctest::Approx(w[1] * e.hbond).epsilon(1e-9));
+    CHECK(f2.elec == doctest::Approx(w[2] * e.elec).epsilon(1e-9));
+    CHECK(f2.desolv == doctest::Approx(w[3] * e.desolv).epsilon(1e-9));
+    CHECK(f2.clash == doctest::Approx(e.clash));
+    const od::EnergyTerms u = ws.unweighted(f2);
+    CHECK(u.intra() == doctest::Approx(e.intra()).epsilon(1e-9));
+    CHECK(gradientMismatches(ws, a) == gradientMismatches(raw, a));
+  }
+  CHECK(raw.unweighted(raw.evaluate(raw.inputAngles())).intra() == raw.evaluate(raw.inputAngles()).intra());
+}
+
 TEST_CASE("energy: StaM loop closure (2KJJ)") {
   StaFixture f;
   const auto cfg = f.ok(freeResidues(f.text, "A", 10, 14));
@@ -4739,6 +4767,9 @@ TEST_CASE("dock9c: RMSD, topSampleSet and dcss filter (2KJJ, 1L2Y)") {
   REQUIRE(top.size() == 5);
   for (int k = 0; k < 5; ++k) CHECK(top[k].s.energy == e[k]);
   CHECK(od::topMaxEnergy(top) == e[4]);
+  CHECK(od::topMaxEnergy(top, 2) == e[1]);
+  CHECK(od::topMaxEnergy(top, 9) == e[4]);
+  CHECK(od::topMaxEnergy({}, 2) == -std::numeric_limits<float>::infinity());
   {
     // Ranking energy includes the StaM term (spec 9): StaM 1 shifted below StaM 0.
     auto shifted = merged;

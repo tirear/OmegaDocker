@@ -38,6 +38,7 @@ struct Dock9bParams {
   double sepaShellMin = 2.5, sepaShellMax = 6.0;  // Å
   double sepaPotPercentile = 5.0;                 // %
   std::optional<double> sepaPotThreshold;         // kcal/mol/e; replaces the percentile
+  double elecWeight = 1;                          // weight in the elec map (energy.searchWeights); divided out of the potential
   double sepaChargeThreshold = 0.3;               // e
   double sepaDistTolerance = 1.0;                 // Å
   double sepaPosStep = 2.0;                       // Å, posm3 translation spacing
