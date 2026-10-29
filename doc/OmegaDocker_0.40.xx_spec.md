@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.121 |
+| 文件版本 | 1.122 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -1838,7 +1838,8 @@ nextL1 = min(nextL1, MaxL1BatchNum)
 ## 13. 記憶體與 CPU 管理
 
 - `gpu.memLimit <MiB>`：預設為啟動時可用 GPU 記憶體的 90%。
-- `memory.hostLimit`（MiB，預設 `auto`）：主機記憶體上限，目前用於 9b 一起最小化的 StaM 構形數（15.1.16）。`auto`：本行程所屬 cgroup 與其上層的最小記憶體上限（cgroup v2 `memory.max`；cgroup v1 memory controller 的 `memory.limit_in_bytes`，SLURM 等工作排程以此限制工作的記憶體）；都沒有上限時為 9b 開始時的常駐記憶體 + `/proc/meminfo` 的 MemAvailable。log 會寫出所用的上限與來源。
+- `memory.hostLimit`（MiB，預設 `auto`）：主機記憶體上限，用於 9b 一起最小化的 StaM 構形數（15.1.16）與 dcss 大小的上限（9 節步驟 6，1.121）。`auto`：本行程所屬 cgroup 與其上層的最小記憶體上限（cgroup v2 `memory.max`；cgroup v1 memory controller 的 `memory.limit_in_bytes`，SLURM 等工作排程以此限制工作的記憶體）；都沒有上限時為第 1 輪開始前（接續時為接續開始時）的常駐記憶體 + `/proc/meminfo` 的 MemAvailable，只取一次。log 會寫出所用的上限與來源。
+  - 上限只針對本行程：同一台主機同時執行多個行程時（例如每個 GPU 各一個），各行程分別計算自己的上限，不考慮其他行程之後增加的記憶體，合計可能超過實體記憶體。`auto` 取值時其他行程已使用的記憶體不計入 MemAvailable，但之後各自增加的部分彼此看不到。需要時以 `memory.hostLimit` 為每個行程指定上限，合計不超過可用的實體記憶體（例如 188 GiB 的主機同時執行 2 個行程時各約 64 GiB）；SLURM 等以 cgroup 限制每個工作時，`auto` 直接取該工作的上限。
 - `cpu.threadNum`（預設 `auto`，1.95）：CPU 執行緒數（OpenMP 與執行緒池）。**可用 CPU 數**：本行程的 affinity mask 中的 CPU 數，以 cgroup 的 CPU 配額為上限。`auto`：`OMP_NUM_THREADS`，沒有時為 affinity mask 的 CPU 數；兩者都以可用 CPU 數為上限（1.96 起 `OMP_NUM_THREADS` 也受 affinity mask 限制）。cgroup 的 CPU 配額（cgroup v2 `cpu.max`；cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`；本行程所屬 cgroup 與其上層的最小值，無條件捨去、至少 1）。執行緒數少於可用 CPU 數時，以 `sched_setaffinity` 把本行程限制在其中 n 個 CPU：先取每個核心的第一個硬體執行緒（依 `thread_siblings_list` 中屬於可用 CPU 者的順序），再取第二個，同順序時依 CPU 編號。指定的執行緒數多於可用 CPU 數時報錯並結束（1.96；1.95 為警告後照樣使用），錯誤寫出可用 CPU 數與其來源，例：`cpu.threadNum 17 is more than the 16 CPU(s) this process may use (affinity mask: 16 CPU(s) 0-15; no cgroup CPU quota)`、`… (affinity mask: 8 CPU(s) 0-7; cgroup CPU quota 3 (/sys/fs/cgroup/cpu.max))`。log 寫出執行緒數、來源與所用的 CPU（例：`CPU threads 8 (cpu.threadNum), CPUs 0-7`）。與 GPU 溝通的主機執行緒（9b 視窗的對接、9a／9b 的 lanes）不計入，大部分時間在等待 GPU。
   - 實測（AMD Ryzen 7 9700X，8 核心 16 執行緒，CPU 版 RB4 posm1、`posm1SampleNum` 10000）：9b 4 執行緒 30.45 s、8 執行緒 16.79 s、16 執行緒 14.65 s；CUDA 版例子 A（2 個 GPU）8 與 16 執行緒相同（9b 10.92、10.93 s）。
 - 所有大量樣本的步驟（9a L1 生成、9b L1poss/L2poss、最佳化）依此上限分批。
@@ -3511,3 +3512,4 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
 | 1.119 | 2026-10-28 | mmCIF 讀取與質子化：`covale` 連接取代離去原子時沿用其鍵級（Schiff 鹼）；共價連接的標準胺基酸側鏈原子改由 pKa 規則決定；芳香陰離子 N（四唑）；給定電荷時接受 C／O 價數 3；CCD 中與金屬成鍵的原子沿用 CCD 的氫數（血基質 N 不再帶氫）；As 價數同 P；環不完整的錯誤訊息（3.1、3.4、K3） |
 | 1.120 | 2026-10-29 | 寡肽取樣分析（17.3.3）；`dock9c.dcssTopNum`：dcss 篩選的 `E_top_max` 只取 topSampleSet 的前 n 個，修正 topSampleNum 大時第 2 輪後停滯（9）；`energy.searchWeights`：9a／9b 能量以 od_0100 係數加權（8.6，預設 `none`） |
 | 1.121 | 2026-10-29 | 移除 `dock9c.dcssTopNum`；9 節步驟 6：dcss 沒有移除時大小加倍（StaM 群與各 MobM），連帶參數重算，以主機記憶體估計上限，達上限時警告並停止之後的輪次（照常寫出檢查點與 9d）；每輪各階段的時間、記憶體與數量輸出；檢查點格式 2（16.3） |
+| 1.122 | 2026-10-29 | `memory.hostLimit`：用途加上 dcss 大小上限、`auto` 取值時間、多個行程同時執行時的注意事項（13） |
