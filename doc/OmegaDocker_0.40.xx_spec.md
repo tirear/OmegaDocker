@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.125 |
+| 文件版本 | 1.126 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -3357,6 +3357,17 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
     - 取樣（min RMSD ≤ 2 Å）：Astex 78 → 80、LEADS-PEP 12 → 13；LEADS-PEP 主鏈（≤ 2.5 Å）20 → 24。
     - AD4（`E_9b`）第 1 名 ≤ 2 Å：Astex 39 → 41、LEADS-PEP 5 → 2；非原生姿態的最低能量下降（native_gap 中位數 Astex 0.56 → 0.84、LEADS-PEP 2.83 → 3.12 kcal/mol），原生姿態最低的數目 Astex 32 → 26。即搜尋找到更低能量的錯誤姿態，AD4 的排序問題更明顯。
     - od_0100 第 1 名 ≤ 2 Å：Astex 11 → 49、LEADS-PEP 0 → 5；B0 使用擬合前的係數（1.116），B1 使用 1.118 的預設係數，兩者不可直接比較。
+    - 以相同係數比較（1.126，`analyze_stageA.py --coef`：B0 的 `dG_od_0100` 以 1.118 的預設係數重算）：
+
+      | od_0100（1.118 係數） | B0 | B1 |
+      |---|---|---|
+      | Astex 第 1 名 ≤ 2 Å | 47 | 49 |
+      | Astex 原生姿態最低 | 42 | 41 |
+      | LEADS-PEP 第 1 名 ≤ 2 Å | 4 | 5 |
+      | LEADS-PEP 主鏈第 1 名 ≤ 2.5 Å | 6 | 10 |
+
+      係數的比例是以 B0 的 Astex 姿態池擬合（17.3.1），B0 的 Astex 為樣本內（交叉驗證 47–48），B1 的姿態池則沒有參與擬合。od_0100 在 B1 沒有出現 AD4 的變差（Astex、LEADS-PEP 都略好）。
+    - 以 B1 的 Astex 姿態池重新擬合排序係數（1.126，`fit_od0100.py B1 --set=astex --fix=ring --ref=od0100_B0_fit.toml`，以 17.3.1 的擬合值為起點與正則化中心）：交叉驗證第 1 名 ≤ 2 Å 為 50、49、48、50（λ 0.01、0.03、0.1、0.3），目前的預設係數為 49，沒有改善。λ 0.03 的擬合值（`work/stageA/od0100_B1_fit.toml`）在 B0 上 Astex 48、LEADS-PEP 3（主鏈 6），在 B1 上 Astex 49、LEADS-PEP 5（主鏈 7，預設 10）；寡肽變差，因此預設係數不變。
   - 1.121 的步驟 6（2B6N，`rotStep` 15、`maxRound` 4，其餘同 B0）：dcss 16 → 32 → 64，第 3 輪起 9a 使用 csgm2；以 `memory.hostLimit` 420 MiB 測試上限：16 → 32 → 48，第 4 輪已達上限而停止並執行 9d，接續時直接進行 9d。
 - 結論：
   - 以 od_0100 的權重搜尋（W0）不改善排序，`energy.searchWeights` 預設維持 `none`。
@@ -3439,7 +3450,8 @@ python3 scripts/fit_od0100.py B1 --set=astex --lambda=0.03 --fix=ring --out=work
 ```
 
 - `analyze_stageA.py`：每個項目的取樣（對接池中最小 `rmsd_ref` ≤ 2 Å）、`E_9b` 與 `dG_od_0100` 的第 1 名 RMSD、原生姿態與錯誤姿態最低能量的差（`native_gap_*`）與分類（success／refine／sampling／scoring）；LEADS-PEP 另算主鏈（N、CA、C、O，不疊合）RMSD ≤ 2.5 Å（欄位 `*_bb`）。
-- `fit_od0100.py`：od_0100 排序係數的擬合（方法見 17.3.1）。
+- `fit_od0100.py`：od_0100 排序係數的擬合（方法見 17.3.1）；`--ref=<toml>` 以該檔的係數為起點與正則化中心（預設為各執行的係數）。
+- `analyze_stageA.py <tag> --coef=<toml>`：以該檔（例如某次執行的 `params.used.toml`）的 od_0100 係數重算 `dG_od_0100` 後分析，輸出 `analysis_<tag>_coef.tsv`；用來比較以不同係數執行的結果。重算只改變各姿態間會變的項（`fit_od0100.py` 的 11 項）；同一複合物所有姿態相同的項（c0、tors、G_unbound）不重算，不影響排序與 `native_gap_*`。
 
 **可重現性**
 - GPU 版以 `atomicAdd` 累加梯度，加總順序每次可能不同，因此即使執行檔、參數、seed 都相同，結果也不保證逐位元相同（15.1.3）；不同的 GPU 型號、CUDA 版本也會不同。比較時以統計量（各分類的個數、RMSD 與能量的分布）為準，不比對個別姿態。
@@ -3607,3 +3619,4 @@ python3 scripts/fit_od0100.py B1 --set=astex --lambda=0.03 --fix=ring --out=work
 | 1.123 | 2026-10-29 | 9 節步驟 5：dcss 篩選改為移除在 topSampleSet 中沒有樣本的構型（StaM 與 MobM），包含對接樣本都被多樣性篩選跳過的構型；本輪最低能量只作為 csgm2 適應度（7.6、8.6） |
 | 1.124 | 2026-10-30 | Stage A 以 1.123 重跑（B1）的結果（17.3.3） |
 | 1.125 | 2026-10-30 | Stage A 的執行方式（17.3.4） |
+| 1.126 | 2026-10-30 | B0 以 1.118 係數重算後與 B1 比較、以 B1 重新擬合 od_0100 排序係數（不改預設）；`analyze_stageA.py --coef`、`fit_od0100.py --ref`（17.3.3、17.3.4） |
