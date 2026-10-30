@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 文件版本 | 1.124 |
+| 文件版本 | 1.125 |
 | 日期 | 2026-10-28 |
 | 程式版本號 | **0.40.0** |
 | 程式基礎 | 新架構；能量與梯度 kernel 取自 AutoDock-GPU 1.6，並移植 OmegaDocker 的修改 |
@@ -3363,6 +3363,89 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
   - 13–24 組增加構型數（C1）或讓各輪持續更換構型（D1）都有幫助，但時間增為 4–6 倍。
   - ≥ 25 組的取樣需要新的方法（例如以片段或錨點逐段對接），現有參數無法補足。
 
+#### 17.3.4 Stage A 的執行方式（1.125）
+
+供其他地方或團隊重跑 Stage A（StaM 固定，Astex 與 LEADS-PEP）驗證。腳本放在 `datasetForDockingParaOpti/scripts/`（不在本儲存庫中），以下路徑都相對於 `datasetForDockingParaOpti/`，OmegaDocker 必須放在 `../OmegaDocker_v.0.40.0/OmegaDocker/`。
+
+**需求**
+
+| 項目 | 內容 |
+|---|---|
+| 執行檔 | CUDA 版 `../OmegaDocker_v.0.40.0/OmegaDocker/build_cuda/omegadocker`（`run_stageA.py` 固定使用此路徑） |
+| 建置 | `cmake -S . -B build_cuda -DOD_CUDA=ON -DCMAKE_PREFIX_PATH="<RDKit>;<Boost>;<Eigen>"`，`cmake --build build_cuda -j`；環境與依賴套件見 15.1.1、15.2、15.3 |
+| Python | 3.6 以上；`fit_od0100.py`、`fit_affinity.py` 需要 numpy（實測 3.6.15、numpy 1.17.3） |
+| 網路 | `prep_stageA.py` 會從 RCSB 下載 mmCIF 與 CCD（快取在 `raw/rcsb/`） |
+| GPU | 實測兩張 TITAN V（12 GB）；每個行程使用一張 |
+
+**1. 原始資料**（放在 `raw/`，解壓到 `work/`）
+
+| 資料 | 檔案 | 來源 |
+|---|---|---|
+| Astex diverse set（PoseBusters 的副本，85 個） | `raw/posebusters/posebusters_paper_data.zip` | https://zenodo.org/records/8278563 |
+| LEADS-PEP（53 個） | `raw/leadspep/LEADS-PEP_inputfiles.zip` | https://doi.org/10.6084/m9.figshare.24802932.v1（檔案 https://ndownloader.figshare.com/files/43627923 ，MD5 `46a46b027c485a46a116392ae29eac1f`） |
+
+```bash
+cd work
+unzip -qo ../raw/leadspep/LEADS-PEP_inputfiles.zip
+unzip -qo ../raw/posebusters/posebusters_paper_data.zip 'astex_diverse_set/*'
+cd ..
+```
+
+**2. 準備輸入**（只需一次）
+
+```bash
+python3 scripts/prep_stageA.py            # 可加項目名稱只處理部分項目
+```
+
+輸出 `work/stageA/{astex,leadspep}/<項目>/`（`stam.cif`、`mobm.sdf` 或 `mobm.cif`、`ref.sdf`、`info.json`）與 `work/stageA/manifest.tsv`。
+
+**3. 對接**（以 B1 為例；換標籤即為另一組結果，已存在的標籤目錄會被跳過）
+
+`work/stageA/runB1.sh`：
+
+```bash
+A="--dock9b_posm=posm2_fft --mobm_dockingConfSampleNum=16 --dock9c_maxRound=10 --dock9c_topSampleNum=500 --seed=1 --cpu_threadNum=8 --topology_acceptNonPlanarOmega=true --output_minPerRank=500"
+# GPU 0：Astex，之後從尾端往前跑 LEADS-PEP；GPU 1：從開頭往後跑 LEADS-PEP
+python3 ../../scripts/run_stageA.py B1 --set=astex -- $A --gpu_device=0
+python3 ../../scripts/run_stageA.py B1 --set=leadspep --reverse=1 -- $A --gpu_device=0
+python3 ../../scripts/run_stageA.py B1 --set=leadspep -- $A --gpu_device=1
+```
+
+```bash
+cd work/stageA
+nohup ./runB1.sh 0 > /dev/null 2>&1 &
+nohup ./runB1.sh 1 > /dev/null 2>&1 &
+```
+
+- `run_stageA.py` 對每個項目：
+  - 對接盒以參考配體重原子的中心為中心，邊長 max(20, 2r + 8) Å（r 為重原子到中心的最大距離）。
+  - 先以 `posm1` 執行一次產生預設分子設定檔，再改成 StaM 所有兩面角不可動、MobM `ssType = "RAMA_AUTO"`（`--mobmSs`）。
+  - 執行 `dock`（對接）與 `native`（原生姿態 `--run_mode=localMin`），都加上 `--output_allSummary=true`。
+  - Astex 的 MobM 去除氫原子後使用。
+- 結果：`work/stageA/<set>/<項目>/B1/{dock,native}/`；每個項目一行寫在 `work/stageA/runs_B1_<set>.tsv`（`rc` 為 `0,0` 表示兩次執行都成功）；進度寫在 `B1_*.out`。
+- 兩個行程共用 LEADS-PEP：開始時建立 `B1/` 目錄，另一個行程看到就跳過，因此不會重複。
+- 中斷後重新執行同一指令即可接續已完成的項目；中斷時正在執行的項目要先刪除其 `B1/` 目錄。
+- 只有一張 GPU 時，依序執行 `--set=astex` 與 `--set=leadspep`，都用 `--gpu_device=0`。
+- `--cpu_threadNum=8` 是 16 執行緒的主機同時跑 2 個行程；合計不可超過可用 CPU 數（超過時中止，13 節）。多個行程共用主機記憶體時見 13 節（`memory.hostLimit` 對每個行程分別計算）。
+- 其他選項：`--entries=a,b`（只跑指定項目）、`--param=<toml>`（參數檔）、`--maxRot`／`--minRot`（MobM 可轉動兩面角數範圍）、`--kinds=dock` 或 `native`。
+- 預期失敗 3 個（輸入問題，與版本無關）：1K3U_IAD（StaM 含 Na，沒有 AD4 參數）、1YV3_BIT（StaM 含 V）、1R1H_BIR（StaM 中 A:714:O 與 A:718:CD1 距離 1.744 Å，小於 `energy.clashDistance`，7.9 的輸入結構檢查）。
+- 時間（1.124，兩張 TITAN V，16 執行緒）：約 22 h；每個複合物的對接平均 Astex 827 s、LEADS-PEP 1448 s。
+
+**4. 分析**
+
+```bash
+python3 scripts/analyze_stageA.py B1                 # work/stageA/analysis_B1.tsv
+python3 scripts/fit_od0100.py B1 --set=astex --lambda=0.03 --fix=ring --out=work/stageA/od0100_B1_fit.toml
+```
+
+- `analyze_stageA.py`：每個項目的取樣（對接池中最小 `rmsd_ref` ≤ 2 Å）、`E_9b` 與 `dG_od_0100` 的第 1 名 RMSD、原生姿態與錯誤姿態最低能量的差（`native_gap_*`）與分類（success／refine／sampling／scoring）；LEADS-PEP 另算主鏈（N、CA、C、O，不疊合）RMSD ≤ 2.5 Å（欄位 `*_bb`）。
+- `fit_od0100.py`：od_0100 排序係數的擬合（方法見 17.3.1）。
+
+**可重現性**
+- GPU 版以 `atomicAdd` 累加梯度，加總順序每次可能不同，因此即使執行檔、參數、seed 都相同，結果也不保證逐位元相同（15.1.3）；不同的 GPU 型號、CUDA 版本也會不同。比較時以統計量（各分類的個數、RMSD 與能量的分布）為準，不比對個別姿態。
+- dcss 大小受 `memory.hostLimit` 限制時（9 節步驟 6），取決於該主機的記憶體；執行紀錄的 `dcss size` 一行顯示每輪的大小，可據此確認是否受限。
+- 隨機數只取決於 seed 與樣本編號，與執行緒數無關（7.5）。
+
 ### 17.4 已知問題
 
 以下問題與鍵長、鍵角無法最佳化有關，0.40.x 不處理。
@@ -3523,3 +3606,4 @@ LEADS-PEP 53 個，主鏈（N、CA、C、O）RMSD ≤ 2.5 Å（不疊合）；�
 | 1.122 | 2026-10-29 | `memory.hostLimit`：用途加上 dcss 大小上限、`auto` 取值時間、多個行程同時執行時的注意事項（13） |
 | 1.123 | 2026-10-29 | 9 節步驟 5：dcss 篩選改為移除在 topSampleSet 中沒有樣本的構型（StaM 與 MobM），包含對接樣本都被多樣性篩選跳過的構型；本輪最低能量只作為 csgm2 適應度（7.6、8.6） |
 | 1.124 | 2026-10-30 | Stage A 以 1.123 重跑（B1）的結果（17.3.3） |
+| 1.125 | 2026-10-30 | Stage A 的執行方式（17.3.4） |
